@@ -1,4 +1,59 @@
 /** @type {import('tailwindcss').Config} */
+const corporatePalette = {
+  teal: {
+    50: "#eaf5f7",
+    100: "#d1e9ee",
+    200: "#a4d3dd",
+    300: "#70b8c8",
+    400: "#399bb0",
+    500: "#047ea0",
+    600: "#036984",
+    700: "#03566c",
+    800: "#034452",
+    900: "#02323d",
+    950: "#01232c",
+  },
+  green: {
+    50: "#eaf7fb",
+    100: "#d2eef7",
+    200: "#a5ddee",
+    300: "#70c6e2",
+    400: "#36add4",
+    500: "#0096d8",
+    600: "#007eb8",
+    700: "#006898",
+    800: "#005477",
+    900: "#00435e",
+    950: "#003042",
+  },
+  magenta: {
+    50: "#fbf0f5",
+    100: "#f6dce8",
+    200: "#edb8d1",
+    300: "#e28db5",
+    400: "#d9639a",
+    500: "#cf3983",
+    600: "#b72e70",
+    700: "#98275d",
+    800: "#7a214b",
+    900: "#601b3d",
+    950: "#40102a",
+  },
+  grey: {
+    50: "#f7f7f7",
+    100: "#eeeeef",
+    200: "#dcdde0",
+    300: "#c5c6c8",
+    400: "#a6a7a9",
+    500: "#808285",
+    600: "#66686a",
+    700: "#4c4e50",
+    800: "#36383a",
+    900: "#27292b",
+    950: "#191b1d",
+  },
+};
+
 export default {
   content: [
     "./index.html",
@@ -6,10 +61,29 @@ export default {
     "./src/**/*.{js,ts,jsx,tsx}",
   ],
   theme: {
-    extend: {},
+    extend: {
+      colors: {
+        corporate: corporatePalette,
+        slate: corporatePalette.grey,
+        gray: corporatePalette.grey,
+        emerald: corporatePalette.green,
+        green: corporatePalette.green,
+        teal: corporatePalette.teal,
+        blue: corporatePalette.teal,
+        cyan: corporatePalette.teal,
+        sky: corporatePalette.teal,
+        amber: corporatePalette.magenta,
+        yellow: corporatePalette.magenta,
+        orange: corporatePalette.magenta,
+        rose: corporatePalette.magenta,
+        red: corporatePalette.magenta,
+        pink: corporatePalette.magenta,
+        purple: corporatePalette.magenta,
+        violet: corporatePalette.magenta,
+      },
+    },
   },
   plugins: [
     require("tailwindcss-animate"),
   ],
 }
-

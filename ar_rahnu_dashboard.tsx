@@ -37,6 +37,8 @@ import {
   CalendarDays,
   ChevronLeft,
   ChevronRight,
+  Sun,
+  Moon,
   LogOut
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
@@ -186,6 +188,14 @@ export default function App() {
 }
 
 function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient }) {
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      return localStorage.getItem('ar-rahnu-theme') === 'dark' ? 'dark' : 'light';
+    } catch (error) {
+      console.error('Tema paparan tidak dapat dibaca:', error);
+      return 'light';
+    }
+  });
   const [session, setSession] = useState<Session | null>(null);
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -196,6 +206,27 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    document.documentElement.style.colorScheme = theme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      'content',
+      theme === 'dark' ? '#191b1d' : '#047ea0'
+    );
+  }, [theme]);
+
+  const handleToggleTheme = () => {
+    setTheme(currentTheme => {
+      const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      try {
+        localStorage.setItem('ar-rahnu-theme', nextTheme);
+      } catch (error) {
+        console.error('Pilihan tema tidak dapat disimpan:', error);
+      }
+      return nextTheme;
+    });
+  };
 
   useEffect(() => {
     const standaloneQuery = window.matchMedia('(display-mode: standalone)');
@@ -300,14 +331,22 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
       canInstall={Boolean(deferredInstallPrompt)}
       isAppInstalled={isAppInstalled}
       onInstallApp={handleInstallApp}
+      theme={theme}
+      onToggleTheme={handleToggleTheme}
     />;
   }
 
   return (
     <div className="min-h-[100dvh] flex items-center justify-center bg-slate-50 p-4 sm:p-6 font-sans">
       <form onSubmit={handleAuthSubmit} className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 sm:p-8 shadow-sm">
+        <div className="mb-3 flex justify-end">
+          <ThemeToggle theme={theme} onToggle={handleToggleTheme} />
+        </div>
         <div className="mb-6">
-          <p className="text-sm font-bold uppercase tracking-wider text-emerald-700">Ar-Rahnu Refinance System</p>
+          <div className="mb-4 flex items-center gap-3">
+            <img src="/icons/goldbar-logo.png" alt="Logo Ar-Rahnu" className="h-14 w-14 rounded-xl object-contain" />
+            <p className="text-sm font-bold uppercase tracking-wider text-emerald-700">Ar-Rahnu Refinance System</p>
+          </div>
           <h1 className="mt-2 text-2xl font-bold text-slate-800">{authMode === 'sign-in' ? 'Log masuk Supabase' : 'Cipta akaun Supabase'}</h1>
           <p className="mt-2 text-sm text-slate-500">Data dashboard disimpan dalam ruang peribadi akaun anda.</p>
         </div>
@@ -328,7 +367,23 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
   );
 }
 
-function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isAppInstalled, onInstallApp }: {
+function ThemeToggle({ theme, onToggle }: { theme: 'light' | 'dark'; onToggle: () => void }) {
+  const isDark = theme === 'dark';
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-label={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
+      title={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
+      className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100"
+    >
+      {isDark ? <Sun size={17} /> : <Moon size={17} />}
+      <span className="hidden sm:inline">{isDark ? 'Mod terang' : 'Mod gelap'}</span>
+    </button>
+  );
+}
+
+function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isAppInstalled, onInstallApp, theme, onToggleTheme }: {
   user: User;
   supabaseClient: SupabaseClient;
   onSignOut: () => void;
@@ -336,6 +391,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   canInstall: boolean;
   isAppInstalled: boolean;
   onInstallApp: () => Promise<void>;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
 }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [transactionStatusFilter, setTransactionStatusFilter] = useState('Semua');
@@ -646,8 +703,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
   const [isMaintenanceMenuOpen, setIsMaintenanceMenuOpen] = useState(true);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
+  const isSidebarCompact = !isSidebarExpanded && !isSidebarOpen;
 
   const handleInstallButtonClick = () => {
     if (canInstall) {
@@ -1288,86 +1347,163 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       )}
 
       {/* SIDEBAR */}
-      <aside className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-transform duration-300 ease-in-out w-64 max-w-[85vw] bg-emerald-950 text-emerald-50 flex flex-col shadow-2xl z-50 shrink-0`}>
-        <div className="p-6 flex items-center justify-between border-b border-emerald-800/50">
+      <aside
+        onMouseEnter={() => {
+          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(true);
+        }}
+        onMouseLeave={() => {
+          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(false);
+        }}
+        onFocusCapture={() => {
+          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(true);
+        }}
+        onBlurCapture={event => {
+          if (!event.currentTarget.contains(event.relatedTarget) && window.matchMedia('(min-width: 1024px)').matches) {
+            setIsSidebarExpanded(false);
+          }
+        }}
+        className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-[width,transform] duration-300 ease-in-out w-64 max-w-[85vw] ${isSidebarExpanded ? 'lg:w-64' : 'lg:w-20'} ${theme === 'dark' ? 'bg-corporate-teal-950 text-slate-100 border-corporate-teal-800' : 'bg-white text-slate-800 border-slate-200'} border-r flex flex-col shadow-2xl z-50 shrink-0`}
+      >
+        <div className={`flex items-center border-b ${isSidebarCompact ? 'justify-center px-3 py-5 lg:justify-center' : 'justify-between p-6'} ${theme === 'dark' ? 'border-corporate-teal-800/50' : 'border-slate-200'}`}>
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-lg">
-              <Building2 size={20} className="text-emerald-950" />
+            <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
+              <span aria-hidden="true" className={`absolute inset-0 rounded-full blur-md ${theme === 'dark' ? 'bg-gradient-to-br from-corporate-magenta-400/40 via-corporate-teal-400/20 to-transparent' : ''}`} />
+              <img src="/icons/goldbar-logo.png" alt="Logo Ar-Rahnu" className={`relative z-10 h-full w-full object-contain ${theme === 'dark' ? 'drop-shadow-[0_0_8px_rgba(207,57,131,0.65)]' : ''}`} />
             </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">Ar-Rahnu</h1>
-              <p className="text-xs text-emerald-400/80 font-medium">Refinance System</p>
+            <div className={isSidebarCompact ? 'lg:hidden' : ''}>
+              <h1 className={`text-xl font-bold tracking-tight ${
+                theme === 'dark'
+                  ? 'bg-gradient-to-r from-corporate-magenta-200 to-corporate-magenta-400 bg-clip-text text-transparent drop-shadow-[0_0_8px_rgba(207,57,131,0.65)]'
+                  : 'text-corporate-magenta-700'
+              }`}>Ar-Rahnu</h1>
+              <p className={`text-xs font-medium ${
+                theme === 'dark'
+                  ? 'bg-gradient-to-r from-corporate-magenta-300 to-corporate-magenta-500 bg-clip-text text-transparent drop-shadow-[0_0_6px_rgba(207,57,131,0.55)]'
+                  : 'text-corporate-magenta-600'
+              }`}>Refinance System</p>
             </div>
           </div>
-          <button className="lg:hidden text-emerald-400 hover:text-white transition-colors" onClick={() => setIsSidebarOpen(false)}>
+          <button aria-label="Tutup menu" className={`lg:hidden transition-colors ${theme === 'dark' ? 'text-slate-300 hover:text-white' : 'text-slate-500 hover:text-slate-900'}`} onClick={() => setIsSidebarOpen(false)}>
             <X size={24} />
           </button>
         </div>
 
-        <nav className="flex-1 px-4 py-6 space-y-2 overflow-y-auto custom-scrollbar">
-          <NavItem icon={<LayoutDashboard size={20} />} label="Dashboard" isActive={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
-          <NavItem icon={<Database size={20} />} label="Asset Record" isActive={activeTab === 'assets'} onClick={() => { setActiveTab('assets'); setIsSidebarOpen(false); }} />
-          <NavItem icon={<ArrowRightLeft size={20} />} label="Transactions" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
+        <nav className={`flex-1 py-6 space-y-2 overflow-y-auto custom-scrollbar ${isSidebarCompact ? 'px-3' : 'px-4'}`}>
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<LayoutDashboard size={20} />} label="Dashboard" isActive={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<Database size={20} />} label="Asset Record" isActive={activeTab === 'assets'} onClick={() => { setActiveTab('assets'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<ArrowRightLeft size={20} />} label="Transactions" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
           <div>
             <button
               type="button"
               aria-expanded={isMaintenanceMenuOpen}
+              aria-label="Selenggara"
+              title={isSidebarCompact ? 'Selenggara' : undefined}
               onClick={() => setIsMaintenanceMenuOpen(open => !open)}
-              className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 ${
+              className={`w-full flex items-center rounded-xl transition-all duration-200 ${isSidebarCompact ? 'justify-center px-2' : 'justify-between px-4'} py-3 ${
                 activeTab === 'suppliers' || activeTab === 'institutions'
-                  ? 'bg-emerald-800/80 text-white font-semibold shadow-inner border border-emerald-700/50'
-                  : 'text-emerald-100/70 hover:bg-emerald-900 hover:text-white'
+                  ? theme === 'dark'
+                    ? 'bg-corporate-teal-800 text-white font-semibold shadow-inner border border-corporate-teal-700'
+                    : 'bg-corporate-teal-100 text-corporate-teal-800 font-semibold border border-corporate-teal-200'
+                  : theme === 'dark'
+                    ? 'text-slate-200 hover:bg-corporate-teal-900 hover:text-white'
+                    : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
               }`}
             >
-              <span className="flex items-center space-x-3">
-                <span className={activeTab === 'suppliers' || activeTab === 'institutions' ? 'text-amber-400' : 'text-emerald-400'}>
+              <span className={`flex items-center ${isSidebarCompact ? '' : 'space-x-3'}`}>
+                <span className={activeTab === 'suppliers' || activeTab === 'institutions'
+                  ? theme === 'dark' ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'
+                  : theme === 'dark' ? 'text-corporate-teal-300' : 'text-corporate-teal-600'}>
                   <Settings2 size={20} />
                 </span>
-                <span>Selenggara</span>
+                <span className={isSidebarCompact ? 'lg:hidden' : ''}>Selenggara</span>
               </span>
-              <ChevronDown size={16} className={`transition-transform ${isMaintenanceMenuOpen ? '' : '-rotate-90'}`} />
+              <ChevronDown size={16} className={`transition-transform ${isMaintenanceMenuOpen ? '' : '-rotate-90'} ${isSidebarCompact ? 'lg:hidden' : ''}`} />
             </button>
-            {isMaintenanceMenuOpen && (
-              <div className="mt-1 ml-4 pl-3 border-l border-emerald-800/70 space-y-1">
+            {isMaintenanceMenuOpen && !isSidebarCompact && (
+              <div className={`mt-1 ml-4 pl-3 border-l space-y-1 ${theme === 'dark' ? 'border-corporate-teal-700' : 'border-slate-300'}`}>
                 <button
                   type="button"
                   onClick={() => { setActiveTab('suppliers'); setIsSidebarOpen(false); }}
                   className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                    activeTab === 'suppliers' ? 'bg-emerald-800/70 text-white font-semibold' : 'text-emerald-100/70 hover:bg-emerald-900 hover:text-white'
+                    activeTab === 'suppliers'
+                      ? theme === 'dark' ? 'bg-corporate-teal-800 text-white font-semibold' : 'bg-corporate-teal-100 text-corporate-teal-800 font-semibold'
+                      : theme === 'dark' ? 'text-slate-200 hover:bg-corporate-teal-900 hover:text-white' : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
                   }`}
                 >
-                  <Store size={17} className={activeTab === 'suppliers' ? 'text-amber-400' : 'text-emerald-400'} />
+                  <Store size={17} className={activeTab === 'suppliers'
+                    ? theme === 'dark' ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'
+                    : theme === 'dark' ? 'text-corporate-teal-300' : 'text-corporate-teal-600'} />
                   <span>Pembekal</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => { setActiveTab('institutions'); setIsSidebarOpen(false); }}
                   className={`w-full flex items-center space-x-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                    activeTab === 'institutions' ? 'bg-emerald-800/70 text-white font-semibold' : 'text-emerald-100/70 hover:bg-emerald-900 hover:text-white'
+                    activeTab === 'institutions'
+                      ? theme === 'dark' ? 'bg-corporate-teal-800 text-white font-semibold' : 'bg-corporate-teal-100 text-corporate-teal-800 font-semibold'
+                      : theme === 'dark' ? 'text-slate-200 hover:bg-corporate-teal-900 hover:text-white' : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
                   }`}
                 >
-                  <Building2 size={17} className={activeTab === 'institutions' ? 'text-amber-400' : 'text-emerald-400'} />
+                  <Building2 size={17} className={activeTab === 'institutions'
+                    ? theme === 'dark' ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'
+                    : theme === 'dark' ? 'text-corporate-teal-300' : 'text-corporate-teal-600'} />
                   <span>Institusi &amp; Koperasi</span>
                 </button>
               </div>
             )}
           </div>
-          <NavItem icon={<BrainCircuit size={20} />} label="AI Predictions" isActive={activeTab === 'ai'} onClick={() => { setActiveTab('ai'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<BrainCircuit size={20} />} label="AI Predictions" isActive={activeTab === 'ai'} onClick={() => { setActiveTab('ai'); setIsSidebarOpen(false); }} />
         </nav>
 
-        <div className="p-4 m-4 bg-emerald-900/50 rounded-xl border border-emerald-800/50 hidden sm:block">
-          <div className="flex items-center space-x-2 text-amber-400 mb-2">
-            <Sparkles size={16} />
-            <span className="text-sm font-semibold">EGM Engine Active</span>
-          </div>
-          <p className="text-xs text-emerald-300/70">System is monitoring market prices to find optimal refinancing windows.</p>
+        <div className="space-y-3 p-3 sm:p-4">
+          {!isSidebarCompact && (
+            <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-corporate-teal-900/50 border-corporate-teal-800/50' : 'bg-slate-50 border-slate-200'}`}>
+              <div className={`mb-2 flex items-center space-x-2 ${theme === 'dark' ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'}`}>
+                <Sparkles size={16} />
+                <span className="text-sm font-semibold">EGM Engine Active</span>
+              </div>
+              <p className={`text-xs ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>System is monitoring market prices to find optimal refinancing windows.</p>
+            </div>
+          )}
+          {isSidebarCompact ? (
+            <button
+              type="button"
+              onClick={onToggleTheme}
+              aria-label={theme === 'dark' ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
+              title={theme === 'dark' ? 'Mod terang' : 'Mod gelap'}
+              className={`mx-auto flex h-11 w-11 items-center justify-center rounded-xl border transition-colors ${theme === 'dark' ? 'border-corporate-teal-700 text-corporate-magenta-300 hover:bg-corporate-teal-900' : 'border-slate-200 text-corporate-teal-700 hover:bg-slate-100'}`}
+            >
+              {theme === 'dark' ? <Sun size={19} /> : <Moon size={19} />}
+            </button>
+          ) : (
+            <div className={`grid grid-cols-2 gap-1 rounded-xl border p-1 ${theme === 'dark' ? 'border-corporate-teal-700 bg-corporate-teal-900/60' : 'border-slate-200 bg-slate-100'}`}>
+              <button
+                type="button"
+                aria-pressed={theme === 'light'}
+                onClick={() => { if (theme !== 'light') onToggleTheme(); }}
+                className={`flex items-center justify-center gap-2 rounded-lg px-2 py-2 text-sm font-medium transition-colors ${theme === 'light' ? 'bg-white text-corporate-teal-700 shadow-sm' : 'text-slate-300 hover:bg-corporate-teal-800 hover:text-white'}`}
+              >
+                <Sun size={16} />
+                <span>Light</span>
+              </button>
+              <button
+                type="button"
+                aria-pressed={theme === 'dark'}
+                onClick={() => { if (theme !== 'dark') onToggleTheme(); }}
+                className={`flex items-center justify-center gap-2 rounded-lg px-2 py-2 text-sm font-medium transition-colors ${theme === 'dark' ? 'bg-corporate-teal-800 text-white shadow-sm' : 'text-slate-500 hover:bg-white hover:text-slate-800'}`}
+              >
+                <Moon size={16} />
+                <span>Dark</span>
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
       {/* MAIN CONTENT */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col h-full w-full lg:w-auto overflow-hidden">
         {/* HEADER */}
-        <header className="h-16 sm:h-20 bg-white/80 backdrop-blur-md border-b border-slate-200 flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0">
+        <header className="h-16 sm:h-20 bg-white/80 backdrop-blur-md border-b-2 border-corporate-teal-500 flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0">
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
             <button
               className="lg:hidden p-2 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors"
@@ -1380,6 +1516,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1 sm:gap-2 md:gap-4">
+            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
             {!isAppInstalled && (
               <>
                 <button
@@ -1591,7 +1728,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                           <div key={tx.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
                             <div className="min-w-0">
                               <p className="text-sm font-bold text-slate-800">Surat #{tx.refNo} · {tx.institution}</p>
-                              <p className="text-xs text-slate-500">
+                              <p className="maturity-alert-detail text-xs text-slate-500">
                                 Matang {new Date(`${tx.redemptionDate}T00:00:00`).toLocaleDateString('ms-MY', { day: 'numeric', month: 'long', year: 'numeric' })} · {formatRM(Number(tx.redemption) || 0)}
                               </p>
                             </div>
@@ -1626,15 +1763,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                       <AreaChart data={transactions}>
                         <defs>
                           <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                            <stop offset="5%" stopColor="#0096d8" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#0096d8" stopOpacity={0} />
                           </linearGradient>
                         </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
+                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
                         <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                        <Area type="monotone" dataKey="profit" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorProfit)" />
+                        <Area type="monotone" dataKey="profit" stroke="#0096d8" strokeWidth={3} fillOpacity={1} fill="url(#colorProfit)" />
                       </AreaChart>
                     </ResponsiveContainer>
                   </div>
@@ -1647,13 +1784,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                   <div className="h-64 sm:h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={transactions}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="institution" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
-                        <Tooltip cursor={{ fill: '#f1f5f9' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
+                        <XAxis dataKey="institution" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
+                        <Tooltip cursor={{ fill: '#eeeeef' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
                         <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                        <Bar dataKey="loan" name="Loan (RM)" fill="#0f766e" radius={[4, 4, 0, 0]} maxBarSize={50} />
-                        <Bar dataKey="redemption" name="Redemption (RM)" fill="#cbd5e1" radius={[4, 4, 0, 0]} maxBarSize={50} />
+                        <Bar dataKey="loan" name="Loan (RM)" fill="#047ea0" radius={[4, 4, 0, 0]} maxBarSize={50} />
+                        <Bar dataKey="redemption" name="Redemption (RM)" fill="#a6a7a9" radius={[4, 4, 0, 0]} maxBarSize={50} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
@@ -1685,18 +1822,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                       <AreaChart data={cumulativeMarhunData}>
                         <defs>
                           <linearGradient id="colorMarhunAccumulated" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#f59e0b" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#f59e0b" stopOpacity={0} />
+                            <stop offset="5%" stopColor="#047ea0" stopOpacity={0.3} />
+                            <stop offset="95%" stopColor="#047ea0" stopOpacity={0} />
                           </linearGradient>
                         </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} tickFormatter={value => `RM${Number(value).toLocaleString('en-MY')}`} />
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
+                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
+                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} tickFormatter={value => `RM${Number(value).toLocaleString('en-MY')}`} />
                         <Tooltip
                           formatter={value => [formatRM(Number(value)), 'Nilai Marhun terkumpul']}
                           contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                         />
-                        <Area type="monotone" dataKey="accumulatedValue" name="Nilai Marhun terkumpul" stroke="#d97706" strokeWidth={3} fillOpacity={1} fill="url(#colorMarhunAccumulated)" />
+                        <Area type="monotone" dataKey="accumulatedValue" name="Nilai Marhun terkumpul" stroke="#047ea0" strokeWidth={3} fillOpacity={1} fill="url(#colorMarhunAccumulated)" />
                       </AreaChart>
                     </ResponsiveContainer>
                   )}
@@ -1913,7 +2050,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                           <td className="p-4">
                             <span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200/90 px-2.5 py-1 rounded-md shadow-xs inline-flex items-center space-x-1.5">
                               <Tag size={13} className="text-amber-600 shrink-0" />
-                              <span>{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
+                              <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
                             </span>
                           </td>
                           <td className="p-4 text-slate-600 font-medium">{asset.date}</td>
@@ -2036,7 +2173,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                     <tbody className="divide-y divide-slate-100">
                       {filteredSuppliers.map(supplier => (
                         <tr key={supplier.id} className="hover:bg-slate-50/50 transition-colors group">
-                          <td className="p-4"><span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200 px-2.5 py-1 rounded-md">{supplier.code}</span></td>
+                          <td className="p-4"><span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200 px-2.5 py-1 rounded-md"><span className="code-badge-label">{supplier.code}</span></span></td>
                           <td className="p-4 font-bold text-slate-800">{supplier.name}</td>
                           <td className="p-4"><span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-slate-100 text-slate-700 border border-slate-200">{supplier.category || '-'}</span></td>
                           <td className="p-4 text-sm text-slate-600 max-w-xs truncate" title={supplier.products}>{supplier.products || '-'}</td>
@@ -2333,14 +2470,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                   <div className="h-72 sm:h-80">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={dynamicAiData}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} dy={10} />
-                        <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 12 }} />
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
+                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
+                        <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
                         <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
                         <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                        <ReferenceLine x="Hari Ini" stroke="#10b981" strokeDasharray="3 3" label={{ position: 'top', value: 'Hari Ini', fill: '#0f766e', fontSize: 12, fontWeight: 'bold' }} />
-                        <Line type="monotone" dataKey="actual" name="Actual Price" stroke="#0f766e" strokeWidth={3} dot={{ r: 4, fill: '#0f766e', strokeWidth: 2, stroke: '#fff' }} />
-                        <Line type="monotone" dataKey="predicted" name="Ramalan AI Mingguan" stroke="#f59e0b" strokeWidth={3} strokeDasharray="5 5" dot={{ r: 3, fill: '#f59e0b', strokeWidth: 2, stroke: '#fff' }} />
+                        <ReferenceLine x="Hari Ini" stroke="#0096d8" strokeDasharray="3 3" label={{ position: 'top', value: 'Hari Ini', fill: '#047ea0', fontSize: 12, fontWeight: 'bold' }} />
+                        <Line type="monotone" dataKey="actual" name="Actual Price" stroke="#047ea0" strokeWidth={3} dot={{ r: 4, fill: '#047ea0', strokeWidth: 2, stroke: '#fff' }} />
+                        <Line type="monotone" dataKey="predicted" name="Ramalan AI Mingguan" stroke="#cf3983" strokeWidth={3} strokeDasharray="5 5" dot={{ r: 3, fill: '#cf3983', strokeWidth: 2, stroke: '#fff' }} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -2531,43 +2668,68 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
 function StatCard({ title, value, icon, trend, color }) {
   const colorMap = {
-    emerald: 'bg-emerald-100 text-emerald-600',
-    amber: 'bg-amber-100 text-amber-600',
-    blue: 'bg-blue-100 text-blue-600',
-    rose: 'bg-rose-100 text-rose-600',
+    emerald: {
+      badge: 'bg-corporate-green-100 text-corporate-green-800',
+      icon: 'bg-corporate-green-500 text-white',
+    },
+    amber: {
+      badge: 'bg-corporate-magenta-100 text-corporate-magenta-800',
+      icon: 'bg-corporate-magenta-500 text-white',
+    },
+    blue: {
+      badge: 'bg-corporate-teal-100 text-corporate-teal-800',
+      icon: 'bg-corporate-teal-500 text-white',
+    },
+    rose: {
+      badge: 'bg-corporate-magenta-100 text-corporate-magenta-800',
+      icon: 'bg-corporate-magenta-500 text-white',
+    },
   };
+  const colors = colorMap[color] || colorMap.blue;
 
   return (
-    <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 flex items-start justify-between group hover:shadow-md transition-all">
-      <div>
-        <p className="text-sm font-medium text-slate-500 mb-1">{title}</p>
-        <h3 className="text-3xl font-bold text-slate-800 tracking-tight">{value}</h3>
-        <p className={`text-xs font-semibold mt-2 inline-block px-2 py-1 rounded-md ${colorMap[color]}`}>
+    <div className="flex min-w-0 items-start gap-2 rounded-2xl border border-slate-100 bg-white p-3 shadow-sm transition-shadow group hover:shadow-md sm:gap-3 sm:p-4 lg:p-5">
+      <div className="min-w-0 flex-1">
+        <p className="mb-1 text-[0.7rem] font-medium leading-snug text-slate-500 sm:text-xs lg:text-sm">{title}</p>
+        <h3 className="whitespace-nowrap text-base font-bold leading-tight tracking-tight text-slate-800 sm:text-lg xl:text-xl 2xl:text-2xl">{value}</h3>
+        <p className={`mt-2 inline-block max-w-full rounded-md px-2 py-1 text-[0.65rem] font-semibold leading-snug sm:text-xs ${colors.badge}`}>
           {trend}
         </p>
       </div>
-      <div className={`p-4 rounded-xl ${colorMap[color].replace('text-', 'bg-').replace('100', '50')} ${colorMap[color].replace('bg-', 'text-').replace('100', '600')}`}>
+      <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg shadow-sm sm:h-10 sm:w-10 sm:rounded-xl lg:h-11 lg:w-11 [&>svg]:h-4 [&>svg]:w-4 sm:[&>svg]:h-5 sm:[&>svg]:w-5 lg:[&>svg]:h-6 lg:[&>svg]:w-6 ${colors.icon}`}>
         {icon}
       </div>
     </div>
   );
 }
 
-function NavItem({ icon, label, isActive, onClick, badge = 0 }) {
+function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', compact = false }) {
+  const isDark = theme === 'dark';
   return (
     <button
+      type="button"
       onClick={onClick}
-      className={`w-full flex items-center space-x-3 px-4 py-3 rounded-xl transition-all duration-200 ${isActive
-          ? 'bg-emerald-800/80 text-white font-semibold shadow-inner border border-emerald-700/50'
-          : 'text-emerald-100/70 hover:bg-emerald-900 hover:text-white'
+      aria-label={label}
+      title={compact ? label : undefined}
+      className={`relative w-full flex items-center rounded-xl py-3 transition-all duration-200 ${compact ? 'justify-center px-2 lg:px-2' : 'space-x-3 px-4'} ${isActive
+          ? isDark
+            ? 'bg-corporate-teal-800 text-white font-semibold shadow-inner border border-corporate-teal-700'
+            : 'bg-corporate-teal-100 text-corporate-teal-800 font-semibold border border-corporate-teal-200'
+          : isDark
+            ? 'text-slate-200 hover:bg-corporate-teal-900 hover:text-white'
+            : 'text-slate-700 hover:bg-slate-100 hover:text-slate-900'
         }`}
     >
-      <div className={`${isActive ? 'text-amber-400' : 'text-emerald-400'}`}>
+      <div className={`shrink-0 ${isActive
+        ? isDark ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'
+        : isDark ? 'text-corporate-teal-300' : 'text-corporate-teal-600'}`}>
         {icon}
       </div>
-      <span className="flex-1 text-left">{label}</span>
+      <span className={`min-w-0 flex-1 text-left ${compact ? 'lg:hidden' : ''}`}>{label}</span>
       {badge > 0 && (
-        <span className="min-w-5 h-5 px-1 rounded-full bg-amber-500 text-emerald-950 text-xs font-black flex items-center justify-center">
+        <span className={`min-w-5 h-5 px-1 rounded-full text-xs font-black flex items-center justify-center ${
+          isDark ? 'bg-corporate-magenta-500 text-white' : 'bg-corporate-magenta-100 text-corporate-magenta-800'
+        } ${compact ? 'absolute -right-1 -top-1 lg:min-w-4 lg:h-4' : ''}`}>
           {badge}
         </span>
       )}

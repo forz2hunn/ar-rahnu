@@ -1,7 +1,8 @@
-const CACHE_NAME = 'ar-rahnu-shell-v1';
+const CACHE_NAME = 'ar-rahnu-shell-v3';
 const APP_SHELL = [
   '/',
   '/manifest.webmanifest',
+  '/icons/goldbar-logo.png',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
   '/icons/icon-maskable-512.png',

@@ -2,6 +2,234 @@
 @tailwind components;
 @tailwind utilities;
 
+html.dark {
+  color-scheme: dark;
+  background-color: #191b1d;
+}
+
+html.dark body {
+  background-color: #191b1d;
+  color: #eeeeef;
+}
+
+html.dark .bg-white,
+html.dark [class~="bg-white/80"] {
+  background-color: #27292b !important;
+}
+
+html.dark .bg-slate-50,
+html.dark .bg-gray-50 {
+  background-color: #191b1d !important;
+}
+
+html.dark .bg-slate-100,
+html.dark .bg-gray-100 {
+  background-color: #36383a !important;
+}
+
+html.dark .bg-slate-200,
+html.dark .bg-gray-200 {
+  background-color: #4c4e50 !important;
+}
+
+html.dark .bg-slate-900 {
+  background-color: #191b1d !important;
+}
+
+html.dark [class*="bg-emerald-50"],
+html.dark [class*="bg-green-50"] {
+  background-color: #003042 !important;
+}
+
+html.dark [class*="bg-emerald-100"],
+html.dark [class*="bg-green-100"] {
+  background-color: #00435e !important;
+}
+
+html.dark [class*="bg-blue-50"],
+html.dark [class*="bg-teal-50"],
+html.dark [class*="bg-cyan-50"],
+html.dark [class*="bg-sky-50"] {
+  background-color: #02323d !important;
+}
+
+html.dark [class*="bg-blue-100"],
+html.dark [class*="bg-teal-100"],
+html.dark [class*="bg-cyan-100"],
+html.dark [class*="bg-sky-100"] {
+  background-color: #034452 !important;
+}
+
+html.dark [class*="bg-amber-50"],
+html.dark [class*="bg-yellow-50"],
+html.dark [class*="bg-orange-50"],
+html.dark [class*="bg-rose-50"],
+html.dark [class*="bg-red-50"],
+html.dark [class*="bg-pink-50"],
+html.dark [class*="bg-purple-50"],
+html.dark [class*="bg-violet-50"] {
+  background-color: #40102a !important;
+}
+
+html.dark [class*="bg-amber-100"],
+html.dark [class*="bg-yellow-100"],
+html.dark [class*="bg-orange-100"],
+html.dark [class*="bg-rose-100"],
+html.dark [class*="bg-red-100"],
+html.dark [class*="bg-pink-100"],
+html.dark [class*="bg-purple-100"],
+html.dark [class*="bg-violet-100"] {
+  background-color: #601b3d !important;
+}
+
+html.dark [class*="text-slate-900"],
+html.dark [class*="text-slate-800"],
+html.dark [class*="text-gray-900"],
+html.dark [class*="text-gray-800"] {
+  color: #f7f7f7 !important;
+}
+
+html.dark [class*="text-slate-700"],
+html.dark [class*="text-gray-700"] {
+  color: #dcdde0 !important;
+}
+
+html.dark [class*="text-slate-600"],
+html.dark [class*="text-gray-600"] {
+  color: #c5c6c8 !important;
+}
+
+html.dark [class*="text-slate-500"],
+html.dark [class*="text-slate-400"],
+html.dark [class*="text-gray-500"],
+html.dark [class*="text-gray-400"] {
+  color: #a6a7a9 !important;
+}
+
+html.dark [class*="text-emerald-700"],
+html.dark [class*="text-emerald-800"],
+html.dark [class*="text-green-700"],
+html.dark [class*="text-green-800"] {
+  color: #70c6e2 !important;
+}
+
+html.dark [class*="text-blue-700"],
+html.dark [class*="text-blue-800"],
+html.dark [class*="text-teal-700"],
+html.dark [class*="text-teal-800"],
+html.dark [class*="text-cyan-700"],
+html.dark [class*="text-sky-700"] {
+  color: #70b8c8 !important;
+}
+
+html.dark [class*="text-amber-700"],
+html.dark [class*="text-amber-800"],
+html.dark [class*="text-yellow-700"],
+html.dark [class*="text-orange-700"],
+html.dark [class*="text-rose-700"],
+html.dark [class*="text-red-700"],
+html.dark [class*="text-pink-700"],
+html.dark [class*="text-purple-700"],
+html.dark [class*="text-violet-700"] {
+  color: #edb8d1 !important;
+}
+
+html.dark .code-badge-label {
+  color: #ffffff !important;
+}
+
+html.dark .maturity-alert-detail {
+  color: #facc15 !important;
+  font-weight: 700;
+}
+
+html.dark [class*="border-slate-100"],
+html.dark [class*="border-slate-200"],
+html.dark [class*="border-gray-100"],
+html.dark [class*="border-gray-200"] {
+  border-color: #4c4e50 !important;
+}
+
+html.dark [class*="border-slate-300"],
+html.dark [class*="border-gray-300"] {
+  border-color: #66686a !important;
+}
+
+html.dark [class*="border-emerald-"],
+html.dark [class*="border-green-"] {
+  border-color: #036984 !important;
+}
+
+html.dark [class*="border-blue-"],
+html.dark [class*="border-teal-"],
+html.dark [class*="border-cyan-"],
+html.dark [class*="border-sky-"] {
+  border-color: #03566c !important;
+}
+
+html.dark [class*="border-amber-"],
+html.dark [class*="border-yellow-"],
+html.dark [class*="border-orange-"],
+html.dark [class*="border-rose-"],
+html.dark [class*="border-red-"],
+html.dark [class*="border-pink-"],
+html.dark [class*="border-purple-"],
+html.dark [class*="border-violet-"] {
+  border-color: #98275d !important;
+}
+
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  background-color: #27292b;
+  border-color: #66686a;
+  color: #eeeeef;
+}
+
+html.dark input::placeholder,
+html.dark textarea::placeholder {
+  color: #a6a7a9;
+}
+
+html.dark option {
+  background-color: #27292b;
+  color: #eeeeef;
+}
+
+html.dark [class*="hover:bg-slate-"]:hover,
+html.dark [class*="hover:bg-gray-"]:hover,
+html.dark [class*="hover:bg-white/"]:hover {
+  background-color: #36383a !important;
+}
+
+html.dark .bg-gradient-to-br {
+  background-image: linear-gradient(to bottom right, #02323d, #02323d, #034452) !important;
+}
+
+html.dark .recharts-cartesian-grid line {
+  stroke: #4c4e50 !important;
+}
+
+html.dark .recharts-cartesian-axis-tick-value,
+html.dark .recharts-cartesian-axis-tick-value tspan,
+html.dark .recharts-legend-item-text,
+html.dark .recharts-tooltip-label,
+html.dark .recharts-tooltip-item {
+  fill: #c5c6c8 !important;
+  color: #c5c6c8 !important;
+}
+
+html.dark .recharts-reference-line .recharts-label,
+html.dark .recharts-reference-line .recharts-label tspan {
+  fill: #70b8c8 !important;
+}
+
+html.dark .recharts-default-tooltip {
+  background-color: #27292b !important;
+  border-color: #4c4e50 !important;
+  color: #eeeeef !important;
+}
+
 /* Custom Scrollbar */
 .custom-scrollbar::-webkit-scrollbar {
   width: 0.375rem;
@@ -13,10 +241,10 @@
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(100, 116, 139, 0.2);
+  background: rgba(128, 130, 133, 0.2);
   border-radius: 9999px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(100, 116, 139, 0.4);
+  background: rgba(128, 130, 133, 0.4);
 }
