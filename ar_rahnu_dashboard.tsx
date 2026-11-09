@@ -39,7 +39,12 @@ import {
   ChevronRight,
   Sun,
   Moon,
-  LogOut
+  BellOff,
+  LogOut,
+  Users,
+  Mail,
+  KeyRound,
+  UserRound
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { supabaseClient } from './src/lib/supabase';
@@ -63,6 +68,29 @@ const initialSuppliers = [
 
 // --- UTILS & HELPERS ---
 const transactionStatusOptions = ['Pajakan Asal', 'Salin', 'OL', 'Tebus Cash', 'Tebus EDT'];
+type OrganizationRole = 'Admin' | 'Manager' | 'Staff';
+type OrganizationMembership = {
+  organization_id: string;
+  role: OrganizationRole;
+  active: boolean;
+  organization?: { name: string } | null;
+};
+const parseOrganizationMembership = (value: unknown): OrganizationMembership | null => {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.organization_id !== 'string' ||
+      typeof record.active !== 'boolean' ||
+      (record.role !== 'Admin' && record.role !== 'Manager' && record.role !== 'Staff')) return null;
+  const organization = record.organization && typeof record.organization === 'object'
+    ? record.organization as Record<string, unknown>
+    : null;
+  return {
+    organization_id: record.organization_id,
+    role: record.role,
+    active: record.active,
+    organization: organization && typeof organization.name === 'string' ? { name: organization.name } : null
+  };
+};
 const getTransactionStatus = (transaction) => {
   if (transactionStatusOptions.includes(transaction.transactionStatus)) return transaction.transactionStatus;
   const type = String(transaction.type || '').toLowerCase();
@@ -72,6 +100,28 @@ const getTransactionStatus = (transaction) => {
   if (type.includes('tebus') && type.includes('edt')) return 'Tebus EDT';
   if (type.includes('tebus')) return 'Tebus Cash';
   return 'Lain-lain';
+};
+const getTransactionAssetIds = (transaction) =>
+  transaction.selectedAssetIds || (transaction.selectedAssetId ? [transaction.selectedAssetId] : []);
+const getCheckedInAssetIds = (transactions) => new Set(
+  transactions
+    .filter(transaction =>
+      !['Selesai', 'Ditebus'].includes(transaction.status) &&
+      !String(transaction.type || '').toLowerCase().includes('tebus')
+    )
+    .flatMap(getTransactionAssetIds)
+    .map(String)
+);
+const syncAssetStatuses = (assets, transactions) => {
+  const checkedInAssetIds = getCheckedInAssetIds(transactions);
+  let changed = false;
+  const nextAssets = assets.map(asset => {
+    const status = checkedInAssetIds.has(String(asset.id)) ? 'Dalam Ar-Rahnu' : 'EDT';
+    if (asset.status === status) return asset;
+    changed = true;
+    return { ...asset, status };
+  });
+  return changed ? nextAssets : assets;
 };
 const generateAssetCode = (type, supplier, purity, weight, suffix, suppliersList = null) => {
   const typeMap = {
@@ -169,7 +219,10 @@ const isMissingSupabaseTableError = (error) =>
   error?.code === 'PGRST205' ||
   error?.code === '42P01' ||
   /could not find the table .*ar_rahnu_user_data/i.test(error?.message || '');
-
+const isMissingUserManagementSchemaError = (error) =>
+  error?.code === 'PGRST204' ||
+  error?.code === '42703' ||
+  /(?:ar_rahnu_organization_members|ar_rahnu_organizations).*(?:does not exist|schema cache)|column .*active.*does not exist/i.test(error?.message || '');
 // --- MAIN COMPONENT ---
 export default function App() {
   if (!supabaseClient) {
@@ -200,9 +253,13 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
   const [isCheckingSession, setIsCheckingSession] = useState(true);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isAppInstalled, setIsAppInstalled] = useState(false);
-  const [authMode, setAuthMode] = useState<'sign-in' | 'sign-up'>('sign-in');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [requiresPasswordUpdate, setRequiresPasswordUpdate] = useState(() =>
+    typeof window !== 'undefined' && /type=(invite|recovery)/i.test(window.location.hash)
+  );
   const [authError, setAuthError] = useState('');
   const [authNotice, setAuthNotice] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -260,6 +317,9 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
     const { data: { subscription } } = supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
       if (active) {
         setSession(nextSession);
+        if (_event === 'PASSWORD_RECOVERY' || /type=(invite|recovery)/i.test(window.location.hash)) {
+          setRequiresPasswordUpdate(true);
+        }
         setIsCheckingSession(false);
       }
     });
@@ -287,16 +347,8 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
     setAuthError('');
     setAuthNotice('');
     try {
-      if (authMode === 'sign-up') {
-        const { data, error } = await supabaseClient.auth.signUp({ email, password });
-        if (error) throw error;
-        if (!data.session) {
-          setAuthNotice('Pendaftaran diterima. Sahkan alamat e-mel anda melalui pautan yang dihantar, kemudian log masuk.');
-        }
-      } else {
-        const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-      }
+      const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+      if (error) throw error;
     } catch (error) {
       setAuthError(error.message || 'Pengesahan Supabase gagal.');
     } finally {
@@ -307,6 +359,34 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
   const handleSignOut = async () => {
     const { error } = await supabaseClient.auth.signOut();
     if (error) setAuthError(error.message);
+  };
+
+  const handleSetNewPassword = async (event) => {
+    event.preventDefault();
+    setIsSubmitting(true);
+    setAuthError('');
+    if (newPassword.length < 12) {
+      setAuthError('Kata laluan mesti sekurang-kurangnya 12 aksara.');
+      setIsSubmitting(false);
+      return;
+    }
+    if (newPassword !== confirmNewPassword) {
+      setAuthError('Pengesahan kata laluan tidak sepadan.');
+      setIsSubmitting(false);
+      return;
+    }
+    try {
+      const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+      setRequiresPasswordUpdate(false);
+      setNewPassword('');
+      setConfirmNewPassword('');
+    } catch (error) {
+      setAuthError(error.message || 'Kata laluan tidak dapat dikemas kini.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleInstallApp = async () => {
@@ -322,6 +402,25 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
   }
 
   if (session) {
+    if (requiresPasswordUpdate) {
+      return (
+        <form onSubmit={handleSetNewPassword} className="min-h-[100dvh] flex items-center justify-center bg-slate-50 p-4 font-sans">
+          <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
+            <h1 className="text-2xl font-bold text-slate-800">Tetapkan kata laluan</h1>
+            <p className="mt-2 text-sm text-slate-500">Cipta dan sahkan kata laluan baharu sebelum meneruskan ke sistem. Jika pautan jemputan tamat tempoh, minta Admin menghantar jemputan baharu.</p>
+            <label htmlFor="new-password" className="mb-1 mt-5 block text-sm font-semibold text-slate-700">Kata laluan baharu</label>
+            <input id="new-password" type="password" autoComplete="new-password" minLength={12} required value={newPassword} onChange={event => setNewPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 p-3 outline-none focus:ring-2 focus:ring-emerald-500" />
+            <label htmlFor="confirm-new-password" className="mb-1 mt-4 block text-sm font-semibold text-slate-700">Sahkan kata laluan baharu</label>
+            <input id="confirm-new-password" type="password" autoComplete="new-password" minLength={12} required value={confirmNewPassword} onChange={event => setConfirmNewPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 p-3 outline-none focus:ring-2 focus:ring-emerald-500" />
+            <p className="mt-2 text-xs text-slate-500">Gunakan sekurang-kurangnya 12 aksara. Jangan gunakan semula kata laluan daripada akaun lain.</p>
+            {authError && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{authError}</p>}
+            <button type="submit" disabled={isSubmitting} className="mt-5 w-full rounded-lg bg-emerald-700 px-4 py-3 font-bold text-white hover:bg-emerald-800 disabled:opacity-50">
+              {isSubmitting ? 'Menyimpan...' : 'Simpan kata laluan'}
+            </button>
+          </div>
+        </form>
+      );
+    }
     return <Dashboard
       key={session.user.id}
       user={session.user}
@@ -347,20 +446,17 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
             <img src="/icons/goldbar-logo.png" alt="Logo Ar-Rahnu" className="h-14 w-14 rounded-xl object-contain" />
             <p className="text-sm font-bold uppercase tracking-wider text-emerald-700">Ar-Rahnu Refinance System</p>
           </div>
-          <h1 className="mt-2 text-2xl font-bold text-slate-800">{authMode === 'sign-in' ? 'Log masuk Supabase' : 'Cipta akaun Supabase'}</h1>
-          <p className="mt-2 text-sm text-slate-500">Data dashboard disimpan dalam ruang peribadi akaun anda.</p>
+          <h1 className="mt-2 text-2xl font-bold text-slate-800">Selamat Datang ke Ar-Rahnu Gameplay System</h1>
+          <p className="mt-2 text-sm text-slate-500">Akaun hanya boleh dibuat melalui jemputan Admin organisasi.</p>
         </div>
         <label className="mb-1 block text-sm font-semibold text-slate-700" htmlFor="supabase-email">E-mel</label>
         <input id="supabase-email" type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} className="mb-4 w-full rounded-lg border border-slate-300 p-3 outline-none focus:ring-2 focus:ring-emerald-500" />
         <label className="mb-1 block text-sm font-semibold text-slate-700" htmlFor="supabase-password">Kata laluan</label>
-        <input id="supabase-password" type="password" autoComplete={authMode === 'sign-in' ? 'current-password' : 'new-password'} minLength={6} required value={password} onChange={event => setPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 p-3 outline-none focus:ring-2 focus:ring-emerald-500" />
+        <input id="supabase-password" type="password" autoComplete="current-password" minLength={6} required value={password} onChange={event => setPassword(event.target.value)} className="w-full rounded-lg border border-slate-300 p-3 outline-none focus:ring-2 focus:ring-emerald-500" />
         {authError && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{authError}</p>}
         {authNotice && <p role="status" className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700">{authNotice}</p>}
         <button type="submit" disabled={isSubmitting} className="mt-6 w-full rounded-lg bg-emerald-700 px-4 py-3 font-bold text-white transition-colors hover:bg-emerald-800 disabled:opacity-50">
-          {isSubmitting ? 'Memproses...' : authMode === 'sign-in' ? 'Log masuk' : 'Daftar akaun'}
-        </button>
-        <button type="button" onClick={() => { setAuthMode(authMode === 'sign-in' ? 'sign-up' : 'sign-in'); setAuthError(''); setAuthNotice(''); }} className="mt-4 w-full text-sm font-semibold text-emerald-700 hover:text-emerald-900">
-          {authMode === 'sign-in' ? 'Belum ada akaun? Daftar di sini' : 'Sudah ada akaun? Log masuk'}
+          {isSubmitting ? 'Memproses...' : 'Log masuk'}
         </button>
       </form>
     </div>
@@ -375,10 +471,12 @@ function ThemeToggle({ theme, onToggle }: { theme: 'light' | 'dark'; onToggle: (
       onClick={onToggle}
       aria-label={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
       title={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
-      className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-100"
+      className="group relative inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500"
     >
       {isDark ? <Sun size={17} /> : <Moon size={17} />}
-      <span className="hidden sm:inline">{isDark ? 'Mod terang' : 'Mod gelap'}</span>
+      <span role="tooltip" className="pointer-events-none absolute right-0 top-full z-[90] mt-2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+        {isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
+      </span>
     </button>
   );
 }
@@ -519,15 +617,23 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const localSnapshotRef = useRef(appData);
   localSnapshotRef.current = appData;
   const cloudSnapshotRef = useRef('');
+  const dataOwnerUserIdRef = useRef(user.id);
   const ownWriteSnapshotsRef = useRef(new Set<string>());
   const saveQueueRef = useRef(Promise.resolve());
+  const [organizationMembership, setOrganizationMembership] = useState(null);
+  const [organizationError, setOrganizationError] = useState('');
   const [isDataReady, setIsDataReady] = useState(false);
   const [syncStatus, setSyncStatus] = useState('loading');
   const [syncError, setSyncError] = useState('');
   const [isTableSetupRequired, setIsTableSetupRequired] = useState(false);
+  const [isMembershipActiveColumnMissing, setIsMembershipActiveColumnMissing] = useState(false);
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const [hydrationRetry, setHydrationRetry] = useState(0);
   const [saveRetry, setSaveRetry] = useState(0);
+
+  useEffect(() => {
+    setAssets(currentAssets => syncAssetStatuses(currentAssets, transactions));
+  }, [assets, transactions]);
 
   useEffect(() => {
     let active = true;
@@ -546,11 +652,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           transactionStatus: getTransactionStatus(transaction)
         })),
         institutions: incoming.institutions,
-        assets: incoming.assets,
+        assets: syncAssetStatuses(incoming.assets, incoming.transactions),
         suppliers: incoming.suppliers
       };
       const serializedData = JSON.stringify(nextData);
-      cloudSnapshotRef.current = serializedData;
+      cloudSnapshotRef.current = JSON.stringify({ ...nextData, assets: incoming.assets });
       if (JSON.stringify(localSnapshotRef.current) === serializedData) return;
 
       setTransactions(nextData.transactions);
@@ -563,26 +669,74 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setIsDataReady(false);
       setSyncStatus('loading');
       setSyncError('');
+      setOrganizationError('');
       setIsTableSetupRequired(false);
+      setIsMembershipActiveColumnMissing(false);
       setIsRealtimeConnected(false);
       try {
+        const { data: membershipRow, error: membershipError } = await supabaseClient
+          .from('ar_rahnu_organization_members')
+          .select('organization_id, role')
+          .eq('user_id', user.id)
+          .maybeSingle();
+        if (membershipError) throw membershipError;
+        let membership = parseOrganizationMembership(membershipRow ? { ...membershipRow, active: true } : null);
+        if (!membership) {
+          const { data: bootstrapResult, error: bootstrapError } = await supabaseClient.functions.invoke('user-admin', {
+            body: { action: 'bootstrap' }
+          });
+          if (bootstrapError) throw new Error(bootstrapResult?.error || bootstrapError.message);
+          if (bootstrapResult?.error) throw new Error(bootstrapResult.error);
+          membership = parseOrganizationMembership(bootstrapResult?.membership);
+        }
+        if (!membership) throw new Error('Akaun ini belum menjadi ahli organisasi. Hubungi Admin untuk jemputan.');
+        if (!membership.active) throw new Error('Akses akaun ini telah digantung. Hubungi Admin organisasi.');
+        const { data: organization, error: organizationError } = await supabaseClient
+          .from('ar_rahnu_organizations')
+          .select('name')
+          .eq('id', membership.organization_id)
+          .maybeSingle();
+        if (organizationError) throw organizationError;
+        // The organization RLS policy checks membership.active, so a hidden row means access is suspended.
+        if (!organization) {
+          throw new Error('Akses organisasi tidak aktif atau organisasi tidak dapat dicapai. Pastikan migrasi Supabase terkini telah digunakan.');
+        }
+        membership = { ...membership, organization };
+        if (!active) return;
+        setOrganizationMembership(membership);
+
+        const isOrganizationManager = ['Admin', 'Manager'].includes(membership.role);
         const { data: row, error } = await supabaseClient
           .from('ar_rahnu_user_data')
-          .select('data')
-          .eq('user_id', user.id)
+          .select('user_id, organization_id, data')
+          .eq(isOrganizationManager ? 'organization_id' : 'user_id', isOrganizationManager ? membership.organization_id : user.id)
           .maybeSingle();
         if (error) throw error;
         if (!active) return;
 
         if (row) {
+          dataOwnerUserIdRef.current = row.user_id;
           applyCloudData(row.data);
+          if (isOrganizationManager && row.organization_id !== membership.organization_id) {
+            throw new Error('Portfolio organisasi tidak dipautkan dengan betul. Hubungi Admin sistem.');
+          }
         } else {
-          const firstSave = localSnapshotRef.current;
+          if (isOrganizationManager) {
+            throw new Error('Data portfolio organisasi belum tersedia. Hubungi Admin sistem; data peribadi tidak digunakan sebagai gantian.');
+          }
+          const firstSave = {
+            transactions: [],
+            institutions: initialInstitutions,
+            assets: [],
+            suppliers: initialSuppliers
+          };
+          applyCloudData(firstSave);
           const { error: saveError } = await supabaseClient
             .from('ar_rahnu_user_data')
-            .upsert({ user_id: user.id, data: firstSave, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+            .upsert({ user_id: user.id, organization_id: null, data: firstSave, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
           if (saveError) throw saveError;
           cloudSnapshotRef.current = JSON.stringify(firstSave);
+          dataOwnerUserIdRef.current = user.id;
         }
 
         if (!active) return;
@@ -594,7 +748,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             event: 'UPDATE',
             schema: 'public',
             table: 'ar_rahnu_user_data',
-            filter: `user_id=eq.${user.id}`
+            filter: `user_id=eq.${dataOwnerUserIdRef.current}`
           }, payload => {
             try {
               const incomingSnapshot = JSON.stringify(payload.new.data);
@@ -611,6 +765,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
               setSyncStatus('error');
             }
           })
+          .on('postgres_changes', {
+            event: '*',
+            schema: 'public',
+            table: 'ar_rahnu_organization_members',
+            filter: `user_id=eq.${user.id}`
+          }, () => {
+            window.location.reload();
+          })
           .subscribe(status => {
             if (!active) return;
             setIsRealtimeConnected(status === 'SUBSCRIBED');
@@ -620,10 +782,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           });
       } catch (error) {
         if (!active) return;
+        setOrganizationError(error.message || 'Keahlian organisasi tidak dapat disahkan.');
         const missingTable = isMissingSupabaseTableError(error);
-        setIsTableSetupRequired(missingTable);
+        const missingUserManagementSchema = isMissingUserManagementSchemaError(error);
+        setIsTableSetupRequired(missingTable || missingUserManagementSchema);
+        setIsMembershipActiveColumnMissing(/column ["']?ar_rahnu_organization_members\.active["']? does not exist/i.test(error?.message || ''));
         setSyncError(missingTable
           ? "Jadual 'public.ar_rahnu_user_data' belum wujud atau belum masuk ke schema cache Supabase."
+          : missingUserManagementSchema
+            ? 'Skema pengurusan pengguna belum lengkap. Jalankan semula fail supabase/schema.sql dalam Supabase SQL Editor untuk menambah lajur dan polisi terkini.'
           : error.message || 'Data tidak dapat dimuatkan dari Supabase.');
         setSyncStatus('error');
       }
@@ -659,7 +826,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           }
           const { error } = await supabaseClient
             .from('ar_rahnu_user_data')
-            .upsert({ user_id: user.id, data: snapshot, updated_at: new Date().toISOString() }, { onConflict: 'user_id' });
+            .upsert({
+              user_id: dataOwnerUserIdRef.current,
+              organization_id: ['Admin', 'Manager'].includes(organizationMembership?.role)
+                ? organizationMembership.organization_id
+                : null,
+              data: snapshot,
+              updated_at: new Date().toISOString()
+            }, { onConflict: 'user_id' });
           if (!active) return;
           if (error) {
             ownWriteSnapshotsRef.current.delete(serializedSnapshot);
@@ -685,17 +859,110 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       active = false;
       window.clearTimeout(timer);
     };
-  }, [appData, isDataReady, saveRetry, supabaseClient, user.id]);
+  }, [appData, isDataReady, organizationMembership, saveRetry, supabaseClient, user.id]);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
   const [isInstitutionModalOpen, setIsInstitutionModalOpen] = useState(false);
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editingAsset, setEditingAsset] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
   const [toastMessage, setToastMessage] = useState(null);
+  const [organizationUsers, setOrganizationUsers] = useState([]);
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState('Staff');
+  const [userManagementBusy, setUserManagementBusy] = useState(false);
+  const [userManagementError, setUserManagementError] = useState('');
+  const [userManagementNotice, setUserManagementNotice] = useState('');
+
+  const invokeUserAdmin = async (body) => {
+    const { data: { session }, error: sessionError } = await supabaseClient.auth.refreshSession();
+    if (sessionError) {
+      if (/invalid refresh token|refresh token not found/i.test(sessionError.message)) {
+        throw new Error('Sesi Supabase telah tamat. Sila log keluar dan log masuk semula.');
+      }
+      throw sessionError;
+    }
+    if (!session) throw new Error('Sesi Supabase telah tamat. Sila log masuk semula.');
+
+    const { data, error } = await supabaseClient.functions.invoke('user-admin', {
+      body,
+      headers: { Authorization: `Bearer ${session.access_token}` }
+    });
+    if (error) {
+      let responseError = data?.error;
+      if (!responseError && error instanceof Error && 'context' in error && error.context instanceof Response) {
+        try {
+          const errorBody = await error.context.clone().json();
+          if (typeof errorBody?.error === 'string') responseError = errorBody.error;
+        } catch (parseError) {
+          console.error('Respons ralat pengurusan pengguna tidak dapat dibaca:', parseError);
+        }
+      }
+      throw new Error(responseError || error.message);
+    }
+    if (data?.error) throw new Error(data.error);
+    return data;
+  };
+
+  const refreshOrganizationUsers = async () => {
+    const data = await invokeUserAdmin({ action: 'list' });
+    setOrganizationUsers(data.users || []);
+  };
+
+  const canManageOrganizationUsers = ['Admin', 'Manager'].includes(organizationMembership?.role);
+  const isOrganizationAdmin = organizationMembership?.role === 'Admin';
+
+  useEffect(() => {
+    if (activeTab !== 'users' || !canManageOrganizationUsers) return;
+    let active = true;
+    setUserManagementError('');
+    invokeUserAdmin({ action: 'list' })
+      .then(data => {
+        if (active) setOrganizationUsers(data.users || []);
+      })
+      .catch(error => {
+        if (active) setUserManagementError(error.message || 'Senarai pengguna tidak dapat dimuatkan.');
+      });
+    return () => { active = false; };
+  }, [activeTab, organizationMembership?.role]);
+
+  const runUserAdminAction = async (body, successMessage) => {
+    setUserManagementBusy(true);
+    setUserManagementError('');
+    setUserManagementNotice('');
+    try {
+      await invokeUserAdmin(body);
+      setUserManagementNotice(successMessage);
+      await refreshOrganizationUsers();
+      return true;
+    } catch (error) {
+      setUserManagementError(error.message || 'Tindakan pengurusan pengguna gagal.');
+      return false;
+    } finally {
+      setUserManagementBusy(false);
+    }
+  };
+
+  const handleInviteUser = async (event) => {
+    event.preventDefault();
+    const sent = await runUserAdminAction({ action: 'invite', email: inviteEmail, role: inviteRole }, 'Jemputan telah dihantar melalui e-mel.');
+    if (sent) setInviteEmail('');
+  };
+
+  const handleDeleteOrganizationUser = (member) => {
+    const confirmed = window.confirm(
+      `Padam akaun ${member.email || 'pengguna ini'} secara kekal? Akaun Supabase, akses organisasi dan data akaun yang berkaitan akan dipadam. Tindakan ini tidak boleh dibatalkan.`
+    );
+    if (!confirmed) return;
+    void runUserAdminAction(
+      { action: 'delete-user', userId: member.id },
+      `Akaun ${member.email || 'pengguna'} telah dipadam secara kekal.`
+    );
+  };
 
   // State Harga Live
   const [currentGoldPrice, setCurrentGoldPrice] = useState(INITIAL_GOLD_SPOT_MYR_PER_GRAM);
@@ -706,7 +973,83 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
   const [isMaintenanceMenuOpen, setIsMaintenanceMenuOpen] = useState(true);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
+  const notifiedRedemptionsThisSessionRef = useRef(new Set<string>());
+  const notificationMenuRef = useRef<HTMLDivElement | null>(null);
+  const [isNotificationListOpen, setIsNotificationListOpen] = useState(false);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(`ar_rahnu_notifications_enabled_${user.id}`) === 'true';
+    } catch (error) {
+      console.error('Pilihan notifikasi tidak dapat dibaca:', error);
+      return false;
+    }
+  });
   const isSidebarCompact = !isSidebarExpanded && !isSidebarOpen;
+
+  useEffect(() => {
+    if (!isNotificationListOpen) return;
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      if (event.target instanceof Node && !notificationMenuRef.current?.contains(event.target)) {
+        setIsNotificationListOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsNotificationListOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [isNotificationListOpen]);
+
+  const handleNotificationToggle = async () => {
+    if (notificationsEnabled) {
+      setNotificationsEnabled(false);
+      try {
+        localStorage.setItem(`ar_rahnu_notifications_enabled_${user.id}`, 'false');
+        setToastMessage('Notifikasi tarikh tebus dimatikan.');
+      } catch (error) {
+        console.error('Pilihan notifikasi tidak dapat disimpan:', error);
+        setToastMessage('Notifikasi dimatikan buat masa ini, tetapi pilihan ini tidak dapat disimpan.');
+      }
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+
+    if (!('Notification' in window)) {
+      setToastMessage('Browser ini tidak menyokong notifikasi sistem. Peringatan dalam aplikasi masih tersedia.');
+      setTimeout(() => setToastMessage(null), 5000);
+      return;
+    }
+
+    try {
+      const permission = Notification.permission === 'default'
+        ? await Notification.requestPermission()
+        : Notification.permission;
+      if (permission !== 'granted') {
+        setToastMessage(permission === 'denied'
+          ? 'Kebenaran notifikasi disekat. Benarkan notifikasi untuk laman ini melalui tetapan browser.'
+          : 'Kebenaran notifikasi belum diberikan.');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+
+      setNotificationsEnabled(true);
+      try {
+        localStorage.setItem(`ar_rahnu_notifications_enabled_${user.id}`, 'true');
+        setToastMessage('Notifikasi tarikh tebus diaktifkan.');
+      } catch (error) {
+        console.error('Pilihan notifikasi tidak dapat disimpan:', error);
+        setToastMessage('Notifikasi aktif untuk sesi ini, tetapi pilihan ini tidak dapat disimpan.');
+      }
+    } catch (error) {
+      console.error('Kebenaran notifikasi tidak dapat diminta:', error);
+      setToastMessage('Kebenaran notifikasi tidak dapat diminta daripada browser.');
+    }
+    setTimeout(() => setToastMessage(null), 5000);
+  };
 
   const handleInstallButtonClick = () => {
     if (canInstall) {
@@ -826,6 +1169,54 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     .map(tx => ({ ...tx, daysRemaining: getDaysUntilDate(tx.redemptionDate) }))
     .filter(tx => tx.daysRemaining <= 3)
     .sort((a, b) => a.daysRemaining - b.daysRemaining), [transactions, currentDate]);
+
+  useEffect(() => {
+    if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted' ||
+        redemptionNotifications.length === 0) return;
+
+    const today = new Date().toISOString().slice(0, 10);
+    const storageKey = `ar_rahnu_notified_redemptions_${user.id}_${today}`;
+    const currentAlerts = redemptionNotifications.map(tx => `${tx.id}:${tx.redemptionDate}`);
+    let previouslyNotified: string[] = [];
+    try {
+      const saved = localStorage.getItem(storageKey);
+      previouslyNotified = saved ? JSON.parse(saved) : [];
+      if (!Array.isArray(previouslyNotified)) {
+        throw new Error('Format senarai notifikasi tersimpan tidak sah.');
+      }
+    } catch (error) {
+      console.error('Sejarah notifikasi tarikh tebus tidak dapat dibaca:', error);
+    }
+
+    const newAlerts = currentAlerts.filter(alert =>
+      !previouslyNotified.includes(alert) && !notifiedRedemptionsThisSessionRef.current.has(alert)
+    );
+    if (newAlerts.length === 0) return;
+
+    const newAlertTransactions = redemptionNotifications.filter(tx =>
+      newAlerts.includes(`${tx.id}:${tx.redemptionDate}`)
+    );
+    const references = newAlertTransactions.slice(0, 3).map(tx => `#${tx.refNo}`).join(', ');
+    const additionalCount = newAlertTransactions.length - 3;
+    try {
+      const notification = new Notification('Peringatan tarikh tebus Ar-Rahnu', {
+        body: `${newAlertTransactions.length} transaksi perlu perhatian${references ? `: ${references}` : ''}${additionalCount > 0 ? ` dan ${additionalCount} lagi` : ''}.`,
+        tag: `ar-rahnu-redemption-${today}`,
+        icon: '/icons/icon-192.png'
+      });
+      notification.onclick = () => window.focus();
+      newAlerts.forEach(alert => notifiedRedemptionsThisSessionRef.current.add(alert));
+    } catch (error) {
+      console.error('Notifikasi tarikh tebus tidak dapat dipaparkan:', error);
+      return;
+    }
+
+    try {
+      localStorage.setItem(storageKey, JSON.stringify([...previouslyNotified, ...newAlerts]));
+    } catch (error) {
+      console.error('Sejarah notifikasi tarikh tebus tidak dapat disimpan:', error);
+    }
+  }, [notificationsEnabled, redemptionNotifications, user.id]);
   const maturityCalendar = useMemo(() => {
     const year = calendarMonth.getFullYear();
     const month = calendarMonth.getMonth();
@@ -1011,7 +1402,6 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setIsAssetModalOpen(true);
     } else if (indicator.type === 'TEBUS') {
       setTransactions(prev => prev.map(t => t.refNo === indicator.ticket ? { ...t, status: 'Ditebus' } : t));
-      setAssets(prev => prev.map(a => a.status === 'Dalam Ar-Rahnu' ? { ...a, status: 'EDT' } : a));
       setToastMessage(`Surat #${indicator.ticket} telah berjaya ditebus dan aset dikembalikan ke EDT!`);
       setTimeout(() => setToastMessage(null), 3000);
     } else {
@@ -1037,17 +1427,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDelete = (id) => {
-    const deletedTransaction = transactions.find(t => t.id === id);
-    const deletedAssetIds = deletedTransaction?.selectedAssetIds || (deletedTransaction?.selectedAssetId ? [deletedTransaction.selectedAssetId] : []);
     const remainingTransactions = transactions.filter(t => t.id !== id);
-    const stillUsedAssetIds = new Set(remainingTransactions.flatMap(t =>
-      t.selectedAssetIds || (t.selectedAssetId ? [t.selectedAssetId] : [])
-    ).map(String));
-    setAssets(prev => prev.map(asset =>
-      deletedAssetIds.map(String).includes(String(asset.id)) && !stillUsedAssetIds.has(String(asset.id))
-        ? { ...asset, status: 'EDT' }
-        : asset
-    ));
     setTransactions(remainingTransactions);
   };
 
@@ -1140,7 +1520,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleAddTransaction = (newTx) => {
-    const selectedAssetIds = newTx.type === 'Pajakan Asal' ? (newTx.selectedAssetIds || []) : [];
+    const selectedAssetIds = !newTx.type.includes('Tebus') ? (newTx.selectedAssetIds || []) : [];
     if (selectedAssetIds.length) {
       setAssets(prev => prev.map(asset =>
         selectedAssetIds.map(String).includes(String(asset.id))
@@ -1305,22 +1685,43 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     [supplier.code, supplier.name, supplier.category, supplier.products]
       .some(value => String(value || '').toLowerCase().includes(supplierSearch.trim().toLowerCase()))
   );
+  const checkedInAssetIds = useMemo(() => getCheckedInAssetIds(transactions), [transactions]);
+  const availableAssetsForTransaction = useMemo(
+    () => assets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
+    [assets, checkedInAssetIds]
+  );
 
   if (!isDataReady) {
     return (
       <div className="min-h-[100dvh] flex items-center justify-center bg-slate-50 p-4 sm:p-6 font-sans">
         <div className="w-full max-w-xl rounded-2xl border border-slate-200 bg-white p-5 sm:p-8 text-center shadow-sm">
-          <h1 className="text-xl font-bold text-slate-800">{syncStatus === 'loading' ? 'Memuatkan data Supabase...' : 'Data Supabase belum tersedia'}</h1>
+          <h1 className="text-xl font-bold text-slate-800">
+            {syncStatus === 'loading' ? 'Memuatkan data Supabase...' : isTableSetupRequired ? 'Skema Supabase perlu dikemas kini' : 'Data Supabase belum tersedia'}
+          </h1>
           {syncError && <p role="alert" className="mt-4 rounded-lg bg-red-50 p-3 text-left text-sm text-red-700">{syncError}</p>}
           {isTableSetupRequired && (
             <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-left text-sm text-amber-950">
-              <p className="font-bold">Selesaikan persediaan database sekali sahaja:</p>
-              <ol className="mt-2 list-decimal space-y-1 pl-5">
-                <li>Buka fail <code>supabase/schema.sql</code> dalam projek ini dan salin keseluruhan kandungannya.</li>
-                <li>Buka <a href="https://supabase.com/dashboard/project/zyikvjbnroicbeezpxvx/sql/new" target="_blank" rel="noreferrer" className="font-bold underline">SQL Editor projek Supabase</a>, tampal skrip itu dan tekan <strong>Run</strong>.</li>
-                <li>Kembali ke sini dan tekan <strong>Cuba sambung semula</strong>.</li>
-              </ol>
-              <p className="mt-3 text-xs text-amber-900">Jangan tukar atau tampal service_role key. Masalah ini memerlukan penciptaan jadual, bukan perubahan kata laluan.</p>
+              {isMembershipActiveColumnMissing ? (
+                <>
+                  <p className="font-bold">Pembaikan khusus: lajur <code>active</code> belum wujud dalam jadual keahlian.</p>
+                  <p className="mt-2">Buka SQL Editor untuk projek <code>zyikvjbnroicbeezpxvx</code>, jalankan skrip <code>supabase/fix-missing-membership-active.sql</code> (atau tampal arahan ini), kemudian kembali dan tekan <strong>Cuba sambung semula</strong>:</p>
+                  <pre className="mt-3 overflow-x-auto rounded-lg bg-white p-3 text-xs text-slate-800"><code>{`ALTER TABLE public.ar_rahnu_organization_members
+  ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+
+NOTIFY pgrst, 'reload schema';`}</code></pre>
+                </>
+              ) : (
+                <>
+                  <p className="font-bold">Lengkapkan persediaan database:</p>
+                  <ol className="mt-2 list-decimal space-y-1 pl-5">
+                    <li>Buka fail <code>supabase/schema.sql</code> dalam projek ini dan salin keseluruhan kandungannya. Skrip ini selamat dijalankan semula untuk menambah skema terkini.</li>
+                    <li>Buka <a href="https://supabase.com/dashboard/project/zyikvjbnroicbeezpxvx/sql/new" target="_blank" rel="noreferrer" className="font-bold underline">SQL Editor projek Supabase</a>, tampal skrip itu dan tekan <strong>Run</strong>.</li>
+                    <li>Kembali ke sini dan tekan <strong>Cuba sambung semula</strong>.</li>
+                  </ol>
+                </>
+              )}
+              <a href="https://supabase.com/dashboard/project/zyikvjbnroicbeezpxvx/sql/new" target="_blank" rel="noreferrer" className="mt-3 inline-block font-bold underline">Buka SQL Editor Supabase</a>
+              <p className="mt-3 text-xs text-amber-900">Jalankan SQL pada projek yang sama. Jangan masukkan service_role key ke dalam aplikasi.</p>
             </div>
           )}
           {syncStatus === 'loading' && <p className="mt-3 text-sm text-slate-500">Data tempatan tidak akan menggantikan data awan yang sedia ada.</p>}
@@ -1362,7 +1763,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             setIsSidebarExpanded(false);
           }
         }}
-        className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-[width,transform] duration-300 ease-in-out w-64 max-w-[85vw] ${isSidebarExpanded ? 'lg:w-64' : 'lg:w-20'} ${theme === 'dark' ? 'bg-corporate-teal-950 text-slate-100 border-corporate-teal-800' : 'bg-white text-slate-800 border-slate-200'} border-r flex flex-col shadow-2xl z-50 shrink-0`}
+        className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-[width,transform] duration-300 ease-in-out w-64 max-w-[85vw] ${isSidebarExpanded ? 'lg:w-64' : 'lg:w-20'} ${theme === 'dark' ? 'bg-corporate-teal-950 text-slate-100 border-corporate-teal-800' : 'bg-[#F8F3EA] text-slate-800 border-slate-200'} border-r flex flex-col shadow-2xl z-50 shrink-0`}
       >
         <div className={`flex items-center border-b ${isSidebarCompact ? 'justify-center px-3 py-5 lg:justify-center' : 'justify-between p-6'} ${theme === 'dark' ? 'border-corporate-teal-800/50' : 'border-slate-200'}`}>
           <div className="flex items-center space-x-3">
@@ -1453,6 +1854,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             )}
           </div>
           <NavItem compact={isSidebarCompact} theme={theme} icon={<BrainCircuit size={20} />} label="AI Predictions" isActive={activeTab === 'ai'} onClick={() => { setActiveTab('ai'); setIsSidebarOpen(false); }} />
+          {canManageOrganizationUsers && (
+            <NavItem compact={isSidebarCompact} theme={theme} icon={<Users size={20} />} label="Pengurusan Pengguna" isActive={activeTab === 'users'} onClick={() => { setActiveTab('users'); setIsSidebarOpen(false); }} />
+          )}
         </nav>
 
         <div className="space-y-3 p-3 sm:p-4">
@@ -1512,24 +1916,112 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
               <Menu size={22} />
             </button>
             <h2 className="min-w-0 text-base sm:text-xl md:text-2xl font-bold text-slate-800 capitalize tracking-tight truncate flex items-center">
-              {activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Transaction Ledger' : 'Executive Dashboard'}
+              {activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Transaction Ledger' : 'Executive Dashboard'}
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1 sm:gap-2 md:gap-4">
             <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+            <div
+              ref={notificationMenuRef}
+              className="relative"
+              onMouseEnter={() => setIsNotificationListOpen(true)}
+              onMouseLeave={() => setIsNotificationListOpen(false)}
+              onFocusCapture={() => setIsNotificationListOpen(true)}
+              onBlurCapture={event => {
+                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                  setIsNotificationListOpen(false);
+                }
+              }}
+            >
+              <button
+                type="button"
+                onClick={handleNotificationToggle}
+                aria-label={notificationsEnabled ? 'Matikan notifikasi tarikh tebus' : 'Aktifkan notifikasi tarikh tebus'}
+                aria-pressed={notificationsEnabled}
+                aria-haspopup="true"
+                aria-expanded={isNotificationListOpen}
+                title={notificationsEnabled ? 'Notifikasi aktif · hover untuk senarai' : 'Notifikasi tidak aktif · hover untuk senarai'}
+                className={`relative rounded-lg border p-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500 ${
+                  notificationsEnabled
+                    ? 'border-corporate-teal-200 bg-corporate-teal-50 text-corporate-teal-700 hover:bg-corporate-teal-100'
+                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-100 hover:text-slate-800'
+                }`}
+              >
+                {notificationsEnabled ? <Bell size={20} /> : <BellOff size={20} />}
+                {systemIndicators.length > 0 && (
+                  <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-600 px-1 text-[10px] font-bold text-white">
+                    {systemIndicators.length > 9 ? '9+' : systemIndicators.length}
+                  </span>
+                )}
+              </button>
+              {isNotificationListOpen && (
+                <section
+                  aria-label="Senarai notifikasi sistem"
+                  className="absolute right-0 top-full z-[80] mt-2 w-[min(22rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-slate-200 bg-white text-left shadow-2xl"
+                >
+                  <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-800">Notifikasi sistem</h3>
+                      <p className="text-xs text-slate-500">{systemIndicators.length} perkara memerlukan perhatian</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleNotificationToggle}
+                      aria-label={notificationsEnabled ? 'Matikan notifikasi sistem' : 'Aktifkan notifikasi sistem'}
+                      aria-pressed={notificationsEnabled}
+                      className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                        notificationsEnabled
+                          ? 'bg-corporate-teal-100 text-corporate-teal-800'
+                          : 'bg-slate-100 text-slate-600'
+                      }`}
+                    >
+                      {notificationsEnabled ? 'Aktif' : 'Aktifkan'}
+                    </button>
+                  </div>
+                  <div className="max-h-[min(65vh,28rem)] overflow-y-auto p-2">
+                    {systemIndicators.length === 0 ? (
+                      <p className="px-3 py-6 text-center text-sm text-slate-500">Tiada notifikasi buat masa ini.</p>
+                    ) : (
+                      <ul className="space-y-1">
+                        {systemIndicators.map(indicator => (
+                          <li key={indicator.id} className="rounded-lg px-3 py-2.5 hover:bg-slate-50">
+                            <div className="flex items-start justify-between gap-3">
+                              <p className="text-sm font-semibold text-slate-800">{indicator.title}</p>
+                              <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                                {indicator.badge}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs leading-relaxed text-slate-600">{indicator.desc}</p>
+                            <p className="mt-1 text-[11px] font-medium text-slate-500">Rujukan: {indicator.ticket}</p>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <p className="border-t border-slate-100 px-4 py-2 text-[11px] text-slate-500">Senarai ditutup automatik apabila kursor keluar.</p>
+                </section>
+              )}
+            </div>
             {!isAppInstalled && (
               <>
                 <button
+                  type="button"
                   onClick={handleInstallButtonClick}
-                  className="hidden sm:flex items-center space-x-2 text-sm font-semibold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 px-3 py-2 rounded-lg transition-colors border border-emerald-200"
+                  aria-label={canInstall ? 'Pasang aplikasi' : 'Panduan pemasangan aplikasi'}
+                  title={canInstall ? 'Pasang aplikasi' : 'Panduan pemasangan aplikasi'}
+                  className="group relative hidden sm:inline-flex items-center justify-center rounded-lg border border-emerald-200 bg-emerald-50 p-2 text-emerald-700 transition-colors hover:bg-emerald-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500"
                 >
                   <Download size={16} />
-                  <span>{canInstall ? 'Pasang App' : 'Panduan Pasang'}</span>
+                  <span role="tooltip" className="pointer-events-none absolute right-0 top-full z-[90] mt-2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                    {canInstall ? 'Pasang aplikasi' : 'Panduan pemasangan aplikasi'}
+                  </span>
                 </button>
 
                 <button
+                  type="button"
                   onClick={handleInstallButtonClick}
                   aria-label={canInstall ? 'Pasang aplikasi' : 'Panduan pemasangan aplikasi'}
+                  title={canInstall ? 'Pasang aplikasi' : 'Panduan pemasangan aplikasi'}
                   className="sm:hidden p-2 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 rounded-lg border border-emerald-200"
                 >
                   <Download size={20} />
@@ -1538,12 +2030,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             )}
 
             <div className="text-right mr-2 md:mr-4 hidden md:block border-l border-slate-200 pl-4">
-              <p className="text-sm font-semibold text-slate-800">{user.email}</p>
+              <p className="text-sm font-semibold text-slate-800">{user.user_metadata?.full_name || user.user_metadata?.name || 'Nama Paparan'}</p>
               <p className="text-xs text-slate-500">Disimpan per akaun</p>
             </div>
-            <div className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold border-2 border-emerald-500 shrink-0">
-              {(user.email || 'AR').slice(0, 2).toUpperCase()}
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsProfileModalOpen(true)}
+              title="Pengurusan profil"
+              aria-label="Buka pengurusan profil"
+              className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold border-2 border-emerald-500 shrink-0 hover:ring-2 hover:ring-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+            >
+              {String(user.user_metadata?.full_name || user.user_metadata?.name || '')
+                .trim()
+                .split(/\s+/)
+                .filter(Boolean)
+                .slice(0, 2)
+                .map(part => part[0])
+                .join('')
+                .toUpperCase() || (user.email || 'AR').slice(0, 2).toUpperCase()}
+            </button>
             <button onClick={onSignOut} title="Log keluar" aria-label="Log keluar" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
               <LogOut size={18} />
             </button>
@@ -1574,6 +2079,134 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
         {/* SCROLLABLE CONTENT AREA */}
         <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 md:p-8 relative custom-scrollbar">
+
+          {activeTab === 'users' && canManageOrganizationUsers && (
+            <section className="mx-auto max-w-6xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h3 className="flex items-center gap-2 text-lg font-bold text-slate-800">
+                      <Users size={20} className="text-corporate-teal-600" />
+                      Pengurusan Pengguna
+                    </h3>
+                    <p className="mt-1 text-sm text-slate-500">
+                      {organizationMembership.organization?.name || 'Organisasi'} · {organizationUsers.length} ahli
+                    </p>
+                  </div>
+                  <span className="inline-flex w-fit items-center gap-2 rounded-full bg-corporate-magenta-50 px-3 py-1 text-xs font-bold text-corporate-magenta-800">
+                    <ShieldCheck size={15} /> {organizationMembership.role}
+                  </span>
+                </div>
+                {isOrganizationAdmin && <div className="mt-5 grid gap-3 sm:grid-cols-3">
+                  {[
+                    ['Admin', 'Akses penuh dan pengurusan akaun'],
+                    ['Manager', 'Akses penuh kepada portfolio organisasi'],
+                    ['Staff', 'Portfolio peribadi sahaja'],
+                  ].map(([role, description]) => (
+                    <div key={role} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                      <p className="text-sm font-bold text-slate-800">{role}</p>
+                      <p className="mt-1 text-xs text-slate-500">{description}</p>
+                    </div>
+                  ))}
+                </div>}
+              </div>
+
+              {isOrganizationAdmin && <form onSubmit={handleInviteUser} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
+                <h3 className="flex items-center gap-2 font-bold text-slate-800"><Mail size={18} className="text-corporate-teal-600" /> Jemput pengguna</h3>
+                <p className="mt-1 text-sm text-slate-500">E-mel mengandungi pautan jemputan selamat, bukan kata laluan. Pengguna wajib menetapkan kata laluan baharu sebelum masuk ke sistem.</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem_auto]">
+                  <input
+                    type="email"
+                    required
+                    value={inviteEmail}
+                    onChange={event => setInviteEmail(event.target.value)}
+                    placeholder="nama@contoh.com"
+                    aria-label="E-mel pengguna yang dijemput"
+                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                  />
+                  <select value={inviteRole} onChange={event => setInviteRole(event.target.value)} aria-label="Peranan pengguna baharu" className="rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500">
+                    <option value="Staff">Staff</option>
+                    <option value="Manager">Manager</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                  <button type="submit" disabled={userManagementBusy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:opacity-50">
+                    <Mail size={16} /> Hantar jemputan
+                  </button>
+                </div>
+              </form>}
+
+              {userManagementError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm font-medium text-red-700">{userManagementError}</p>}
+              {userManagementNotice && <p role="status" className="rounded-lg bg-corporate-green-50 p-3 text-sm font-medium text-corporate-green-800">{userManagementNotice}</p>}
+
+              <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">
+                <div className="border-b border-slate-100 px-5 py-4 sm:px-6">
+                  <h3 className="font-bold text-slate-800">Ahli organisasi</h3>
+                </div>
+                <div className="divide-y divide-slate-100">
+                  {organizationUsers.map(member => (
+                    <div key={member.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                      <div className="min-w-0">
+                        <p className="break-all text-sm font-semibold text-slate-800">{member.email || 'E-mel tidak tersedia'}</p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          {member.active ? (member.emailConfirmedAt ? 'E-mel disahkan' : 'Menunggu pengesahan jemputan') : 'Akses digantung'}
+                          {' · '}
+                          {member.lastSignInAt ? `Log masuk terakhir ${new Date(member.lastSignInAt).toLocaleDateString('ms-MY')}` : 'Belum pernah log masuk'}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {isOrganizationAdmin && <select
+                          value={member.role}
+                          aria-label={`Peranan ${member.email}`}
+                          disabled={userManagementBusy || member.id === user.id}
+                          onChange={event => void runUserAdminAction({ action: 'update-role', userId: member.id, role: event.target.value }, `Peranan ${member.email} dikemas kini.`)}
+                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
+                        >
+                          <option value="Staff">Staff</option>
+                          <option value="Manager">Manager</option>
+                          <option value="Admin">Admin</option>
+                        </select>}
+                        {isOrganizationAdmin && <button
+                          type="button"
+                          disabled={userManagementBusy || member.id === user.id}
+                          onClick={() => void runUserAdminAction(
+                            { action: 'update-access', userId: member.id, active: !member.active },
+                            `${member.email} ${member.active ? 'digantung' : 'diaktifkan semula'}.`
+                          )}
+                          className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-50 ${member.active ? 'border-corporate-magenta-200 text-corporate-magenta-700 hover:bg-corporate-magenta-50' : 'border-corporate-green-200 text-corporate-green-800 hover:bg-corporate-green-50'}`}
+                        >
+                          {member.active ? 'Gantung akses' : 'Aktifkan semula'}
+                        </button>}
+                        {isOrganizationAdmin && <button
+                          type="button"
+                          disabled={userManagementBusy}
+                          onClick={() => void runUserAdminAction({ action: 'reset-password', userId: member.id }, `E-mel tetapan semula kata laluan dihantar kepada ${member.email}.`)}
+                          title="Hantar pautan tetapan semula kata laluan"
+                          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          <KeyRound size={15} /><span className="sm:hidden">Reset kata laluan</span>
+                        </button>}
+                        {member.id !== user.id && (isOrganizationAdmin || member.role !== 'Admin') && (
+                          <button
+                            type="button"
+                            disabled={userManagementBusy || member.isOrganizationOwner}
+                            onClick={() => handleDeleteOrganizationUser(member)}
+                            title={member.isOrganizationOwner ? 'Pencipta organisasi tidak boleh dipadam' : 'Padam akaun pengguna secara kekal'}
+                            aria-label={`Padam akaun ${member.email}`}
+                            className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            <Trash2 size={15} /><span className="sm:hidden">Padam pengguna</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {organizationUsers.length === 0 && !userManagementError && (
+                    <p className="p-6 text-center text-sm text-slate-500">Memuatkan ahli organisasi...</p>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* TAB: DASHBOARD */}
           {activeTab === 'dashboard' && (
@@ -1899,6 +2532,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                         <th className="p-4">Date</th>
                         <th className="p-4">Jenis Pajak</th>
                         <th className="p-4">Ref No.</th>
+                        <th className="p-4">Asset ID</th>
                         <th className="p-4">Tarikh Tebus</th>
                         <th className="p-4">Institution</th>
                         <th className="p-4 text-right">Loan (RM)</th>
@@ -1909,7 +2543,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {filteredTransactions.map((tx) => (
+                      {filteredTransactions.map((tx) => {
+                        const linkedAssetIds = tx.selectedAssetIds || (tx.selectedAssetId ? [tx.selectedAssetId] : []);
+                        const linkedAssets = linkedAssetIds.map(assetId =>
+                          assets.find(asset => String(asset.id) === String(assetId))
+                        );
+                        return (
                         <tr key={tx.id} className="hover:bg-slate-50/50 transition-colors group">
                           <td className="p-4 text-slate-600 font-medium">{tx.date}</td>
                           <td className="p-4">
@@ -1924,6 +2563,23 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                             </span>
                           </td>
                           <td className="p-4 text-slate-800 font-mono text-sm">{tx.refNo}</td>
+                          <td className="p-4">
+                            {linkedAssetIds.length ? (
+                              <div className="flex flex-wrap gap-1">
+                                {linkedAssetIds.map((assetId, index) => {
+                                  const asset = linkedAssets[index];
+                                  const assetIdLabel = asset
+                                    ? asset.code || generateAssetCode(asset.type, asset.supplierCodes || asset.supplier, asset.purity, asset.weight, asset.id)
+                                    : String(assetId);
+                                  return (
+                                    <span key={String(assetId)} className="code-badge-label rounded-md border border-amber-200 bg-amber-50 px-2 py-1 font-mono text-xs font-bold text-amber-900">
+                                      {assetIdLabel}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            ) : <span className="text-slate-300">-</span>}
+                          </td>
                           <td className="p-4">
                             {!tx.type.includes('Tebus') ? (
                               <div className="space-y-1">
@@ -1993,10 +2649,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                             </button>
                           </td>
                         </tr>
-                      ))}
+                      );
+                      })}
                       {filteredTransactions.length === 0 && (
                         <tr>
-                          <td colSpan="10" className="p-8 text-center text-slate-400">
+                          <td colSpan="11" className="p-8 text-center text-slate-400">
                             {transactions.length === 0
                               ? 'No transactions found. Add a new entry to get started.'
                               : `Tiada transaksi untuk jenis "${transactionStatusFilter}".`}
@@ -2062,7 +2719,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                           <td className="p-4 text-center">
                             <span className={`px-3 py-1 text-xs font-bold rounded-full ${asset.status === 'EDT' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'
                               }`}>
-                              {asset.status}
+                              {asset.status === 'EDT' ? 'EDT · Available' : 'EDR · Dalam Ar-Rahnu'}
                             </span>
                           </td>
                           <td className="p-4 text-center space-x-1">
@@ -2554,12 +3211,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       {isModalOpen && (
         <TransactionModal
           institutions={institutions}
-          availableAssets={assets.filter(asset => {
-            const usedAssetIds = new Set(transactions.flatMap(transaction =>
-              transaction.selectedAssetIds || (transaction.selectedAssetId ? [transaction.selectedAssetId] : [])
-            ).map(String));
-            return asset.status === 'EDT' && !usedAssetIds.has(String(asset.id));
-          })}
+          availableAssets={availableAssetsForTransaction}
+          pledgedAssets={assets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id)))}
           onClose={() => setIsModalOpen(false)}
           onSave={handleAddTransaction}
           currentGoldPrice={currentGoldPrice}
@@ -2603,6 +3256,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             setEditingSupplier(null);
           }}
           onSave={handleSaveSupplier}
+        />
+      )}
+
+      {isProfileModalOpen && (
+        <ProfileModal
+          user={user}
+          supabaseClient={supabaseClient}
+          theme={theme}
+          onClose={() => setIsProfileModalOpen(false)}
         />
       )}
 
@@ -2665,6 +3327,256 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 }
 
 // --- SUB-COMPONENTS ---
+
+function ProfileModal({ user, supabaseClient, theme, onClose }: {
+  user: User;
+  supabaseClient: SupabaseClient;
+  theme: 'light' | 'dark';
+  onClose: () => void;
+}) {
+  const [fullName, setFullName] = useState(String(user.user_metadata?.full_name || user.user_metadata?.name || ''));
+  const [email, setEmail] = useState(user.email || '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [passwordBusy, setPasswordBusy] = useState(false);
+  const [profileError, setProfileError] = useState('');
+  const [profileNotice, setProfileNotice] = useState('');
+  const [passwordError, setPasswordError] = useState('');
+  const [passwordNotice, setPasswordNotice] = useState('');
+  const isDark = theme === 'dark';
+  const cardClass = isDark ? 'border-corporate-teal-800 bg-corporate-teal-950 text-slate-100' : 'border-slate-200 bg-white text-slate-800';
+  const headingClass = isDark ? 'text-white' : 'text-slate-800';
+  const secondaryTextClass = isDark ? 'text-slate-300' : 'text-slate-500';
+  const labelClass = isDark ? 'text-slate-200' : 'text-slate-700';
+  const inputClass = `mt-1.5 w-full rounded-lg border px-3 py-2.5 outline-none focus:ring-2 ${
+    isDark
+      ? 'border-corporate-teal-700 bg-corporate-teal-900 text-white focus:border-corporate-teal-400 focus:ring-corporate-teal-800'
+      : 'border-slate-300 text-slate-800 focus:border-corporate-teal-500 focus:ring-corporate-teal-100'
+  }`;
+  const errorClass = isDark ? 'bg-red-950 text-red-200' : 'bg-red-50 text-red-700';
+  const noticeClass = isDark ? 'bg-corporate-teal-900 text-corporate-teal-100' : 'bg-emerald-50 text-emerald-800';
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !profileBusy && !passwordBusy) onClose();
+    };
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose, profileBusy, passwordBusy]);
+
+  const handleProfileSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+
+    const normalizedName = fullName.trim();
+    const normalizedEmail = email.trim().toLowerCase();
+    if (normalizedName.length < 2 || normalizedName.length > 80) {
+      setProfileError('Nama hendaklah mengandungi antara 2 hingga 80 aksara.');
+      setProfileBusy(false);
+      return;
+    }
+
+    try {
+      const updates: { data: Record<string, unknown>; email?: string } = {
+        data: { ...user.user_metadata, full_name: normalizedName }
+      };
+      const emailChanged = normalizedEmail !== (user.email || '').toLowerCase();
+      if (emailChanged) updates.email = normalizedEmail;
+
+      const { error } = await supabaseClient.auth.updateUser(updates);
+      if (error) throw error;
+
+      setProfileNotice(emailChanged
+        ? 'Nama profil disimpan. Pautan pengesahan e-mel dihantar ke alamat baharu; alamat akaun akan berubah selepas pengesahan.'
+        : 'Profil berjaya dikemas kini.');
+    } catch (error) {
+      setProfileError(error.message || 'Profil tidak dapat dikemas kini.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const handlePasswordSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setPasswordBusy(true);
+    setPasswordError('');
+    setPasswordNotice('');
+
+    if (newPassword.length < 12) {
+      setPasswordError('Kata laluan baharu mesti sekurang-kurangnya 12 aksara.');
+      setPasswordBusy(false);
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Pengesahan kata laluan tidak sepadan.');
+      setPasswordBusy(false);
+      return;
+    }
+    if (!user.email) {
+      setPasswordError('Akaun ini tiada e-mel untuk mengesahkan kata laluan semasa.');
+      setPasswordBusy(false);
+      return;
+    }
+
+    try {
+      const { error: verificationError } = await supabaseClient.auth.signInWithPassword({
+        email: user.email,
+        password: currentPassword
+      });
+      if (verificationError) throw new Error('Kata laluan semasa tidak betul.');
+
+      const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setPasswordNotice('Kata laluan berjaya ditukar.');
+    } catch (error) {
+      setPasswordError(error.message || 'Kata laluan tidak dapat ditukar.');
+    } finally {
+      setPasswordBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-6"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !profileBusy && !passwordBusy) onClose();
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="profile-modal-title"
+        className={`relative max-h-[92dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border p-5 shadow-2xl sm:p-7 ${cardClass}`}
+      >
+        <button
+          type="button"
+          onClick={onClose}
+          disabled={profileBusy || passwordBusy}
+          aria-label="Tutup pengurusan profil"
+          className={`absolute right-4 top-4 rounded-lg p-2 disabled:opacity-50 ${isDark ? 'text-slate-300 hover:bg-corporate-teal-800 hover:text-white' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
+        >
+          <X size={20} />
+        </button>
+
+        <div className="mb-6 flex items-center gap-3 pr-10">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-corporate-teal-100 text-corporate-teal-700">
+            <UserRound size={22} />
+          </div>
+          <div>
+            <h2 id="profile-modal-title" className={`text-xl font-bold ${headingClass}`}>Pengurusan Profil</h2>
+            <p className={`text-sm ${secondaryTextClass}`}>Kemas kini maklumat akaun dan keselamatan anda.</p>
+          </div>
+        </div>
+
+        <form onSubmit={handleProfileSubmit} className={`rounded-xl border p-4 sm:p-5 ${isDark ? 'border-corporate-teal-800' : 'border-slate-200'}`}>
+          <h3 className={`font-semibold ${headingClass}`}>Maklumat profil</h3>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <label className={`block text-sm font-medium ${labelClass}`}>
+              Nama paparan
+              <input
+                type="text"
+                autoComplete="name"
+                autoFocus
+                required
+                minLength={2}
+                maxLength={80}
+                value={fullName}
+                onChange={event => setFullName(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+            <label className={`block text-sm font-medium ${labelClass}`}>
+              Alamat e-mel
+              <input
+                type="email"
+                autoComplete="email"
+                required
+                value={email}
+                onChange={event => setEmail(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+          </div>
+          <p className={`mt-3 text-xs leading-relaxed ${secondaryTextClass}`}>
+            Jika alamat e-mel ditukar, Supabase akan meminta pengesahan e-mel sebelum perubahan digunakan.
+          </p>
+          {profileError && <p role="alert" className={`mt-3 rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
+          {profileNotice && <p role="status" className={`mt-3 rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
+          <div className="mt-4 flex justify-end">
+            <button type="submit" disabled={profileBusy} className="rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60">
+              {profileBusy ? 'Menyimpan...' : 'Simpan profil'}
+            </button>
+          </div>
+        </form>
+
+        <form onSubmit={handlePasswordSubmit} className={`mt-5 rounded-xl border p-4 sm:p-5 ${isDark ? 'border-corporate-teal-800' : 'border-slate-200'}`}>
+          <div className="flex items-center gap-2">
+            <KeyRound size={18} className="text-corporate-teal-700" />
+            <h3 className={`font-semibold ${headingClass}`}>Tukar kata laluan</h3>
+          </div>
+          <p className={`mt-1 text-xs ${secondaryTextClass}`}>Sahkan kata laluan semasa sebelum menetapkan kata laluan baharu.</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-2">
+            <label className={`block text-sm font-medium sm:col-span-2 ${labelClass}`}>
+              Kata laluan semasa
+              <input
+                type="password"
+                autoComplete="current-password"
+                required
+                value={currentPassword}
+                onChange={event => setCurrentPassword(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+            <label className={`block text-sm font-medium ${labelClass}`}>
+              Kata laluan baharu
+              <input
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                value={newPassword}
+                onChange={event => setNewPassword(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+            <label className={`block text-sm font-medium ${labelClass}`}>
+              Sahkan kata laluan baharu
+              <input
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                value={confirmPassword}
+                onChange={event => setConfirmPassword(event.target.value)}
+                className={inputClass}
+              />
+            </label>
+          </div>
+          {passwordError && <p role="alert" className={`mt-3 rounded-lg p-3 text-sm ${errorClass}`}>{passwordError}</p>}
+          {passwordNotice && <p role="status" className={`mt-3 rounded-lg p-3 text-sm ${noticeClass}`}>{passwordNotice}</p>}
+          <div className="mt-4 flex justify-end">
+            <button type="submit" disabled={passwordBusy} className="rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60">
+              {passwordBusy ? 'Mengemas kini...' : 'Tukar kata laluan'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
 
 function StatCard({ title, value, icon, trend, color }) {
   const colorMap = {
@@ -2737,7 +3649,7 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
   );
 }
 
-function TransactionModal({ institutions, availableAssets, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
+function TransactionModal({ institutions, availableAssets, pledgedAssets, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
   const [formData, setFormData] = useState({
     date: new Date().toISOString().split('T')[0],
     type: 'Pajakan Asal',
@@ -2759,8 +3671,13 @@ function TransactionModal({ institutions, availableAssets, onClose, onSave, curr
 
   const handleChange = (e) => {
     const { name, value } = e.target;
+    if (name === 'type') {
+      setSelectedAssetIds([]);
+      setIsAssetListOpen(false);
+    }
     setFormData(prev => {
       const updated = { ...prev, [name]: value };
+      if (name === 'type') updated.weight = 10;
 
       // Auto-fill rates if institution changes
       if (name === 'institution') {
@@ -2776,12 +3693,13 @@ function TransactionModal({ institutions, availableAssets, onClose, onSave, curr
   };
 
   const handleAssetToggle = (assetId) => {
-    const updatedIds = selectedAssetIds.includes(assetId)
-      ? selectedAssetIds.filter(selectedId => selectedId !== assetId)
+    const assetCandidates = formData.type === 'Pajakan Asal' ? availableAssets : pledgedAssets;
+    const updatedIds = selectedAssetIds.map(String).includes(String(assetId))
+      ? selectedAssetIds.filter(selectedId => String(selectedId) !== String(assetId))
       : [...selectedAssetIds, assetId];
     setSelectedAssetIds(updatedIds);
-    const selectedWeight = availableAssets
-      .filter(asset => updatedIds.includes(asset.id))
+    const selectedWeight = assetCandidates
+      .filter(asset => updatedIds.map(String).includes(String(asset.id)))
       .reduce((total, asset) => total + (parseFloat(asset.weight) || 0), 0);
     setFormData(prev => ({ ...prev, weight: selectedWeight || 10 }));
   };
@@ -2849,9 +3767,11 @@ function TransactionModal({ institutions, availableAssets, onClose, onSave, curr
               </div>
             )}
 
-            {formData.type === 'Pajakan Asal' && (
+            {!formData.type.includes('Tebus') && (
               <div className="space-y-1 md:col-span-2">
-                <label className="text-sm font-semibold text-slate-700">Pilih Aset Inventori (Opsional)</label>
+                <label className="text-sm font-semibold text-slate-700">
+                  {formData.type === 'Pajakan Asal' ? 'Pilih Aset EDT yang tersedia (Opsional)' : 'Pilih Aset EDR untuk transaksi sambungan (Opsional)'}
+                </label>
                 <button
                   type="button"
                   aria-expanded={isAssetListOpen}
@@ -2861,17 +3781,19 @@ function TransactionModal({ institutions, availableAssets, onClose, onSave, curr
                   <span className={selectedAssetIds.length ? 'text-slate-800' : 'text-slate-400'}>
                     {selectedAssetIds.length
                       ? `${selectedAssetIds.length} aset dipilih (${formData.weight}g)`
-                      : 'Pilih satu atau lebih aset yang tersedia'}
+                      : formData.type === 'Pajakan Asal'
+                        ? 'Pilih satu atau lebih aset EDT yang tersedia'
+                        : 'Pilih aset EDR daripada transaksi aktif'}
                   </span>
                   <span className="text-slate-500 shrink-0">{isAssetListOpen ? '▲' : '▼'}</span>
                 </button>
                 {isAssetListOpen && (
                   <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg custom-scrollbar">
-                    {availableAssets.map(asset => (
+                    {(formData.type === 'Pajakan Asal' ? availableAssets : pledgedAssets).map(asset => (
                       <label key={asset.id} className="flex items-center gap-3 px-3 py-2.5 hover:bg-emerald-50 cursor-pointer border-b last:border-b-0 border-slate-100">
                         <input
                           type="checkbox"
-                          checked={selectedAssetIds.includes(asset.id)}
+                          checked={selectedAssetIds.map(String).includes(String(asset.id))}
                           onChange={() => handleAssetToggle(asset.id)}
                           className="h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
                         />
@@ -2881,11 +3803,17 @@ function TransactionModal({ institutions, availableAssets, onClose, onSave, curr
                         <span className="text-sm text-slate-700">{asset.type} {asset.purity} ({asset.weight}g) - {asset.supplier}</span>
                       </label>
                     ))}
-                    {availableAssets.length === 0 && <p className="p-3 text-sm text-slate-500">Tiada aset tersedia. Aset dalam Ar-Rahnu atau yang telah digunakan pada lejar tidak dipaparkan.</p>}
+                    {(formData.type === 'Pajakan Asal' ? availableAssets : pledgedAssets).length === 0 && (
+                      <p className="p-3 text-sm text-slate-500">
+                        {formData.type === 'Pajakan Asal'
+                          ? 'Tiada aset EDT tersedia. Aset yang sedang aktif dalam Ar-Rahnu tidak boleh dipilih.'
+                          : 'Tiada aset EDR dipautkan kepada transaksi aktif untuk disambung.'}
+                      </p>
+                    )}
                   </div>
                 )}
                 {!!selectedAssetIds.length && (
-                  <p className="text-xs text-slate-500">Berat transaksi dikira daripada jumlah berat aset dipilih.</p>
+                  <p className="text-xs text-slate-500">Berat transaksi dikira daripada jumlah berat aset dipilih. Pautan ini mengekalkan status check-in sehingga transaksi selesai.</p>
                 )}
               </div>
             )}
@@ -3189,8 +4117,8 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
             <div className="space-y-1 md:col-span-2">
               <label className="text-sm font-semibold text-slate-700">Status Aset</label>
               <select name="status" value={formData.status} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
-                <option value="EDT">Emas Di Tangan (EDT)</option>
-                <option value="Dalam Ar-Rahnu">Dalam Ar-Rahnu</option>
+                <option value="EDT">EDT · Available / Check-out</option>
+                <option value="Dalam Ar-Rahnu">EDR · Dalam Ar-Rahnu / Check-in</option>
               </select>
             </div>
 
