@@ -12,6 +12,29 @@ const jsonResponse = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 
+const getErrorInfo = (error: unknown) => {
+  if (error instanceof Error) {
+    const authError = error as Error & { code?: string; details?: string };
+    return {
+      message: authError.message,
+      code: authError.code,
+      details: authError.details,
+    };
+  }
+  if (typeof error === 'string') return { message: error };
+  if (error && typeof error === 'object') {
+    const record = error as Record<string, unknown>;
+    const message = [record.message, record.error_description, record.details, record.hint]
+      .find((value): value is string => typeof value === 'string' && value.length > 0);
+    return {
+      message: message || 'Ralat Supabase tidak memberikan butiran.',
+      code: typeof record.code === 'string' ? record.code : undefined,
+      details: typeof record.details === 'string' ? record.details : undefined,
+    };
+  }
+  return { message: 'Ralat tidak diketahui semasa mengurus pengguna.' };
+};
+
 Deno.serve(async (request) => {
   if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders });
   if (request.method !== 'POST') return jsonResponse({ error: 'Method not allowed.' }, 405);
@@ -38,10 +61,11 @@ Deno.serve(async (request) => {
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const caller = userResult.user;
+  let action = 'unknown';
 
   try {
     const body = await request.json();
-    const action = String(body.action || '');
+    action = String(body.action || '');
 
     if (action === 'bootstrap') {
       const { data: existingMembership, error: membershipError } = await adminClient
@@ -459,10 +483,8 @@ Deno.serve(async (request) => {
 
     return jsonResponse({ error: 'Tindakan tidak diketahui.' }, 400);
   } catch (error) {
-    const authError = error instanceof Error ? error as Error & { code?: string; status?: number } : null;
-    console.error('User administration request failed:', authError
-      ? { message: authError.message, code: authError.code, status: authError.status }
-      : 'Unknown user administration error');
-    return jsonResponse({ error: error instanceof Error ? error.message : 'Permintaan pengurusan pengguna gagal.' }, 500);
+    const errorInfo = getErrorInfo(error);
+    console.error('User administration request failed:', { action, ...errorInfo });
+    return jsonResponse({ error: errorInfo.message }, 500);
   }
 });
