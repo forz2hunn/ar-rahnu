@@ -4,8 +4,10 @@
 
 [build.environment]
   NODE_VERSION = "22"
-  # Public Supabase project URL (not a secret). The anon/publishable key is set as a Netlify environment variable.
-  VITE_SUPABASE_URL = "https://zyikvjbnroicbeezpxvx.supabase.co"
+  # VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set as Netlify environment variables (not hardcoded here).
+  # The Supabase URL is public by design and Vite inlines it into the client bundle,
+  # so exclude it from secrets scanning of the build output.
+  SECRETS_SCAN_OMIT_KEYS = "VITE_SUPABASE_URL"
 
 # Always fetch the latest service worker and manifest
 [[headers]]
