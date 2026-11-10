@@ -866,6 +866,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isInstitutionModalOpen, setIsInstitutionModalOpen] = useState(false);
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState(null);
   const [editingAsset, setEditingAsset] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
@@ -1595,6 +1596,34 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setIsModalOpen(false);
   };
 
+  const handleEditTransaction = (transaction) => {
+    setEditingTransaction(transaction);
+    setIsModalOpen(true);
+  };
+
+  const handleSaveTransaction = (updatedTx) => {
+    const selectedAssetIds = !updatedTx.type.includes('Tebus') ? (updatedTx.selectedAssetIds || []) : [];
+    const { selectedAssetId, ...transactionData } = updatedTx;
+    const transactionStatus = getTransactionStatus({ ...transactionData, transactionStatus: undefined });
+
+    setTransactions(prev => prev.map(transaction =>
+      transaction.id === editingTransaction.id
+        ? {
+            ...transaction,
+            ...transactionData,
+            id: transaction.id,
+            status: transaction.status,
+            transactionStatus,
+            selectedAssetIds
+          }
+        : transaction
+    ));
+    setToastMessage(`Transaksi #${updatedTx.refNo} berjaya dikemaskini!`);
+    setIsModalOpen(false);
+    setEditingTransaction(null);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
   const handleEditAsset = (asset) => {
     setEditingAsset(asset);
     setIsAssetModalOpen(true);
@@ -1747,6 +1776,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     () => assets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
     [assets, checkedInAssetIds]
   );
+  const editingTransactionAssetIds = new Set(
+    (editingTransaction ? getTransactionAssetIds(editingTransaction) : []).map(String)
+  );
+  const editingTransactionAssets = assets.filter(asset => editingTransactionAssetIds.has(String(asset.id)));
+  const getTransactionModalAssets = candidateAssets => [
+    ...candidateAssets,
+    ...editingTransactionAssets.filter(asset =>
+      !candidateAssets.some(candidate => String(candidate.id) === String(asset.id))
+    )
+  ];
 
   if (!isDataReady) {
     return (
@@ -2649,7 +2688,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     <DownloadCloud size={18} className="mr-2" /> Export
                   </button>
                   <button
-                    onClick={() => setIsModalOpen(true)}
+                    onClick={() => { setEditingTransaction(null); setIsModalOpen(true); }}
                     className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm"
                   >
                     <Plus size={18} className="mr-2" /> New Entry
@@ -2766,6 +2805,14 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             </button>
                           </td>
                           <td className="p-4 text-center space-x-1">
+                            <button
+                              onClick={() => handleEditTransaction(tx)}
+                              className="text-slate-400 hover:text-blue-600 transition-colors p-2 rounded-lg hover:bg-blue-50"
+                              title="Edit transaksi"
+                              aria-label={`Edit transaksi ${tx.refNo}`}
+                            >
+                              <Pencil size={18} />
+                            </button>
                             <button
                               onClick={() => handleToggleStatus(tx.id)}
                               className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50"
@@ -3344,10 +3391,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {isModalOpen && (
         <TransactionModal
           institutions={institutions}
-          availableAssets={availableAssetsForTransaction}
-          pledgedAssets={assets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id)))}
-          onClose={() => setIsModalOpen(false)}
-          onSave={handleAddTransaction}
+          availableAssets={getTransactionModalAssets(availableAssetsForTransaction)}
+          pledgedAssets={getTransactionModalAssets(assets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id))))}
+          initialData={editingTransaction}
+          onClose={() => { setIsModalOpen(false); setEditingTransaction(null); }}
+          onSave={editingTransaction ? handleSaveTransaction : handleAddTransaction}
           currentGoldPrice={currentGoldPrice}
           isRefreshing={isRefreshing}
           onRefresh={handleRefresh}
@@ -3782,25 +3830,46 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
   );
 }
 
-function TransactionModal({ institutions, availableAssets, pledgedAssets, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
-  const [formData, setFormData] = useState({
-    date: new Date().toISOString().split('T')[0],
-    type: 'Pajakan Asal',
-    redemptionDate: '',
-    institution: institutions?.[0]?.name || '',
-    refNo: '',
-    weight: 10,
-    marhunPrice: institutions?.[0]?.marhunRate || 0,
-    margin: institutions?.[0]?.maxMargin || 0,
-    redemption: 0,
-    remarks: ''
-  });
-  const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>([]);
+function TransactionModal({ institutions, availableAssets, pledgedAssets, initialData, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
+  const [formData, setFormData] = useState(() => ({
+    date: initialData?.date || new Date().toISOString().split('T')[0],
+    type: initialData?.type || 'Pajakan Asal',
+    redemptionDate: initialData?.redemptionDate || '',
+    institution: initialData?.institution || institutions?.[0]?.name || '',
+    refNo: initialData?.refNo || '',
+    weight: initialData?.weight ?? 10,
+    marhunPrice: initialData?.marhunPrice ?? institutions?.[0]?.marhunRate ?? 0,
+    margin: initialData?.margin ?? institutions?.[0]?.maxMargin ?? 0,
+    redemption: initialData?.redemption ?? 0,
+    fee: initialData?.fee ?? 0,
+    remarks: initialData?.remarks || ''
+  }));
+  const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>(
+    getTransactionAssetIds(initialData || {})
+  );
   const [isAssetListOpen, setIsAssetListOpen] = useState(false);
 
   // Dynamic calculations based on EGM spreadsheet logic
   const calculatedLoan = (parseFloat(formData.weight) || 0) * (parseFloat(formData.marhunPrice) || 0) * ((parseFloat(formData.margin) || 0) / 100);
-  const calculatedProfit = (formData.type !== 'Pajakan Asal') ? (calculatedLoan - (parseFloat(formData.redemption) || 0)) : 0;
+  const hasLoanInputsChanged = !initialData ||
+    formData.type !== initialData.type ||
+    (parseFloat(formData.weight) || 0) !== (parseFloat(initialData.weight) || 0) ||
+    (parseFloat(formData.marhunPrice) || 0) !== (parseFloat(initialData.marhunPrice) || 0) ||
+    (parseFloat(formData.margin) || 0) !== (parseFloat(initialData.margin) || 0);
+  const loanForSave = initialData && !hasLoanInputsChanged
+    ? Number(initialData.loan) || 0
+    : calculatedLoan;
+  const redemptionForSave = formData.type === 'Pajakan Asal'
+    ? initialData && !hasLoanInputsChanged
+      ? Number(initialData.redemption) || 0
+      : calculatedLoan + (parseFloat(formData.fee) || 0)
+    : parseFloat(formData.redemption) || 0;
+  const hasFinancialInputsChanged = hasLoanInputsChanged ||
+    (formData.type !== 'Pajakan Asal' &&
+      redemptionForSave !== (Number(initialData?.redemption) || 0));
+  const profitForSave = initialData && !hasFinancialInputsChanged
+    ? Number(initialData.profit) || 0
+    : formData.type === 'Pajakan Asal' ? 0 : loanForSave - redemptionForSave;
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -3845,10 +3914,10 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, onClos
       weight: parseFloat(formData.weight) || 0,
       marhunPrice: parseFloat(formData.marhunPrice) || 0,
       margin: parseFloat(formData.margin) || 0,
-      loan: calculatedLoan,
-      fee: 0, // Simplified for this UI
-      redemption: formData.type === 'Pajakan Asal' ? calculatedLoan : (parseFloat(formData.redemption) || 0),
-      profit: calculatedProfit,
+      loan: loanForSave,
+      fee: parseFloat(formData.fee) || 0,
+      redemption: redemptionForSave,
+      profit: profitForSave,
     });
   };
 
@@ -3858,7 +3927,9 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, onClos
 
         <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
           <h2 className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
-            <Plus className="mr-2 text-emerald-600" size={20} /> Add Ledger Entry
+            {initialData
+              ? <><Pencil className="mr-2 text-emerald-600" size={20} /> Edit Ledger Entry</>
+              : <><Plus className="mr-2 text-emerald-600" size={20} /> Add Ledger Entry</>}
           </h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200">
             <X size={20} />
@@ -3965,6 +4036,18 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, onClos
               <input type="text" name="refNo" value={formData.refNo} onChange={handleChange} placeholder="e.g. 1007-1008" required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
             </div>
 
+            <div className="space-y-1 md:col-span-2">
+              <label htmlFor="transaction-remarks" className="text-sm font-semibold text-slate-700">Catatan</label>
+              <textarea
+                id="transaction-remarks"
+                name="remarks"
+                value={formData.remarks}
+                onChange={handleChange}
+                rows={2}
+                className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
+              />
+            </div>
+
             <div className="space-y-1">
               <label className="text-sm font-semibold text-slate-700">Gold Weight (g)</label>
               <input type="number" step="0.01" name="weight" value={formData.weight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
@@ -4012,12 +4095,12 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, onClos
           <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <p className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1">Calculated Loan</p>
-              <p className="text-xl font-bold text-slate-800">{formatRM(calculatedLoan)}</p>
+              <p className="text-xl font-bold text-slate-800">{formatRM(loanForSave)}</p>
             </div>
             <div>
               <p className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1">Projected Profit</p>
-              <p className={`text-xl font-bold ${calculatedProfit > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>
-                {formData.type === 'Pajakan Asal' ? 'N/A' : (calculatedProfit > 0 ? `+${formatRM(calculatedProfit)}` : formatRM(calculatedProfit))}
+              <p className={`text-xl font-bold ${profitForSave > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>
+                {formData.type === 'Pajakan Asal' ? 'N/A' : (profitForSave > 0 ? `+${formatRM(profitForSave)}` : formatRM(profitForSave))}
               </p>
             </div>
           </div>
@@ -4027,7 +4110,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, onClos
               Cancel
             </button>
             <button type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center">
-              Save Transaction
+              {initialData ? 'Kemaskini Transaksi' : 'Save Transaction'}
             </button>
           </div>
         </form>
