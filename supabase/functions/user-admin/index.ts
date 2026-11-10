@@ -12,6 +12,14 @@ const jsonResponse = (body: unknown, status = 200) =>
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   });
 
+const getSessionId = (accessToken: string) => {
+  const encodedPayload = accessToken.split('.')[1];
+  if (!encodedPayload) return null;
+  const base64Payload = encodedPayload.replace(/-/g, '+').replace(/_/g, '/');
+  const payload = JSON.parse(atob(base64Payload.padEnd(Math.ceil(base64Payload.length / 4) * 4, '=')));
+  return typeof payload.session_id === 'string' ? payload.session_id : null;
+};
+
 const getErrorInfo = (error: unknown) => {
   if (error instanceof Error) {
     const authError = error as Error & { code?: string; details?: string };
@@ -56,14 +64,47 @@ Deno.serve(async (request) => {
   });
   const { data: userResult, error: userError } = await userClient.auth.getUser(accessToken);
   if (userError || !userResult.user) return jsonResponse({ error: 'The current session is invalid.' }, 401);
+  const sessionId = getSessionId(accessToken);
 
   const adminClient = createClient(supabaseUrl, serviceRoleKey, {
+    global: {
+      headers: {
+        'x-audit-actor-user-id': userResult.user.id,
+        'x-audit-session-id': sessionId || '',
+        'x-audit-user-agent': request.headers.get('user-agent') || '',
+        'x-audit-forwarded-for': request.headers.get('x-forwarded-for') || '',
+        'x-audit-proxy-ip': request.headers.get('x-real-ip') || '',
+      },
+    },
     auth: { persistSession: false, autoRefreshToken: false },
   });
   const caller = userResult.user;
   let action = 'unknown';
 
   try {
+    const recordAuthAuditEvent = async (
+      auditAction: string,
+      subjectUserId: string,
+      payloadBefore: Record<string, unknown> | null,
+      payloadAfter: Record<string, unknown> | null,
+    ) => {
+      const { error } = await adminClient.rpc('ar_rahnu_append_audit_event', {
+        p_action: auditAction,
+        p_resource_type: 'auth.users',
+        p_resource_id: subjectUserId,
+        p_organization_id: organizationId,
+        p_subject_user_id: subjectUserId,
+        p_source_module: 'User Management',
+        p_context: { edge_function_action: action },
+        p_payload_before: payloadBefore,
+        p_payload_after: payloadAfter,
+      });
+      if (error) {
+        console.error('User-admin action succeeded but its audit event could not be recorded:', { action, error });
+        throw new Error(`Tindakan berjaya tetapi rekod audit gagal disimpan: ${error.message}`);
+      }
+    };
+
     const body = await request.json();
     action = String(body.action || '');
 
@@ -213,6 +254,11 @@ Deno.serve(async (request) => {
         await adminClient.auth.admin.deleteUser(data.user.id);
         throw addMemberError;
       }
+      await recordAuthAuditEvent('INVITE_USER', data.user.id, null, {
+        email,
+        invited: true,
+        role,
+      });
       return jsonResponse({ invited: true });
     }
 
@@ -254,6 +300,11 @@ Deno.serve(async (request) => {
         }
         throw addMemberError;
       }
+      await recordAuthAuditEvent('CREATE_USER', data.user.id, null, {
+        email,
+        created: true,
+        role,
+      });
       return jsonResponse({ created: true });
     }
 
@@ -291,6 +342,12 @@ Deno.serve(async (request) => {
 
       const { error } = await adminClient.auth.admin.updateUserById(userId, attributes);
       if (error) throw error;
+      await recordAuthAuditEvent('UPDATE_USER_AUTH', userId, {
+        email: currentUser.user?.email || null,
+      }, {
+        email,
+        password_changed: Boolean(password),
+      });
       return jsonResponse({ updated: true });
     }
 
@@ -458,6 +515,7 @@ Deno.serve(async (request) => {
         }
         throw deleteError;
       }
+      await recordAuthAuditEvent('DELETE_USER_ACCOUNT', userId, { account_exists: true }, { account_exists: false });
       return jsonResponse({ deleted: true });
     }
 
@@ -478,6 +536,7 @@ Deno.serve(async (request) => {
         redirectTo: request.headers.get('Origin') || undefined,
       });
       if (error) throw error;
+      await recordAuthAuditEvent('RESET_PASSWORD_EMAIL_SENT', userId, { reset_email_sent: false }, { reset_email_sent: true });
       return jsonResponse({ sent: true });
     }
 

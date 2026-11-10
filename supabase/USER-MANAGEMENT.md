@@ -40,3 +40,5 @@ Sign in to the app with that account after the schema and function are deployed.
 - **Staff:** access only their personal portfolio.
 
 Deleting a user permanently deletes their Supabase Auth account. Related organization membership and user portfolio data are removed through the database foreign-key cascades. The action cannot be undone. Users cannot delete their own account or the last active Admin. An Admin deleting the organization creator takes over organization ownership first; Managers cannot delete Admin accounts. Deploy the updated `user-admin` Edge Function for account creation and the latest deletion behavior to take effect.
+
+When [`audit-trail.sql`](./audit-trail.sql) is installed and the updated `user-admin` Edge Function is deployed, membership/organization changes and user account actions are captured in the audit chain. Password values are never logged. Login/logout events are not yet ingested into this chain; consult Supabase Auth Audit Logs for authentication evidence.
