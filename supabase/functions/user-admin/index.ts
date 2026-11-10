@@ -118,7 +118,7 @@ Deno.serve(async (request) => {
     const isDeleteAction = action === 'delete-user';
 
     if (!isAdmin && action !== 'list' && !isDeleteAction) {
-      return jsonResponse({ error: 'Hanya Admin boleh menjemput pengguna atau mengubah peranan dan akses.' }, 403);
+      return jsonResponse({ error: 'Hanya Admin boleh menambah pengguna atau mengubah maklumat, peranan dan akses.' }, 403);
     }
 
     if (action === 'list') {
@@ -190,6 +190,84 @@ Deno.serve(async (request) => {
         throw addMemberError;
       }
       return jsonResponse({ invited: true });
+    }
+
+    if (action === 'create-user') {
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = String(body.password || '');
+      const role = String(body.role || '');
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return jsonResponse({ error: 'Masukkan alamat e-mel yang sah.' }, 400);
+      }
+      if (password.length < 12) {
+        return jsonResponse({ error: 'Kata laluan mesti sekurang-kurangnya 12 aksara.' }, 400);
+      }
+      if (!['Manager', 'Staff', 'Admin'].includes(role)) {
+        return jsonResponse({ error: 'Peranan pengguna tidak sah.' }, 400);
+      }
+
+      const { data, error } = await adminClient.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+      });
+      if (error) {
+        if (error.code === 'email_exists' || error.code === 'user_already_exists') {
+          return jsonResponse({ error: 'Alamat e-mel ini sudah mempunyai akaun.' }, 409);
+        }
+        throw error;
+      }
+      if (!data.user) throw new Error('Supabase tidak memulangkan pengguna baharu.');
+
+      const { error: addMemberError } = await adminClient
+        .from('ar_rahnu_organization_members')
+        .insert({ organization_id: organizationId, user_id: data.user.id, role });
+      if (addMemberError) {
+        const { error: cleanupError } = await adminClient.auth.admin.deleteUser(data.user.id);
+        if (cleanupError) {
+          console.error('Failed to clean up newly created user after membership insert failed:', cleanupError);
+          throw new Error('Akaun pengguna diwujudkan tetapi keahlian organisasi gagal ditambah. Sila hubungi sokongan.');
+        }
+        throw addMemberError;
+      }
+      return jsonResponse({ created: true });
+    }
+
+    if (action === 'update-user') {
+      const userId = String(body.userId || '');
+      const email = String(body.email || '').trim().toLowerCase();
+      const password = typeof body.password === 'string' ? body.password : '';
+      if (!userId || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return jsonResponse({ error: 'Pengguna atau alamat e-mel tidak sah.' }, 400);
+      }
+      if (password && password.length < 12) {
+        return jsonResponse({ error: 'Kata laluan mesti sekurang-kurangnya 12 aksara.' }, 400);
+      }
+
+      const { data: target, error: targetError } = await adminClient
+        .from('ar_rahnu_organization_members')
+        .select('user_id')
+        .eq('organization_id', organizationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target) return jsonResponse({ error: 'Pengguna tidak ditemui dalam organisasi.' }, 404);
+
+      const { data: currentUser, error: currentUserError } = await adminClient.auth.admin.getUserById(userId);
+      if (currentUserError) throw currentUserError;
+      const attributes: { email?: string; email_confirm?: boolean; password?: string } = {};
+      if (currentUser.user?.email?.toLowerCase() !== email) {
+        attributes.email = email;
+        attributes.email_confirm = true;
+      }
+      if (password) attributes.password = password;
+      if (!Object.keys(attributes).length) {
+        return jsonResponse({ error: 'Tiada perubahan untuk disimpan.' }, 400);
+      }
+
+      const { error } = await adminClient.auth.admin.updateUserById(userId, attributes);
+      if (error) throw error;
+      return jsonResponse({ updated: true });
     }
 
     if (action === 'update-role') {
@@ -310,13 +388,10 @@ Deno.serve(async (request) => {
 
       const { data: organization, error: organizationError } = await adminClient
         .from('ar_rahnu_organizations')
-        .select('created_by')
+        .select('id, created_by')
         .eq('id', organizationId)
         .single();
       if (organizationError) throw organizationError;
-      if (organization.created_by === userId) {
-        return jsonResponse({ error: 'Akaun pencipta organisasi tidak boleh dipadam. Pindahkan pemilikan organisasi terlebih dahulu.' }, 409);
-      }
 
       if (target.role === 'Admin' && target.active) {
         const { count, error } = await adminClient
@@ -331,8 +406,34 @@ Deno.serve(async (request) => {
         }
       }
 
+      const isOrganizationOwner = organization.created_by === userId;
+      if (isOrganizationOwner && !isAdmin) {
+        return jsonResponse({ error: 'Hanya Admin boleh memadam akaun pemilik organisasi.' }, 403);
+      }
+      if (isOrganizationOwner) {
+        const { error: transferError } = await adminClient
+          .from('ar_rahnu_organizations')
+          .update({ created_by: caller.id })
+          .eq('id', organization.id)
+          .eq('created_by', userId);
+        if (transferError) throw transferError;
+      }
+
       const { error: deleteError } = await adminClient.auth.admin.deleteUser(userId);
-      if (deleteError) throw deleteError;
+      if (deleteError) {
+        if (isOrganizationOwner) {
+          const { error: restoreOwnerError } = await adminClient
+            .from('ar_rahnu_organizations')
+            .update({ created_by: userId })
+            .eq('id', organization.id)
+            .eq('created_by', caller.id);
+          if (restoreOwnerError) {
+            console.error('Failed to restore organization owner after account deletion failed:', restoreOwnerError);
+            throw new Error('Akaun gagal dipadam dan pemilikan organisasi mungkin telah berubah. Sila hubungi sokongan.');
+          }
+        }
+        throw deleteError;
+      }
       return jsonResponse({ deleted: true });
     }
 

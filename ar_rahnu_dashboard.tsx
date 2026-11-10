@@ -872,8 +872,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [supplierSearch, setSupplierSearch] = useState('');
   const [toastMessage, setToastMessage] = useState(null);
   const [organizationUsers, setOrganizationUsers] = useState([]);
-  const [inviteEmail, setInviteEmail] = useState('');
-  const [inviteRole, setInviteRole] = useState('Staff');
+  const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserRole, setNewUserRole] = useState('Staff');
+  const [newUserPassword, setNewUserPassword] = useState('');
+  const [confirmNewUserPassword, setConfirmNewUserPassword] = useState('');
+  const [editingOrganizationUser, setEditingOrganizationUser] = useState(null);
   const [userManagementBusy, setUserManagementBusy] = useState(false);
   const [userManagementError, setUserManagementError] = useState('');
   const [userManagementNotice, setUserManagementNotice] = useState('');
@@ -902,9 +905,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           console.error('Respons ralat pengurusan pengguna tidak dapat dibaca:', parseError);
         }
       }
+      if (
+        ['create-user', 'update-user'].includes(body.action) &&
+        typeof responseError === 'string' &&
+        /tindakan tidak diketahui|unknown action/i.test(responseError)
+      ) {
+        throw new Error('Fungsi pengurusan pengguna di Supabase belum dikemas kini. Deploy semula fungsi user-admin, kemudian cuba lagi.');
+      }
       throw new Error(responseError || error.message);
     }
-    if (data?.error) throw new Error(data.error);
+    if (data?.error) {
+      if (
+        ['create-user', 'update-user'].includes(body.action) &&
+        typeof data.error === 'string' &&
+        /tindakan tidak diketahui|unknown action/i.test(data.error)
+      ) {
+        throw new Error('Fungsi pengurusan pengguna di Supabase belum dikemas kini. Deploy semula fungsi user-admin, kemudian cuba lagi.');
+      }
+      throw new Error(data.error);
+    }
     return data;
   };
 
@@ -947,10 +966,48 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
   };
 
-  const handleInviteUser = async (event) => {
+  const handleCreateOrganizationUser = async (event) => {
     event.preventDefault();
-    const sent = await runUserAdminAction({ action: 'invite', email: inviteEmail, role: inviteRole }, 'Jemputan telah dihantar melalui e-mel.');
-    if (sent) setInviteEmail('');
+    if (newUserPassword.length < 12) {
+      setUserManagementError('Kata laluan mesti sekurang-kurangnya 12 aksara.');
+      return;
+    }
+    if (newUserPassword !== confirmNewUserPassword) {
+      setUserManagementError('Pengesahan kata laluan tidak sepadan.');
+      return;
+    }
+    const created = await runUserAdminAction(
+      { action: 'create-user', email: newUserEmail, password: newUserPassword, role: newUserRole },
+      'Akaun pengguna berjaya diwujudkan.'
+    );
+    if (created) {
+      setNewUserEmail('');
+      setNewUserPassword('');
+      setConfirmNewUserPassword('');
+    }
+  };
+
+  const handleUpdateOrganizationUser = async (event) => {
+    event.preventDefault();
+    if (!editingOrganizationUser) return;
+    if (editingOrganizationUser.password && editingOrganizationUser.password.length < 12) {
+      setUserManagementError('Kata laluan baharu mesti sekurang-kurangnya 12 aksara.');
+      return;
+    }
+    if (editingOrganizationUser.password !== editingOrganizationUser.confirmPassword) {
+      setUserManagementError('Pengesahan kata laluan baharu tidak sepadan.');
+      return;
+    }
+    const updated = await runUserAdminAction(
+      {
+        action: 'update-user',
+        userId: editingOrganizationUser.id,
+        email: editingOrganizationUser.email,
+        password: editingOrganizationUser.password
+      },
+      `Maklumat ${editingOrganizationUser.email} berjaya dikemas kini.`
+    );
+    if (updated) setEditingOrganizationUser(null);
   };
 
   const handleDeleteOrganizationUser = (member) => {
@@ -2111,26 +2168,48 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 </div>}
               </div>
 
-              {isOrganizationAdmin && <form onSubmit={handleInviteUser} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
-                <h3 className="flex items-center gap-2 font-bold text-slate-800"><Mail size={18} className="text-corporate-teal-600" /> Jemput pengguna</h3>
-                <p className="mt-1 text-sm text-slate-500">E-mel mengandungi pautan jemputan selamat, bukan kata laluan. Pengguna wajib menetapkan kata laluan baharu sebelum masuk ke sistem.</p>
-                <div className="mt-4 grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem_auto]">
+              {isOrganizationAdmin && <form onSubmit={handleCreateOrganizationUser} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
+                <h3 className="flex items-center gap-2 font-bold text-slate-800"><UserRound size={18} className="text-corporate-teal-600" /> Tambah pengguna</h3>
+                <p className="mt-1 text-sm text-slate-500">Akaun diwujudkan terus dengan e-mel dan kata laluan awal yang ditetapkan oleh Admin (minimum 12 aksara).</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   <input
                     type="email"
                     required
-                    value={inviteEmail}
-                    onChange={event => setInviteEmail(event.target.value)}
+                    value={newUserEmail}
+                    onChange={event => setNewUserEmail(event.target.value)}
                     placeholder="nama@contoh.com"
-                    aria-label="E-mel pengguna yang dijemput"
+                    aria-label="E-mel pengguna baharu"
                     className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
                   />
-                  <select value={inviteRole} onChange={event => setInviteRole(event.target.value)} aria-label="Peranan pengguna baharu" className="rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500">
+                  <select value={newUserRole} onChange={event => setNewUserRole(event.target.value)} aria-label="Peranan pengguna baharu" className="rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500">
                     <option value="Staff">Staff</option>
                     <option value="Manager">Manager</option>
                     <option value="Admin">Admin</option>
                   </select>
-                  <button type="submit" disabled={userManagementBusy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:opacity-50">
-                    <Mail size={16} /> Hantar jemputan
+                  <input
+                    type="password"
+                    required
+                    minLength={12}
+                    autoComplete="new-password"
+                    value={newUserPassword}
+                    onChange={event => setNewUserPassword(event.target.value)}
+                    placeholder="Kata laluan awal (min. 12 aksara)"
+                    aria-label="Kata laluan awal pengguna"
+                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                  />
+                  <input
+                    type="password"
+                    required
+                    minLength={12}
+                    autoComplete="new-password"
+                    value={confirmNewUserPassword}
+                    onChange={event => setConfirmNewUserPassword(event.target.value)}
+                    placeholder="Sahkan kata laluan"
+                    aria-label="Sahkan kata laluan awal pengguna"
+                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                  />
+                  <button type="submit" disabled={userManagementBusy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:opacity-50 sm:col-span-2">
+                    <Plus size={16} /> Tambah pengguna
                   </button>
                 </div>
               </form>}
@@ -2152,8 +2231,62 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           {' · '}
                           {member.lastSignInAt ? `Log masuk terakhir ${new Date(member.lastSignInAt).toLocaleDateString('ms-MY')}` : 'Belum pernah log masuk'}
                         </p>
+                        {editingOrganizationUser?.id === member.id && (
+                          <form onSubmit={handleUpdateOrganizationUser} className="mt-3 grid gap-2 sm:grid-cols-2">
+                            <input
+                              type="email"
+                              required
+                              value={editingOrganizationUser.email}
+                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, email: event.target.value })}
+                              aria-label={`E-mel baharu ${member.email}`}
+                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                            />
+                            <input
+                              type="password"
+                              minLength={12}
+                              autoComplete="new-password"
+                              value={editingOrganizationUser.password}
+                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, password: event.target.value })}
+                              placeholder="Kata laluan baharu (pilihan)"
+                              aria-label={`Kata laluan baharu ${member.email}`}
+                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                            />
+                            <input
+                              type="password"
+                              minLength={12}
+                              autoComplete="new-password"
+                              value={editingOrganizationUser.confirmPassword}
+                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, confirmPassword: event.target.value })}
+                              placeholder="Sahkan kata laluan baharu"
+                              aria-label={`Sahkan kata laluan baharu ${member.email}`}
+                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                            />
+                            <div className="flex gap-2 sm:col-span-2">
+                              <button type="submit" disabled={userManagementBusy} className="rounded-lg bg-corporate-teal-600 px-3 py-2 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:opacity-50">
+                                Simpan perubahan
+                              </button>
+                              <button type="button" disabled={userManagementBusy} onClick={() => setEditingOrganizationUser(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                                Batal
+                              </button>
+                            </div>
+                          </form>
+                        )}
                       </div>
                       <div className="flex flex-wrap items-center gap-2">
+                        {isOrganizationAdmin && member.id !== user.id && <button
+                          type="button"
+                          disabled={userManagementBusy}
+                          onClick={() => setEditingOrganizationUser(
+                            editingOrganizationUser?.id === member.id
+                              ? null
+                              : { id: member.id, email: member.email, password: '', confirmPassword: '' }
+                          )}
+                          aria-label={`Edit akaun ${member.email}`}
+                          title="Edit e-mel atau tetapkan kata laluan baharu"
+                          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          <Pencil size={15} /><span className="sm:hidden">Edit pengguna</span>
+                        </button>}
                         {isOrganizationAdmin && <select
                           value={member.role}
                           aria-label={`Peranan ${member.email}`}
@@ -2188,9 +2321,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         {member.id !== user.id && (isOrganizationAdmin || member.role !== 'Admin') && (
                           <button
                             type="button"
-                            disabled={userManagementBusy || member.isOrganizationOwner}
+                            disabled={userManagementBusy || (member.isOrganizationOwner && !isOrganizationAdmin)}
                             onClick={() => handleDeleteOrganizationUser(member)}
-                            title={member.isOrganizationOwner ? 'Pencipta organisasi tidak boleh dipadam' : 'Padam akaun pengguna secara kekal'}
+                            title={member.isOrganizationOwner ? 'Pemilikan organisasi akan dipindahkan kepada Admin yang memadam' : 'Padam akaun pengguna secara kekal'}
                             aria-label={`Padam akaun ${member.email}`}
                             className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
                           >
