@@ -109,6 +109,27 @@ type AuditEvent = {
   event_hash: string;
   created_at: string;
 };
+const auditActionLabels: Record<string, string> = {
+  CREATE: 'Rekod baharu ditambah',
+  UPDATE: 'Maklumat dikemas kini',
+  DELETE: 'Rekod dipadam',
+  INVITE_USER: 'Jemputan pengguna dihantar',
+  CREATE_USER: 'Akaun pengguna diwujudkan',
+  UPDATE_USER_AUTH: 'Maklumat akaun dikemas kini',
+  DELETE_USER_ACCOUNT: 'Akaun pengguna dipadam',
+  RESET_PASSWORD_EMAIL_SENT: 'E-mel tetapan semula kata laluan dihantar'
+};
+const auditModuleLabels: Record<string, string> = {
+  Portfolio: 'Portfolio',
+  'User Management': 'Pengurusan pengguna',
+  'Organization Management': 'Pengurusan organisasi'
+};
+const auditResourceLabels: Record<string, string> = {
+  ar_rahnu_user_data: 'Data portfolio',
+  ar_rahnu_organization_members: 'Keahlian organisasi',
+  ar_rahnu_organizations: 'Maklumat organisasi',
+  'auth.users': 'Akaun pengguna'
+};
 type TrafficEvent = {
   event_id: string;
   organization_id: string;
@@ -302,6 +323,20 @@ const initialAssets = [
 
 // --- UTILS ---
 const formatRM = (val) => new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR' }).format(val);
+const formatMalaysiaDateTime = (timestamp: string) => {
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return timestamp;
+  return `${new Intl.DateTimeFormat('ms-MY', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+    timeZone: 'Asia/Kuala_Lumpur'
+  }).format(date)} MYT`;
+};
 const getDaysUntilDate = (dateString) => {
   if (!dateString) return null;
   const [year, month, day] = dateString.split('-').map(Number);
@@ -1067,7 +1102,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   useEffect(() => {
     setTrafficCaptureEnabled(false);
-    if (!isDataReady || !auditChainScope) return;
+    if (!auditChainScope) return;
     let active = true;
     setTrafficSchemaReady(null);
     supabaseClient
@@ -1093,7 +1128,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       active = false;
       setTrafficCaptureEnabled(false);
     };
-  }, [isDataReady, auditChainScope, trafficPaused, user.id]);
+  }, [auditChainScope, trafficPaused, user.id]);
 
   const handleToggleTrafficCapture = () => {
     if (!trafficSchemaReady) return;
@@ -1272,7 +1307,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   useEffect(() => {
-    if (activeTab !== 'users' || !canManageOrganizationUsers) return;
+    const shouldLoadUsers = activeTab === 'users' || (activeTab === 'audit' && auditView === 'trail');
+    if (!shouldLoadUsers || !canManageOrganizationUsers) return;
     let active = true;
     setUserManagementError('');
     invokeUserAdmin({ action: 'list' })
@@ -1283,7 +1319,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         if (active) setUserManagementError(error.message || 'Senarai pengguna tidak dapat dimuatkan.');
       });
     return () => { active = false; };
-  }, [activeTab, organizationMembership?.role]);
+  }, [activeTab, auditView, organizationMembership?.role]);
 
   const runUserAdminAction = async (body, successMessage) => {
     setUserManagementBusy(true);
@@ -2617,34 +2653,46 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <table className="w-full min-w-[900px] text-left text-sm">
                     <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                       <tr>
-                        <th className="px-4 py-3">UTC / Seq</th>
-                        <th className="px-4 py-3">Who</th>
-                        <th className="px-4 py-3">What / Where</th>
+                        <th className="px-4 py-3">Waktu Malaysia / Seq</th>
+                        <th className="px-4 py-3">Siapa</th>
+                        <th className="px-4 py-3">Perubahan</th>
                         <th className="px-4 py-3">Source IP</th>
-                        <th className="px-4 py-3">Event ID</th>
+                        <th className="px-4 py-3">Rujukan rekod</th>
                         <th className="px-4 py-3">SHA-256</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {auditEvents.map(event => {
                         const payload = event.event_payload;
+                        const actor = organizationUsers.find(member => member.id === payload.actor_user_id);
+                        const actorName = actor?.email ||
+                          (payload.actor_user_id === user.id ? user.email : null) ||
+                          (payload.actor_user_id ? 'Ahli organisasi' : 'Sistem');
+                        const actionLabel = auditActionLabels[payload.action.toUpperCase()] || 'Perubahan direkodkan';
+                        const moduleLabel = auditModuleLabels[payload.source_module] || 'Sistem';
+                        const resourceLabel = auditResourceLabels[payload.resource_type] || 'Rekod berkaitan';
                         return (
                           <tr key={event.event_id} className="align-top hover:bg-slate-50">
                             <td className="whitespace-nowrap px-4 py-3">
-                              <p className="font-medium text-slate-800">{payload.occurred_at_utc}</p>
+                              <p className="font-medium text-slate-800">
+                                <time dateTime={payload.occurred_at_utc} title={`UTC asal: ${payload.occurred_at_utc}`}>
+                                  {formatMalaysiaDateTime(payload.occurred_at_utc)}
+                                </time>
+                              </p>
                               <p className="text-xs text-slate-500">#{event.sequence_no}</p>
                             </td>
-                            <td className="max-w-48 truncate px-4 py-3 font-mono text-xs text-slate-600" title={String(payload.actor_user_id || 'Tidak diketahui')}>
-                              {String(payload.actor_user_id || 'Tidak diketahui')}
+                            <td className="max-w-48 truncate px-4 py-3 text-sm text-slate-700" title={String(payload.actor_user_id || 'Tiada akaun pengguna dikaitkan')}>
+                              <p className="truncate font-medium">{actorName}</p>
+                              {actor?.role && <p className="text-xs text-slate-500">{({ Admin: 'Pentadbir', Manager: 'Pengurus', Staff: 'Kakitangan' })[actor.role] || actor.role}</p>}
                             </td>
-                            <td className="px-4 py-3">
-                              <p className="font-bold text-slate-800">{payload.action}</p>
-                              <p className="text-xs text-slate-500">{payload.source_module} · {payload.resource_type} · {payload.resource_id}</p>
+                            <td className="px-4 py-3" title={`ID rekod berkaitan: ${payload.resource_id}`}>
+                              <p className="font-bold text-slate-800">{actionLabel}</p>
+                              <p className="text-xs text-slate-500">{moduleLabel} · {resourceLabel}</p>
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-600">{String(payload.source_ip || '—')}</td>
                             <td className="px-4 py-3">
-                              <button type="button" onClick={() => setSelectedAuditEvent(event)} className="font-mono text-xs text-corporate-teal-700 underline decoration-dotted underline-offset-2">
-                                {event.event_id.slice(0, 12)}…
+                              <button type="button" onClick={() => setSelectedAuditEvent(event)} className="text-sm font-semibold text-corporate-teal-700 underline decoration-dotted underline-offset-2" title={`ID teknikal: ${event.event_id}`}>
+                                Rekod #{event.sequence_no}
                               </button>
                             </td>
                             <td className="px-4 py-3">
@@ -2739,7 +2787,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       <table className="w-full min-w-[980px] text-left text-xs">
                         <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
                           <tr>
-                            <th className="px-3 py-3 font-semibold">Timestamp (UTC)</th>
+                            <th className="px-3 py-3 font-semibold">Waktu Malaysia (MYT)</th>
                             <th className="px-3 py-3 font-semibold">Client IP</th>
                             <th className="px-3 py-3 font-semibold">Method</th>
                             <th className="px-3 py-3 font-semibold">Path</th>
@@ -2751,7 +2799,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <tbody className="divide-y divide-slate-100 font-mono text-slate-600">
                           {visibleTrafficEvents.map(event => (
                             <tr key={event.event_id} onClick={() => setSelectedTrafficEvent(event)} className="cursor-pointer hover:bg-sky-50">
-                              <td className="whitespace-nowrap px-3 py-2.5">{new Date(event.captured_at).toLocaleString('en-MY', { timeZone: 'UTC' })}</td>
+                              <td className="whitespace-nowrap px-3 py-2.5">
+                                <time dateTime={event.captured_at} title={`UTC asal: ${event.captured_at}`}>
+                                  {formatMalaysiaDateTime(event.captured_at)}
+                                </time>
+                              </td>
                               <td className="max-w-40 truncate px-3 py-2.5" title={event.client_ip || 'Unavailable'}>{event.client_ip || '—'}</td>
                               <td className="px-3 py-2.5">{event.method}</td>
                               <td className="max-w-64 truncate px-3 py-2.5" title={event.request_path}>{event.request_path}</td>
@@ -2769,7 +2821,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             </tr>
                           ))}
                           {!trafficLoading && visibleTrafficEvents.length === 0 && (
-                            <tr><td colSpan={7} className="px-3 py-10 text-center font-sans text-slate-500">{trafficError ? 'Traffic events could not be loaded.' : trafficPaused ? 'Capture is paused on this browser.' : 'No HTTP requests match this filter yet.'}</td></tr>
+                            <tr><td colSpan={7} className="px-3 py-10 text-center font-sans text-slate-500">{trafficError ? 'Traffic events could not be loaded.' : trafficPaused ? 'Capture is paused on this browser.' : trafficSearch ? 'No requests match this filter.' : 'No captured requests yet. Save app data; Traffic Inspector polling is excluded.'}</td></tr>
                           )}
                         </tbody>
                       </table>
@@ -2795,7 +2847,12 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <div className="flex items-center justify-between border-b border-slate-200 p-4 sm:p-5">
                           <div>
                             <h3 id="traffic-event-title" className="font-bold text-slate-800">{selectedTrafficEvent.method} {selectedTrafficEvent.request_path} · {selectedTrafficEvent.status || 'N/A'}</h3>
-                            <p className="mt-1 text-xs text-slate-500">{new Date(selectedTrafficEvent.captured_at).toISOString()} · {selectedTrafficEvent.duration_ms}ms · {selectedTrafficEvent.host}</p>
+                            <p className="mt-1 text-xs text-slate-500">
+                              <time dateTime={selectedTrafficEvent.captured_at} title={`UTC asal: ${selectedTrafficEvent.captured_at}`}>
+                                {formatMalaysiaDateTime(selectedTrafficEvent.captured_at)}
+                              </time>
+                              {' · '}{selectedTrafficEvent.duration_ms}ms · {selectedTrafficEvent.host}
+                            </p>
                           </div>
                           <button type="button" onClick={() => setSelectedTrafficEvent(null)} aria-label="Close request details" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={20} /></button>
                         </div>
