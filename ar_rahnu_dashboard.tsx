@@ -5985,6 +5985,8 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
   const [formData, setFormData] = useState({
     date: getMalaysiaDateTimeInputValue(new Date().toISOString()),
     totalPaid: '',
+    oldFinancing: '',
+    oldFees: '',
     feePaid: '',
     releasedWeight: '',
     remainingWeight: '',
@@ -6009,12 +6011,13 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
     String(candidate.id) === String(formData.linkedTransactionId)
   );
   const pusingCashPreview = selectedRolloverTransaction &&
-    formData.totalPaid !== '' &&
+    formData.oldFinancing !== '' &&
+    formData.oldFees !== '' &&
     formData.relatedFees !== ''
     ? calculateOverlapCashBalance(
       getCurrentPrincipal(selectedRolloverTransaction),
-      formData.totalPaid,
-      0,
+      formData.oldFinancing,
+      formData.oldFees,
       formData.relatedFees
     )
     : null;
@@ -6077,6 +6080,8 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                       {event.totalPaid !== undefined && (
                         <span>{event.type === 'Pusing' ? 'Penyelesaian surat lama' : 'Bayaran'}: {formatEventAmount(event.totalPaid)}</span>
                       )}
+                      {event.oldFinancing !== undefined && <span>Pembiayaan lama: {formatEventAmount(event.oldFinancing)}</span>}
+                      {event.oldFees !== undefined && <span>Caj tertunggak lama: {formatEventAmount(event.oldFees)}</span>}
                       {event.feePaid !== undefined && <span>Caj dibayar: {formatEventAmount(event.feePaid)}</span>}
                       {event.relatedFees !== undefined && <span>Fi berkaitan: {formatEventAmount(event.relatedFees)}</span>}
                       {event.newFinancing !== undefined && event.newFinancing !== null && <span>Pembiayaan baharu: {formatEventAmount(event.newFinancing)}</span>}
@@ -6170,7 +6175,8 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                     )}
                   </label>
                   <div className="grid gap-4 sm:grid-cols-2">
-                    {renderNumberField('totalPaid', 'Jumlah penyelesaian surat lama (pembiayaan + caj tertunggak) (RM)')}
+                    {renderNumberField('oldFinancing', 'Pembiayaan lama untuk diselesaikan (RM)')}
+                    {renderNumberField('oldFees', 'Caj tertunggak surat lama (RM)')}
                     {renderNumberField('relatedFees', 'Fi berkaitan OL baharu (RM)')}
                   </div>
                   <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
@@ -6179,7 +6185,7 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                   </label>
                   {selectedRolloverTransaction && (
                     <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                      Anggaran baki tunai: pembiayaan baharu {formatRM(getCurrentPrincipal(selectedRolloverTransaction))} − penyelesaian lama {formatRM(Number(formData.totalPaid) || 0)} − fi OL {formatRM(Number(formData.relatedFees) || 0)} ={' '}
+                      Anggaran baki tunai: pembiayaan baharu {formatRM(getCurrentPrincipal(selectedRolloverTransaction))} − pembiayaan lama {formatRM(Number(formData.oldFinancing) || 0)} − caj tertunggak {formatRM(Number(formData.oldFees) || 0)} − fi OL {formatRM(Number(formData.relatedFees) || 0)} ={' '}
                       <strong className={pusingCashPreview !== null && pusingCashPreview >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
                         {pusingCashPreview === null ? 'lengkapkan amaun di atas' : formatRM(pusingCashPreview)}
                       </strong>
