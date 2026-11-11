@@ -4,11 +4,14 @@
 2. Run [`supabase/audit-trail.sql`](./supabase/audit-trail.sql) in the same project to enable append-only, SHA-256 hash-chained records for portfolio, organization, and membership inserts, updates, and deletes. The Audit Trail page is available to Admin and Manager accounts. Redeploy the updated `user-admin` Edge Function as described in [`supabase/USER-MANAGEMENT.md`](./supabase/USER-MANAGEMENT.md) so administrative account actions include actor/session metadata and audit events.
 3. Run [`supabase/traffic-inspector.sql`](./supabase/traffic-inspector.sql) to add seven-day HTTP telemetry storage and manager-only read access. Rerun it after changes to this file so updated database functions are installed. The migration attempts to schedule physical expiry every 15 minutes using `pg_cron`; if the extension is unavailable, expired rows are pruned on the next recorded request. Check the SQL Editor notices and enable `pg_cron` in Database → Extensions, then rerun the migration if scheduled deletion could not be installed.
 4. Run [`supabase/portfolio-relations.sql`](./supabase/portfolio-relations.sql) to backfill relational records and install foreign keys and automatic synchronization. It must run after `schema.sql`.
-5. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_ANON_KEY` to the project's publishable key (or legacy anon key). The project URL is already filled in. Never use a `service_role` or secret key in this browser app.
-6. Restart the Vite server, open the app, and register/log in with Supabase Auth. If email confirmation is enabled, confirm the account before logging in.
-7. The first login imports the existing browser's transactions, institutions, assets and suppliers only when that account has no cloud data yet. If cloud data already exists, it is loaded as the source of truth.
+5. Run [`supabase/transaction-attachments.sql`](./supabase/transaction-attachments.sql) to create the private bucket and access policies for SAG support documents. It must run after `schema.sql`. Each SAG accepts up to seven files, with a 50 MB limit per file.
+6. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_ANON_KEY` to the project's publishable key (or legacy anon key). The project URL is already filled in. Never use a `service_role` or secret key in this browser app.
+7. Restart the Vite server, open the app, and register/log in with Supabase Auth. If email confirmation is enabled, confirm the account before logging in.
+8. The first login imports the existing browser's transactions, institutions, assets and suppliers only when that account has no cloud data yet. If cloud data already exists, it is loaded as the source of truth.
 
 Each authenticated user can only read or modify their own row. App changes are saved automatically and updates from other sessions are received through Supabase Realtime.
+
+SAG attachments are stored in the private `ar-rahnu-transaction-attachments` bucket; the portfolio JSON stores only their metadata and storage paths. Storage policies restrict access to the portfolio owner or an active organization Admin/Manager. The app creates short-lived signed URLs when a user opens an attachment.
 
 ## Portfolio relationships and analytics
 

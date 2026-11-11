@@ -248,3 +248,66 @@ html.dark .recharts-default-tooltip {
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(128, 130, 133, 0.4);
 }
+
+form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]),
+form select,
+form button[aria-expanded] {
+  box-sizing: border-box;
+  height: 2.75rem;
+  min-height: 2.75rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  background-color: #fff;
+  color: #1e293b;
+  font-size: 0.875rem;
+  line-height: 1.25rem;
+  padding: 0.625rem 0.75rem;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]):focus,
+form select:focus,
+form textarea:focus,
+form button[aria-expanded]:focus-visible {
+  border-color: #059669;
+  outline: none;
+  box-shadow: 0 0 0 4px rgb(16 185 129 / 0.14);
+}
+
+form input[readonly] {
+  background-color: #f8fafc;
+}
+
+form textarea {
+  box-sizing: border-box;
+  min-height: 5.5rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.75rem;
+  background-color: #fff;
+  color: #1e293b;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  padding: 0.75rem;
+  transition: border-color 150ms ease, box-shadow 150ms ease, background-color 150ms ease;
+}
+
+form button[type="submit"] {
+  box-sizing: border-box;
+  height: 2.75rem;
+  min-height: 2.75rem;
+  border-radius: 0.75rem;
+  transition: background-color 150ms ease, box-shadow 150ms ease, opacity 150ms ease;
+}
+
+html.dark form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]),
+html.dark form select,
+html.dark form textarea,
+html.dark form button[aria-expanded] {
+  border-color: #4c4e50;
+  background-color: #27292b;
+  color: #eeeeef;
+}
+
+html.dark form input[readonly] {
+  background-color: #36383a;
+}

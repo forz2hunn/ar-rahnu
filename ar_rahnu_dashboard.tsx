@@ -47,7 +47,8 @@ import {
   UserRound,
   FileSearch,
   Pause,
-  Play
+  Play,
+  Paperclip
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
@@ -75,6 +76,9 @@ const transactionStatusOptions = [
   'Pajakan Asal', 'Salin', 'OL', 'Tebus Cash', 'Tebus EDT',
   'TS', 'TKS', 'US', 'Pusing', 'Lelong'
 ];
+const transactionAttachmentsBucket = 'ar-rahnu-transaction-attachments';
+const maximumTransactionAttachments = 7;
+const maximumTransactionAttachmentSize = 50 * 1024 * 1024;
 type OrganizationRole = 'Admin' | 'Manager' | 'Staff';
 type OrganizationMembership = {
   organization_id: string;
@@ -250,11 +254,16 @@ const getCorrectionEvents = (transaction) =>
   Array.isArray(transaction?.correctionEvents) ? transaction.correctionEvents : [];
 const getLatestPartialRedemption = (transaction) =>
   getCorrectionEvents(transaction).slice().reverse().find(event => event.type === 'TKS');
+const getLatestPledgedAssetEvent = (transaction) =>
+  getCorrectionEvents(transaction).slice().reverse().find(event =>
+    (event.type === 'TKS' || Array.isArray(event.releasedAssetIds)) &&
+    event.remainingWeight !== undefined &&
+    event.remainingWeight !== null
+  );
 const getCurrentPledgedWeight = (transaction) => {
-  const latestPartialRedemption = getLatestPartialRedemption(transaction);
-  return latestPartialRedemption?.remainingWeight !== undefined &&
-    latestPartialRedemption?.remainingWeight !== null
-    ? Number(latestPartialRedemption.remainingWeight) || 0
+  const latestPledgedAssetEvent = getLatestPledgedAssetEvent(transaction);
+  return latestPledgedAssetEvent
+    ? Number(latestPledgedAssetEvent.remainingWeight) || 0
     : Number(transaction?.weight) || 0;
 };
 const getCurrentPrincipal = (transaction) => {
@@ -2351,7 +2360,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setIsAssetModalOpen(true);
     } else {
       const transaction = visibleTransactions.find(item => item.refNo === indicator.ticket);
-      if (transaction) handleOpenCorrection(transaction, indicator.type === 'TEBUS' ? 'TS' : 'Pusing');
+      if (transaction) {
+        const action = indicator.type === 'TEBUS'
+          ? 'TS'
+          : indicator.type === 'OL' ? 'OL' : 'Pusing';
+        handleOpenCorrection(transaction, action);
+      }
     }
   };
 
@@ -2672,14 +2686,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           : asset
       ));
     }
-    const { selectedAssetId, ...transactionData } = newTx;
+    const { id = Date.now(), selectedAssetId, ...transactionData } = newTx;
     setTransactions(prev => [...prev, {
       ...transactionData,
       transactionStatus: getTransactionStatus(transactionData),
       selectedAssetIds,
       createdAt,
       updatedAt: createdAt,
-      id: Date.now()
+      id
     }]);
     setIsModalOpen(false);
   };
@@ -2702,17 +2716,67 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setTimeout(() => setToastMessage(null), 4000);
       return;
     }
+    const actionTransaction = visibleTransactions.find(transaction =>
+      String(transaction.id) === String(correctionTransaction.id)
+    );
+    if (!actionTransaction || ['Selesai', 'Ditebus', 'Dilelong'].includes(actionTransaction.status)) {
+      setToastMessage('Surat ini telah berubah atau selesai. Muat semula sebelum merekod tindakan.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    const sourceAssetIds: string[] = Array.from(new Set<string>(
+      getTransactionAssetIds(actionTransaction).map(assetId => String(assetId))
+    ));
+    const selectedAssetIds: string[] = Array.from(new Set<string>(
+      (Array.isArray(correction.selectedAssetIds) ? correction.selectedAssetIds : [])
+        .map(assetId => String(assetId))
+    ));
+    const sourceAssetIdSet = new Set(sourceAssetIds);
+    if (!selectedAssetIds.length ||
+        selectedAssetIds.some(assetId => !sourceAssetIdSet.has(assetId))) {
+      setToastMessage('Pilih sekurang-kurangnya satu aset EDR yang masih dipautkan kepada surat ini.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    const requiresAllAssets = ['TS', 'OL', 'Pusing', 'Lelong'].includes(correction.type);
+    if (requiresAllAssets && selectedAssetIds.length !== sourceAssetIds.length) {
+      setToastMessage('Jenis tindakan ini menamatkan surat lama; pilih semua aset EDR yang dipautkan.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    if (correction.type === 'TKS' && selectedAssetIds.length === sourceAssetIds.length) {
+      setToastMessage('TKS perlu meninggalkan sekurang-kurangnya satu aset dalam surat. Gunakan TS untuk tebus penuh.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    const sourceAssets = visibleAssets.filter(asset =>
+      sourceAssetIds.includes(String(asset.id))
+    );
+    if (sourceAssets.length !== sourceAssetIds.length) {
+      setToastMessage('Satu atau lebih aset yang dipautkan tidak ditemui. Muat semula dan betulkan pautan sebelum menyimpan tindakan.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    const selectedAssets = sourceAssets.filter(asset =>
+      selectedAssetIds.includes(String(asset.id))
+    );
+    if (selectedAssets.length !== selectedAssetIds.length) {
+      setToastMessage('Satu atau lebih aset yang dipilih tidak lagi tersedia. Muat semula dan cuba semula.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    const isLinkedRollover = ['OL', 'Pusing'].includes(correction.type);
     let linkedTransaction = null;
-    let pusingNewFinancing = null;
-    let pusingCashDifference = null;
-    if (correction.type === 'Pusing') {
+    let linkedNewFinancing = null;
+    let cashDifference = null;
+    if (isLinkedRollover) {
       linkedTransaction = visibleTransactions.find(transaction =>
         String(transaction.id) === String(correction.linkedTransactionId)
       );
-      if (!linkedTransaction || String(linkedTransaction.id) === String(correctionTransaction.id) ||
+      if (!linkedTransaction || String(linkedTransaction.id) === String(actionTransaction.id) ||
           (linkedTransaction.status !== 'Aktif' && linkedTransaction.status) ||
           String(linkedTransaction.type || '').toLowerCase().includes('tebus') ||
-          getMatchingAssetLinkStatus(correctionTransaction, linkedTransaction) === false) {
+          getMatchingAssetLinkStatus(actionTransaction, linkedTransaction) === false) {
         setToastMessage('Pilih SAG baharu yang sedia ada dan masih aktif untuk dipautkan.');
         setTimeout(() => setToastMessage(null), 4000);
         return;
@@ -2728,43 +2792,57 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         setTimeout(() => setToastMessage(null), 4000);
         return;
       }
-      pusingNewFinancing = getCurrentPrincipal(linkedTransaction);
-      pusingCashDifference = calculateOverlapCashBalance(
-        pusingNewFinancing,
+      linkedNewFinancing = getCurrentPrincipal(linkedTransaction);
+      cashDifference = calculateOverlapCashBalance(
+        linkedNewFinancing,
         correction.oldFinancing,
         correction.oldFees,
         correction.relatedFees
       );
     }
     const updatedAt = new Date().toISOString();
+    const remainingAssetIds = sourceAssetIds.filter(assetId => !selectedAssetIds.includes(assetId));
+    const releasedWeight = selectedAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
+    const remainingWeight = visibleAssets
+      .filter(asset => remainingAssetIds.includes(String(asset.id)))
+      .reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
     const correctionEvent = {
       ...correction,
-      totalPaid: correction.type === 'Pusing'
+      selectedAssetIds: undefined,
+      releasedAssetIds: selectedAssetIds,
+      releasedAssetCodes: selectedAssets.map(asset => asset.code || String(asset.id)),
+      releasedWeight,
+      remainingWeight,
+      totalPaid: isLinkedRollover
         ? Number(correction.oldFinancing) + Number(correction.oldFees)
         : correction.totalPaid,
       id: `${Date.now()}`,
       recordedAt: updatedAt,
       date: parseTransactionDateTime(correction.date).toISOString(),
       linkedRefNo: linkedTransaction?.refNo,
-      newFinancing: pusingNewFinancing,
-      cashDifference: pusingCashDifference
+      newFinancing: linkedNewFinancing,
+      cashDifference
     };
-    const linkedTransactionId = correction.type === 'Pusing'
+    const linkedTransactionId = isLinkedRollover
       ? correction.linkedTransactionId
       : null;
 
     setTransactions(previous => previous.map(transaction => {
-      if (String(transaction.id) === String(correctionTransaction.id)) {
+      if (String(transaction.id) === String(actionTransaction.id)) {
         const status = correction.type === 'TS'
           ? 'Ditebus'
           : correction.type === 'Lelong'
             ? 'Dilelong'
-            : correction.type === 'Pusing'
+            : isLinkedRollover
               ? 'Selesai'
               : transaction.status || 'Aktif';
         return {
           ...transaction,
           correctionEvents: [...getCorrectionEvents(transaction), correctionEvent],
+          selectedAssetIds: getTransactionAssetIds(transaction)
+            .filter(assetId => !selectedAssetIds.includes(String(assetId))),
+          selectedAssetId: undefined,
+          weight: remainingWeight,
           status,
           updatedAt
         };
@@ -2772,24 +2850,35 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       if (linkedTransactionId && String(transaction.id) === String(linkedTransactionId)) {
         return {
           ...transaction,
-          parentTransactionId: correctionTransaction.id,
-          parentRefNo: correctionTransaction.refNo,
+          parentTransactionId: actionTransaction.id,
+          parentRefNo: actionTransaction.refNo,
           updatedAt
         };
       }
       return transaction;
     }));
 
-    if (correction.type === 'Lelong') {
-      const linkedAssetIds = getTransactionAssetIds(correctionTransaction).map(String);
-      setAssets(previous => previous.map(asset =>
-        isRecordVisible(asset) && linkedAssetIds.includes(String(asset.id))
-          ? { ...asset, status: 'Dilelong', updatedAt }
-          : asset
-      ));
-    }
+    setAssets(previous => previous.map(asset =>
+      isRecordVisible(asset) && selectedAssetIds.includes(String(asset.id))
+        ? { ...asset, status: 'EDT', updatedAt }
+        : asset
+    ));
 
-    setToastMessage(`Tindakan ${correction.type} untuk Surat #${correctionTransaction.refNo} telah direkodkan.`);
+    const otherActiveAssetIds = new Set<string>(visibleTransactions
+      .filter(transaction =>
+        String(transaction.id) !== String(actionTransaction.id) &&
+        !['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status) &&
+        !String(transaction.type || '').toLowerCase().includes('tebus')
+      )
+      .flatMap(getTransactionAssetIds)
+      .map(assetId => String(assetId)));
+    const returnedAssetCount = selectedAssetIds.filter(assetId => !otherActiveAssetIds.has(assetId)).length;
+    const stillPledgedCount = selectedAssetIds.length - returnedAssetCount;
+    setToastMessage(
+      `Tindakan ${correction.type} untuk Surat #${actionTransaction.refNo} direkodkan. ` +
+      `${returnedAssetCount} aset dikembalikan ke EDT` +
+      (stillPledgedCount ? `; ${stillPledgedCount} aset kekal dipautkan kepada SAG aktif.` : '.')
+    );
     setIsCorrectionModalOpen(false);
     setCorrectionTransaction(null);
     setTimeout(() => setToastMessage(null), 4000);
@@ -5530,9 +5619,17 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           institutions={visibleInstitutions}
           availableAssets={getTransactionModalAssets(availableAssetsForTransaction)}
           pledgedAssets={getTransactionModalAssets(visibleAssets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id))))}
+          sourceTransactions={visibleTransactions}
           initialData={editingTransaction}
+          supabaseClient={supabaseClient}
+          storageOwnerId={dataOwnerUserIdRef.current}
           onClose={() => { setIsModalOpen(false); setEditingTransaction(null); }}
           onSave={editingTransaction ? handleSaveTransaction : handleAddTransaction}
+          onOpenCorrection={(transaction, action) => {
+            setIsModalOpen(false);
+            setEditingTransaction(null);
+            handleOpenCorrection(transaction, action);
+          }}
           currentGoldPrice={currentGoldPrice}
           isRefreshing={isRefreshing}
           onRefresh={handleRefresh}
@@ -5543,6 +5640,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         <CorrectionActionModal
           transaction={correctionTransaction}
           transactions={visibleTransactions}
+          assets={visibleAssets}
           initialAction={initialCorrectionAction}
           onClose={() => {
             setIsCorrectionModalOpen(false);
@@ -5980,8 +6078,10 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
   );
 }
 
-function CorrectionActionModal({ transaction, transactions, initialAction, onClose, onSave }) {
+function CorrectionActionModal({ transaction, transactions, assets = [], initialAction, onClose, onSave }) {
   const [actionType, setActionType] = useState(initialAction);
+  const [selectedAssetIds, setSelectedAssetIds] = useState([]);
+  const [selectionError, setSelectionError] = useState('');
   const [formData, setFormData] = useState({
     date: getMalaysiaDateTimeInputValue(new Date().toISOString()),
     totalPaid: '',
@@ -6000,6 +6100,16 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
     auctionProceeds: '',
     remarks: ''
   });
+  const linkedAssetIds = [...new Set(getTransactionAssetIds(transaction).map(String))];
+  const linkedAssets = linkedAssetIds
+    .map(assetId => assets.find(asset => String(asset.id) === assetId))
+    .filter(Boolean);
+  const selectedAssets = linkedAssets.filter(asset => selectedAssetIds.includes(String(asset.id)));
+  const remainingAssets = linkedAssets.filter(asset => !selectedAssetIds.includes(String(asset.id)));
+  const selectedAssetWeight = selectedAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
+  const remainingAssetWeight = remainingAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
+  const requiresAllAssets = ['TS', 'OL', 'Pusing', 'Lelong'].includes(actionType);
+  const missingAssetCount = linkedAssetIds.length - linkedAssets.length;
   const isTerminal = ['Ditebus', 'Dilelong', 'Selesai'].includes(transaction.status);
   const eligibleRolloverTransactions = transactions.filter(candidate =>
     String(candidate.id) !== String(transaction.id) &&
@@ -6010,7 +6120,7 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
   const selectedRolloverTransaction = eligibleRolloverTransactions.find(candidate =>
     String(candidate.id) === String(formData.linkedTransactionId)
   );
-  const pusingCashPreview = selectedRolloverTransaction &&
+  const rolloverCashPreview = selectedRolloverTransaction &&
     formData.oldFinancing !== '' &&
     formData.oldFees !== '' &&
     formData.relatedFees !== ''
@@ -6028,9 +6138,39 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
     setFormData(previous => ({ ...previous, [name]: type === 'checkbox' ? checked : value }));
   };
 
+  const handleAssetToggle = (assetId) => {
+    const normalizedAssetId = String(assetId);
+    setSelectedAssetIds(previous => previous.includes(normalizedAssetId)
+      ? previous.filter(selectedId => selectedId !== normalizedAssetId)
+      : [...previous, normalizedAssetId]);
+    setSelectionError('');
+  };
+
   const handleSubmit = (event) => {
     event.preventDefault();
-    onSave({ ...formData, type: actionType });
+    if (!selectedAssetIds.length) {
+      setSelectionError('Pilih sekurang-kurangnya satu aset EDR untuk tindakan ini.');
+      return;
+    }
+    if (requiresAllAssets && selectedAssetIds.length !== linkedAssetIds.length) {
+      setSelectionError('Jenis tindakan ini menamatkan surat lama; pilih semua aset EDR yang dipautkan.');
+      return;
+    }
+    if (actionType === 'TKS' && selectedAssetIds.length === linkedAssetIds.length) {
+      setSelectionError('TKS perlu meninggalkan sekurang-kurangnya satu aset. Gunakan TS untuk tebus penuh.');
+      return;
+    }
+    if (missingAssetCount > 0) {
+      setSelectionError('Semua aset yang dipautkan perlu ditemui sebelum tindakan boleh disimpan.');
+      return;
+    }
+    onSave({
+      ...formData,
+      type: actionType,
+      selectedAssetIds: selectedAssets.map(asset => asset.id),
+      releasedWeight: selectedAssetWeight,
+      remainingWeight: remainingAssetWeight
+    });
   };
 
   const renderNumberField = (name, label, required = true) => (
@@ -6078,7 +6218,7 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                     </div>
                     <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
                       {event.totalPaid !== undefined && (
-                        <span>{event.type === 'Pusing' ? 'Penyelesaian surat lama' : 'Bayaran'}: {formatEventAmount(event.totalPaid)}</span>
+                        <span>{['OL', 'Pusing'].includes(event.type) ? 'Penyelesaian surat lama' : 'Bayaran'}: {formatEventAmount(event.totalPaid)}</span>
                       )}
                       {event.oldFinancing !== undefined && <span>Pembiayaan lama: {formatEventAmount(event.oldFinancing)}</span>}
                       {event.oldFees !== undefined && <span>Caj tertunggak lama: {formatEventAmount(event.oldFees)}</span>}
@@ -6092,6 +6232,7 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                       {event.remainingWeight !== undefined && <span>Baki berat: {Number(event.remainingWeight) || 0}g</span>}
                       {event.remainingPrincipal !== undefined && <span>Baki prinsipal: {formatEventAmount(event.remainingPrincipal)}</span>}
                       {event.remainingRedemption !== undefined && <span>Baki tebus: {formatEventAmount(event.remainingRedemption)}</span>}
+                      {event.releasedAssetCodes?.length > 0 && <span>Aset dipilih: {event.releasedAssetCodes.join(', ')}</span>}
                       {event.paidThroughDate && <span>Dibayar hingga: {event.paidThroughDate}</span>}
                       {event.linkedRefNo && <span>SAG baharu: #{event.linkedRefNo}</span>}
                       {event.auctionProceeds !== undefined && event.auctionProceeds !== '' && <span>Hasil lelong: {formatEventAmount(event.auctionProceeds)}</span>}
@@ -6114,10 +6255,11 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
               <div className="grid gap-4 sm:grid-cols-2">
                 <label className="space-y-1">
                   <span className="block text-sm font-semibold text-slate-700">Jenis tindakan</span>
-                  <select value={actionType} onChange={event => setActionType(event.target.value)} className="w-full rounded-lg border border-slate-300 p-2.5">
+                  <select value={actionType} onChange={event => { setActionType(event.target.value); setSelectionError(''); }} className="w-full rounded-lg border border-slate-300 p-2.5">
                     <option value="TS">TS · Tebus penuh</option>
                     <option value="TKS">TKS · Tebus sebahagian</option>
                     <option value="US">US · Bayar upah simpan</option>
+                    <option value="OL">OL · Overlap (pautkan SAG baharu)</option>
                     <option value="Pusing">Pusing · Pautkan SAG baharu</option>
                     <option value="Lelong">Lelong · Selepas pengesahan institusi</option>
                   </select>
@@ -6127,6 +6269,55 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                   <input type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5" />
                 </label>
               </div>
+
+              <section className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">Aset EDR · Surat #{transaction.refNo}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-slate-600">
+                    Pilih aset yang terlibat dalam tindakan ini. Aset terpilih akan dilepaskan daripada surat dan kembali ke status EDT jika tidak dipautkan kepada SAG aktif lain.
+                    {requiresAllAssets && ' Jenis tindakan ini memerlukan semua aset.'}
+                  </p>
+                </div>
+                {linkedAssets.length > 0 ? (
+                  <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                    {linkedAssets.map(asset => (
+                      <label key={asset.id} className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 transition-colors hover:border-emerald-300 hover:bg-emerald-50/50">
+                        <input
+                          type="checkbox"
+                          checked={selectedAssetIds.includes(String(asset.id))}
+                          onChange={() => handleAssetToggle(asset.id)}
+                          className="mt-1 h-4 w-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <span className="min-w-0 flex-1">
+                          <span className="block break-all font-mono text-xs font-bold text-slate-800">
+                            {asset.code || String(asset.id)}
+                          </span>
+                          <span className="mt-1 block text-xs text-slate-600">
+                            {asset.type || 'Emas'} · {asset.purity || 'Ketulenan tidak direkod'} · {Number(asset.weight) || 0}g
+                            {asset.supplier ? ` · ${asset.supplier}` : ''}
+                          </span>
+                        </span>
+                        <span className="shrink-0 rounded-full bg-amber-100 px-2 py-1 text-[10px] font-bold text-amber-800">EDR</span>
+                      </label>
+                    ))}
+                    {missingAssetCount > 0 && (
+                      <p role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                        {missingAssetCount} pautan aset tidak ditemui dalam rekod aset. Muat semula atau betulkan pautan sebelum menyimpan tindakan.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                    {missingAssetCount > 0
+                      ? `${missingAssetCount} pautan aset tidak ditemui dalam rekod aset. Muat semula atau betulkan pautan sebelum menyimpan tindakan.`
+                      : `Tiada aset EDR dipautkan kepada Surat #${transaction.refNo}. Pautkan aset pada rekod SAG terlebih dahulu.`}
+                  </p>
+                )}
+                <p className="text-xs font-semibold text-slate-600">
+                  Dipilih: {selectedAssets.length} / {linkedAssetIds.length} aset · Berat: {selectedAssetWeight.toFixed(2)}g
+                </p>
+                {selectionError && <p role="alert" className="text-xs font-semibold text-rose-700">{selectionError}</p>}
+              </section>
 
               {actionType === 'TS' && (
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -6138,12 +6329,18 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
               {actionType === 'TKS' && (
                 <>
                   <p className="rounded-lg bg-amber-50 p-3 text-xs leading-relaxed text-amber-800">
-                    Masukkan baki selepas transaksi seperti yang disahkan institusi. Tiada kiraan pro-rata dibuat dan inventori aset tidak akan diubah secara automatik.
+                    Berat dilepaskan dan baki berat dikira daripada aset yang dipilih. Tinggalkan sekurang-kurangnya satu aset untuk TKS; gunakan TS untuk tebus penuh. Masukkan baki kewangan selepas transaksi seperti yang disahkan institusi.
                   </p>
                   <div className="grid gap-4 sm:grid-cols-2">
                     {renderNumberField('totalPaid', 'Jumlah bayaran sebenar (RM)')}
-                    {renderNumberField('releasedWeight', 'Berat dilepaskan (g)')}
-                    {renderNumberField('remainingWeight', 'Baki berat (g)')}
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">Berat dilepaskan (g)</span>
+                      <input type="number" value={selectedAssetWeight.toFixed(2)} readOnly className="w-full rounded-lg border border-slate-300 bg-slate-100 p-2.5" />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">Baki berat (g)</span>
+                      <input type="number" value={remainingAssetWeight.toFixed(2)} readOnly className="w-full rounded-lg border border-slate-300 bg-slate-100 p-2.5" />
+                    </label>
                     {renderNumberField('remainingPrincipal', 'Baki prinsipal (RM)')}
                     {renderNumberField('remainingRedemption', 'Baki jumlah tebus (RM)')}
                   </div>
@@ -6160,10 +6357,10 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                 </div>
               )}
 
-              {actionType === 'Pusing' && (
+              {['OL', 'Pusing'].includes(actionType) && (
                 <div className="space-y-4">
                   <label className="block space-y-1">
-                    <span className="block text-sm font-semibold text-slate-700">SAG baharu yang telah direkodkan untuk emas yang sama</span>
+                    <span className="block text-sm font-semibold text-slate-700">SAG baharu untuk tindakan {actionType} (emas yang sama)</span>
                     <select name="linkedTransactionId" value={formData.linkedTransactionId} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5">
                       <option value="">Pilih SAG aktif</option>
                       {eligibleRolloverTransactions.map(candidate => (
@@ -6185,9 +6382,9 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
                   </label>
                   {selectedRolloverTransaction && (
                     <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
-                      Anggaran baki tunai: pembiayaan baharu {formatRM(getCurrentPrincipal(selectedRolloverTransaction))} − pembiayaan lama {formatRM(Number(formData.oldFinancing) || 0)} − caj tertunggak {formatRM(Number(formData.oldFees) || 0)} − fi OL {formatRM(Number(formData.relatedFees) || 0)} ={' '}
-                      <strong className={pusingCashPreview !== null && pusingCashPreview >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
-                        {pusingCashPreview === null ? 'lengkapkan amaun di atas' : formatRM(pusingCashPreview)}
+                      Anggaran baki tunai: pembiayaan baharu {formatRM(getCurrentPrincipal(selectedRolloverTransaction))} − pembiayaan lama {formatRM(Number(formData.oldFinancing) || 0)} − caj tertunggak {formatRM(Number(formData.oldFees) || 0)} − fi berkaitan {formatRM(Number(formData.relatedFees) || 0)} ={' '}
+                      <strong className={rolloverCashPreview !== null && rolloverCashPreview >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+                        {rolloverCashPreview === null ? 'lengkapkan amaun di atas' : formatRM(rolloverCashPreview)}
                       </strong>
                       <span className="mt-1 block text-xs text-slate-500">Anggaran sahaja; baki tunai bukan keuntungan dan perlu disahkan dengan institusi.</span>
                     </p>
@@ -6222,7 +6419,7 @@ function CorrectionActionModal({ transaction, transactions, initialAction, onClo
   );
 }
 
-function TransactionModal({ institutions, availableAssets, pledgedAssets, initialData, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
+function TransactionModal({ institutions, availableAssets, pledgedAssets, sourceTransactions, initialData, supabaseClient, storageOwnerId, onClose, onSave, onOpenCorrection, currentGoldPrice, isRefreshing, onRefresh }) {
   const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
   const calculateLoan = (marhunValue, margin) =>
     (parseFloat(marhunValue) || 0) * ((parseFloat(margin) || 0) / 100);
@@ -6232,6 +6429,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
       : (parseFloat(loan) || 0) - (parseFloat(redemption) || 0) - (parseFloat(fee) || 0);
 
   const transactionAssets = [...availableAssets, ...pledgedAssets];
+  const initialAttachments = Array.isArray(initialData?.attachments) ? initialData.attachments : [];
   const initialLinkedAssets = getTransactionAssetIds(initialData || {})
     .map(assetId => transactionAssets.find(asset => String(asset.id) === String(assetId)))
     .filter(Boolean);
@@ -6274,8 +6472,82 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>(
     getTransactionAssetIds(initialData || {})
   );
+  const [savedAttachments, setSavedAttachments] = useState(
+    initialAttachments
+  );
+  const [newAttachmentFiles, setNewAttachmentFiles] = useState<File[]>([]);
+  const [attachmentError, setAttachmentError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+  const [actionSourceId, setActionSourceId] = useState('');
   const [isDateEdited, setIsDateEdited] = useState(false);
   const [isAssetListOpen, setIsAssetListOpen] = useState(false);
+  const correctionActionsByTransactionType = {
+    'Tebus Penuh (TS)': 'TS',
+    'Tebus Sebahagian (TKS)': 'TKS',
+    'Upah Simpan (US)': 'US',
+    'OL / Pusing (80%)': 'OL',
+    Pusing: 'Pusing',
+    Lelong: 'Lelong'
+  };
+  const correctionActionType = initialData
+    ? null
+    : correctionActionsByTransactionType[formData.type] || null;
+  const availableSourceTransactions = sourceTransactions.filter(transaction =>
+    (!transaction.status || transaction.status === 'Aktif') &&
+    !['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status) &&
+    !String(transaction.type || '').toLowerCase().includes('tebus')
+  );
+  const selectedSourceTransaction = availableSourceTransactions.find(transaction =>
+    String(transaction.id) === String(actionSourceId)
+  ) || null;
+  const sourceAssetIds = getTransactionAssetIds(selectedSourceTransaction || {}).map(String);
+  const sourceEdrAssets = sourceAssetIds
+    .map(assetId => pledgedAssets.find(asset => String(asset.id) === assetId))
+    .filter(Boolean);
+  const remainingAttachmentSlots = maximumTransactionAttachments - savedAttachments.length - newAttachmentFiles.length;
+
+  const handleAttachmentSelection = (event) => {
+    const selectedFiles = Array.from(event.target.files || []) as File[];
+    event.target.value = '';
+    setAttachmentError('');
+    const oversizedFiles = selectedFiles.filter(file => file.size > maximumTransactionAttachmentSize);
+    const validFiles = selectedFiles.filter(file => file.size <= maximumTransactionAttachmentSize);
+    const availableSlots = Math.max(0, maximumTransactionAttachments - savedAttachments.length - newAttachmentFiles.length);
+    const acceptedFiles = validFiles.slice(0, availableSlots);
+    const messages = [];
+    if (oversizedFiles.length) {
+      messages.push(`${oversizedFiles.map(file => file.name).join(', ')} melebihi had 50 MB setiap fail.`);
+    }
+    if (acceptedFiles.length < validFiles.length) {
+      messages.push(`Maksimum ${maximumTransactionAttachments} fail lampiran bagi setiap surat gadaian.`);
+    }
+    if (messages.length) setAttachmentError(messages.join(' '));
+    if (acceptedFiles.length) setNewAttachmentFiles(previous => [...previous, ...acceptedFiles]);
+  };
+
+  const handleOpenAttachment = async (attachment) => {
+    setAttachmentError('');
+    try {
+      const { data, error } = await supabaseClient.storage
+        .from(transactionAttachmentsBucket)
+        .createSignedUrl(attachment.path, 60);
+      if (error) throw error;
+      const link = document.createElement('a');
+      link.href = data.signedUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Ralat storan.';
+      setAttachmentError(`Lampiran "${attachment.name}" tidak dapat dibuka: ${message}`);
+    }
+  };
+
+  const handleRemoveSavedAttachment = (attachment) => {
+    setSavedAttachments(previous => previous.filter(item => item !== attachment));
+  };
   const recalculateFinancialFields = (data, recalculateMarhunValue = false) => {
     const marhunValue = recalculateMarhunValue
       ? calculateMarhunValue(data.weight, data.marhunPrice)
@@ -6370,28 +6642,172 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
     ));
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    onSave({
-      ...formData,
-      date: initialData && !isDateEdited
-        ? initialData.date
-        : parseTransactionDateTime(formData.date).toISOString(),
-      selectedAssetIds,
-      weight: parseFloat(formData.weight) || 0,
-      purity: formData.purity,
-      marhunPrice: parseFloat(formData.marhunPrice) || 0,
-      marhunValue: roundMoney(calculatedMarhunValue),
-      margin: parseFloat(formData.margin) || 0,
-      feeRate: parseFloat(formData.feeRate) || 0,
-      feeTermMonths,
-      feeBasis: formData.feeBasis,
-      loan: roundMoney(loanForSave),
-      fee: parseFloat(formData.fee) || 0,
-      redemption: redemptionForSave,
-      profit: roundMoney(profitForSave),
-    });
+    if (correctionActionType) {
+      if (!selectedSourceTransaction) return;
+      onOpenCorrection(selectedSourceTransaction, correctionActionType);
+      return;
+    }
+    setIsSaving(true);
+    setAttachmentError('');
+    const transactionId = initialData?.id ?? Date.now();
+    const uploadedAttachments = [];
+    const removedAttachments = initialAttachments.filter(attachment => attachment?.path &&
+      !savedAttachments.some(saved => saved.path === attachment.path)
+    );
+    try {
+      for (const file of newAttachmentFiles) {
+        const safeFileName = file.name.replace(/[^\w.-]+/g, '_').slice(-120) || 'lampiran';
+        const path = `${storageOwnerId}/${String(transactionId).replace(/[^a-zA-Z0-9_-]/g, '_')}/${crypto.randomUUID()}-${safeFileName}`;
+        const { error } = await supabaseClient.storage
+          .from(transactionAttachmentsBucket)
+          .upload(path, file, { upsert: false, contentType: file.type || 'application/octet-stream' });
+        if (error) throw new Error(`Gagal memuat naik "${file.name}": ${error.message}`);
+        uploadedAttachments.push({
+          id: path.split('/').pop(),
+          name: file.name,
+          path,
+          size: file.size,
+          type: file.type || 'application/octet-stream',
+          uploadedAt: new Date().toISOString()
+        });
+      }
+
+      if (removedAttachments.length) {
+        const { error } = await supabaseClient.storage
+          .from(transactionAttachmentsBucket)
+          .remove(removedAttachments.map(attachment => attachment.path));
+        if (error) throw new Error(`Lampiran lama tidak dapat dipadam: ${error.message}`);
+      }
+
+      onSave({
+        ...formData,
+        id: transactionId,
+        attachments: [...savedAttachments, ...uploadedAttachments],
+        date: initialData && !isDateEdited
+          ? initialData.date
+          : parseTransactionDateTime(formData.date).toISOString(),
+        selectedAssetIds,
+        weight: parseFloat(formData.weight) || 0,
+        purity: formData.purity,
+        marhunPrice: parseFloat(formData.marhunPrice) || 0,
+        marhunValue: roundMoney(calculatedMarhunValue),
+        margin: parseFloat(formData.margin) || 0,
+        feeRate: parseFloat(formData.feeRate) || 0,
+        feeTermMonths,
+        feeBasis: formData.feeBasis,
+        loan: roundMoney(loanForSave),
+        fee: parseFloat(formData.fee) || 0,
+        redemption: redemptionForSave,
+        profit: roundMoney(profitForSave),
+      });
+    } catch (error) {
+      if (uploadedAttachments.length) {
+        const { error: cleanupError } = await supabaseClient.storage
+          .from(transactionAttachmentsBucket)
+          .remove(uploadedAttachments.map(attachment => attachment.path));
+        if (cleanupError) console.error('Lampiran sementara tidak dapat dibersihkan:', cleanupError.message);
+      }
+      setAttachmentError(error instanceof Error ? error.message : 'Lampiran tidak dapat disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
   };
+
+  if (correctionActionType) {
+    const actionLabels = {
+      TS: 'Tebus penuh',
+      TKS: 'Tebus sebahagian',
+      US: 'Bayar upah simpan',
+      OL: 'Overlap',
+      Pusing: 'Pusing',
+      Lelong: 'Lelong'
+    };
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm sm:p-4">
+        <div className="max-h-[95dvh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+          <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 p-4 sm:p-6">
+            <div>
+              <h2 className="text-lg font-bold text-slate-800">Pilih SAG untuk tindakan</h2>
+              <p className="text-sm text-slate-500">{actionLabels[correctionActionType]}</p>
+            </div>
+            <button type="button" onClick={onClose} disabled={isSaving} className="rounded-full p-2 text-slate-400 hover:bg-slate-200 disabled:opacity-50" aria-label="Tutup">
+              <X size={20} />
+            </button>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-5 p-4 sm:p-6">
+            <label className="block space-y-1">
+              <span className="text-sm font-semibold text-slate-700">Pilih surat gadaian sedia ada yang masih aktif</span>
+              <select
+                value={actionSourceId}
+                onChange={event => setActionSourceId(event.target.value)}
+                required
+                className="w-full rounded-lg border border-slate-300 p-2.5 outline-none focus:ring-2 focus:ring-emerald-500"
+              >
+                <option value="">Pilih SAG aktif</option>
+                {availableSourceTransactions.map(transaction => (
+                  <option key={transaction.id} value={transaction.id}>
+                    #{transaction.refNo} · {transaction.institution} · {formatRM(getCurrentRedemption(transaction))}
+                  </option>
+                ))}
+              </select>
+              {availableSourceTransactions.length === 0 && (
+                <span className="block text-xs text-amber-700">Tiada SAG aktif yang boleh dipilih untuk tindakan ini.</span>
+              )}
+            </label>
+
+            {selectedSourceTransaction && (
+              <section className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div>
+                  <h3 className="font-bold text-slate-800">
+                    Surat #{selectedSourceTransaction.refNo} · {selectedSourceTransaction.institution}
+                  </h3>
+                  <p className="mt-1 text-xs text-slate-600">
+                    Berat direkodkan {getCurrentPledgedWeight(selectedSourceTransaction)}g · Baki pembiayaan {formatRM(getCurrentPrincipal(selectedSourceTransaction))} · Jumlah tebus {formatRM(getCurrentRedemption(selectedSourceTransaction))}
+                  </p>
+                </div>
+                <div>
+                  <h4 className="text-sm font-semibold text-slate-700">Aset EDR yang dipautkan kepada surat ini</h4>
+                  {sourceEdrAssets.length > 0 ? (
+                    <ul className="mt-2 space-y-2">
+                      {sourceEdrAssets.map(asset => (
+                        <li key={asset.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                          <span className="font-mono font-semibold">{asset.code || asset.id}</span>
+                          {' · '}{asset.type} {asset.purity || ''} · {Number(asset.weight) || 0}g
+                        </li>
+                      ))}
+                    </ul>
+                  ) : sourceAssetIds.length > 0 ? (
+                    <p className="mt-2 text-xs text-amber-700">
+                      Aset EDR yang dipautkan tidak ditemui dalam inventori aktif: {sourceAssetIds.join(', ')}.
+                    </p>
+                  ) : (
+                    <p className="mt-2 text-xs text-amber-700">
+                      Tiada rekod aset EDR dipautkan pada surat ini. Berat surat ialah {getCurrentPledgedWeight(selectedSourceTransaction)}g; semak inventori aset sebelum meneruskan.
+                    </p>
+                  )}
+                </div>
+              </section>
+            )}
+
+            <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:justify-end">
+              <button type="button" onClick={onClose} className="rounded-lg px-5 py-2.5 font-semibold text-slate-600 hover:bg-slate-100">Batal</button>
+              <button
+                type="submit"
+                disabled={!selectedSourceTransaction}
+                className="rounded-lg bg-emerald-600 px-5 py-2.5 font-semibold text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Teruskan rekod tindakan
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in duration-200">
@@ -6408,10 +6824,15 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-4 sm:p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
+        <form onSubmit={handleSubmit} className="space-y-5 p-4 sm:p-6">
+          <div className="grid grid-cols-1 gap-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm md:grid-cols-2 sm:p-5">
 
-            <div className="space-y-1">
+            <div className="order-first md:col-span-2 border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold uppercase tracking-wide text-slate-700">Maklumat surat gadaian</h3>
+              <p className="mt-1 text-xs text-slate-500">Susun maklumat utama, tarikh dan aset yang terlibat.</p>
+            </div>
+
+            <div className="order-1 space-y-2">
               <label className="text-sm font-semibold text-slate-700">Status / Jenis Pajakan</label>
               <select name="type" value={formData.type} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
                 <option value="Pajakan Asal">Pajakan Asal</option>
@@ -6427,7 +6848,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               </select>
             </div>
 
-            <div className="space-y-1">
+            <div className="order-4 space-y-2">
               <label htmlFor="transaction-date" className="text-sm font-semibold text-slate-700">Tarikh &amp; Masa (MYT)</label>
               <input id="transaction-date" type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
               {hasLegacyDateWithoutTime && (
@@ -6436,7 +6857,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             </div>
 
             {!formData.type.includes('Tebus') && (
-              <div className="space-y-1">
+              <div className="order-5 space-y-2">
                 <label htmlFor="redemption-date" className="text-sm font-semibold text-slate-700">Tarikh Matang</label>
                 <input
                   id="redemption-date"
@@ -6452,7 +6873,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             )}
 
             {!formData.type.includes('Tebus') && (
-              <div className="space-y-1 md:col-span-2">
+              <div className="order-7 space-y-2 md:col-span-2">
                 <label className="text-sm font-semibold text-slate-700">
                   {formData.type === 'Pajakan Asal' ? 'Pilih Aset EDT yang tersedia (Opsional)' : 'Pilih Aset EDR untuk transaksi sambungan (Opsional)'}
                 </label>
@@ -6502,7 +6923,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               </div>
             )}
 
-            <div className="space-y-1">
+            <div className="order-2 space-y-2">
               <label className="text-sm font-semibold text-slate-700">Institusi</label>
               <select name="institution" value={formData.institution} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
                 {institutions.map(inst => (
@@ -6511,12 +6932,12 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               </select>
             </div>
 
-            <div className="space-y-1">
+            <div className="order-3 space-y-2">
               <label className="text-sm font-semibold text-slate-700">No. Surat Rujukan</label>
               <input type="text" name="refNo" value={formData.refNo} onChange={handleChange} placeholder="cth. 1007-1008" required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
             </div>
 
-            <div className="space-y-1">
+            <div className="order-6 space-y-2">
               <label className="text-sm font-semibold text-slate-700">Ketulenan</label>
               <select
                 name="purity"
@@ -6540,7 +6961,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               </select>
             </div>
 
-            <div className="space-y-1 md:col-span-2">
+            <div className="order-8 space-y-2 md:col-span-2">
               <label htmlFor="transaction-remarks" className="text-sm font-semibold text-slate-700">Catatan</label>
               <textarea
                 id="transaction-remarks"
@@ -6552,46 +6973,121 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               />
             </div>
 
-            <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
-              <div className="space-y-1">
-                <label className="text-sm font-semibold text-slate-700">Berat Emas (g)</label>
+            <section className="order-9 space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 md:col-span-2">
+              <div>
+                <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+                  <Paperclip size={16} className="text-emerald-600" />
+                  Fail Lampiran
+                </h3>
+                <p className="mt-1 text-xs text-slate-500">
+                  Muat naik PDF, imej, dokumen dan fail sokongan lain. Maksimum {maximumTransactionAttachments} fail, sehingga 50 MB setiap fail.
+                  {' '}Baki slot: {Math.max(remainingAttachmentSlots, 0)}.
+                </p>
+              </div>
+
+              <label className={`flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-dashed border-emerald-300 bg-white px-4 py-2.5 text-sm font-semibold text-emerald-700 hover:bg-emerald-50 ${remainingAttachmentSlots <= 0 ? 'pointer-events-none opacity-50' : ''}`}>
+                <UploadCloud size={18} />
+                Pilih fail
+                <input
+                  type="file"
+                  multiple
+                  disabled={remainingAttachmentSlots <= 0 || isSaving}
+                  onChange={handleAttachmentSelection}
+                  className="sr-only"
+                />
+              </label>
+
+              {(savedAttachments.length > 0 || newAttachmentFiles.length > 0) && (
+                <ul className="space-y-2">
+                  {savedAttachments.map(attachment => (
+                    <li key={attachment.path} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2">
+                      <span className="min-w-0 break-all text-sm text-slate-700">{attachment.name}</span>
+                      <span className="flex shrink-0 items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenAttachment(attachment)}
+                          disabled={!attachment.path || isSaving}
+                          className="rounded-md p-2 text-emerald-700 hover:bg-emerald-50 disabled:opacity-40"
+                          aria-label={`Buka lampiran ${attachment.name}`}
+                        >
+                          <ExternalLink size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveSavedAttachment(attachment)}
+                          disabled={isSaving}
+                          className="rounded-md p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                          aria-label={`Buang lampiran ${attachment.name}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                  {newAttachmentFiles.map((file, index) => (
+                    <li key={`${file.name}-${file.lastModified}-${index}`} className="flex items-center justify-between gap-2 rounded-lg border border-emerald-200 bg-white px-3 py-2">
+                      <span className="min-w-0 break-all text-sm text-slate-700">{file.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => setNewAttachmentFiles(previous => previous.filter((_, fileIndex) => fileIndex !== index))}
+                        disabled={isSaving}
+                        className="shrink-0 rounded-md p-2 text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                        aria-label={`Buang fail ${file.name}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {attachmentError && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{attachmentError}</p>}
+            </section>
+
+            <div className="order-10 md:col-span-2 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-wide text-slate-700">Penilaian dan pembiayaan</h3>
+                <p className="mt-1 text-xs text-slate-500">Masukkan berat, kadar taksiran dan butiran caj.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  const institution = institutions.find(item => item.name === formData.institution);
+                  if (onRefresh && institution) {
+                    onRefresh(institution.id, ({ institutionRate }) =>
+                      setFormData(prev => recalculateFinancialFields(
+                        { ...prev, marhunPrice: institutionRate.toFixed(2) },
+                        true
+                      ))
+                    );
+                  }
+                }}
+                disabled={isRefreshing}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700 transition-colors hover:bg-emerald-100 disabled:opacity-50"
+              >
+                <RefreshCw size={13} className={isRefreshing ? 'animate-spin' : ''} />
+                {isRefreshing ? 'Mengemas kini...' : 'Segar semula kadar'}
+              </button>
+            </div>
+
+            <div className="order-11 md:col-span-2 grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="space-y-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Berat Emas (g)</label>
                 <input type="number" step="0.01" min="0" name="weight" value={formData.weight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
               </div>
-              <div className="space-y-1">
-                <div className="flex justify-between items-center">
-                  <label className="text-sm font-semibold text-slate-700">Harga Taksiran (RM/g)</label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const institution = institutions.find(item => item.name === formData.institution);
-                      if (onRefresh && institution) {
-                        onRefresh(institution.id, ({ institutionRate }) =>
-                          setFormData(prev => recalculateFinancialFields(
-                            { ...prev, marhunPrice: institutionRate.toFixed(2) },
-                            true
-                          ))
-                        );
-                      }
-                    }}
-                    disabled={isRefreshing}
-                    className="text-xs text-emerald-600 hover:text-emerald-700 font-bold flex items-center bg-emerald-100/50 px-2 py-0.5 rounded-full transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw size={12} className={`mr-1 ${isRefreshing ? "animate-spin" : ""}`} />
-                    {isRefreshing ? 'Fetching...' : 'Live Refresh'}
-                  </button>
-                </div>
+              <div className="space-y-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Harga Taksiran (RM/g)</label>
                 <input type="number" step="0.01" min="0" name="marhunPrice" value={formData.marhunPrice} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" />
               </div>
-              <div className="space-y-1">
-                <label className="text-sm font-semibold text-slate-700">Kadar Pembiayaan (%)</label>
+              <div className="space-y-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Kadar Pembiayaan (%)</label>
                 <input type="number" step="0.01" name="margin" value={formData.margin} onChange={handleChange} min="0" max="100" required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50" />
               </div>
             </div>
 
             {!formData.type.includes('Tebus') && (
-              <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-4 gap-4">
-                <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-700">Kadar Caj Simpanan (% sebulan)</label>
+              <div className="order-12 md:col-span-2 grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Kadar Caj Simpanan (% sebulan)</label>
                   <input
                     type="number"
                     name="feeRate"
@@ -6603,8 +7099,8 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                     className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
                   />
                 </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-700">Tempoh Pajakan (bulan)</label>
+                <div className="space-y-2">
+                  <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Tempoh Pajakan (bulan)</label>
                   <input
                     type="number"
                     name="feeTermMonths"
@@ -6616,8 +7112,8 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                     className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
                   />
                 </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-700">Asas Kiraan Caj</label>
+                <div className="space-y-2">
+                  <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Asas Kiraan Caj</label>
                   <select
                     name="feeBasis"
                     value={formData.feeBasis}
@@ -6630,8 +7126,8 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                     <option value="jumlahPembiayaan">Jumlah Pembiayaan</option>
                   </select>
                 </div>
-                <div className="space-y-1">
-                  <label className="text-sm font-semibold text-slate-700">
+                <div className="space-y-2">
+                  <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">
                     {formData.type.includes('OL') || formData.type.toLowerCase().includes('pusing')
                       ? 'Fi berkaitan baharu sebenar (RM)'
                       : 'Caj Simpanan Sebenar (RM)'}
@@ -6647,7 +7143,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                     className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
                   />
                 </div>
-                <p className="sm:col-span-3 text-xs text-slate-500">
+                <p className="sm:col-span-2 text-xs text-slate-500">
                   {formData.feeBasis
                     ? `Anggaran upah simpan: ${formatRM(feeBasisAmount)} × ${(parseFloat(formData.feeRate) || 0).toFixed(2)}% × ${feeTermMonths || 0} bulan. Anggaran bulanan ${formatRM(estimatedMonthlyStorageFee)}, jumlah ${formatRM(estimatedTotalStorageFee)}, jumlah tebus anggaran ${formatRM(estimatedTotalRedemption)}. Untuk OL, masukkan jumlah fi berkaitan sebenar mengikut sebut harga institusi.`
                     : 'Pilih asas caj mengikut terma Ar-Rahnu untuk melihat anggaran caj bulanan.'}
@@ -6656,8 +7152,8 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             )}
 
             {formData.type !== 'Pajakan Asal' && (
-              <div className="space-y-1 md:col-span-2">
-                <label className="text-sm font-semibold text-slate-700">Jumlah penyelesaian surat lama (RM)</label>
+              <div className="order-last space-y-2 md:col-span-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Jumlah penyelesaian surat lama (RM)</label>
                 <input type="number" step="0.01" min="0" name="redemption" value={formData.redemption} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all bg-amber-50" placeholder="Pembiayaan lama + caj tertunggak" />
                 {(formData.type.includes('OL') || formData.type.toLowerCase().includes('pusing')) && (
                   <p className="text-xs leading-relaxed text-slate-500">
@@ -6669,69 +7165,74 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
 
           </div>
 
-          {/* Editable financial fields */}
-          <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4 items-stretch">
-            <div className="flex h-full flex-col">
-              <label htmlFor="transaction-marhun-value" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Nilai Marhun (RM)</label>
-              <input
-                id="transaction-marhun-value"
-                type="number"
-                step="0.01"
-                name="marhunValue"
-                value={formData.marhunValue}
-                onChange={handleChange}
-                min="0"
-                required
-                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
-              <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: berat emas × harga taksiran (RM/g). Boleh ubah manual.</p>
+          <section className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4 sm:p-5">
+            <div className="mb-4">
+              <h3 className="text-sm font-bold uppercase tracking-wide text-emerald-800">Ringkasan pembiayaan</h3>
+              <p className="mt-1 text-xs text-emerald-700">Semak nilai marhun, jumlah pembiayaan dan lebihan tunai anggaran.</p>
             </div>
-            <div className="flex h-full flex-col">
-              <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Pembiayaan (RM)</label>
-              <input
-                id="transaction-loan"
-                type="number"
-                step="0.01"
-                name="loan"
-                value={formData.loan}
-                onChange={handleChange}
-                min="0"
-                required
-                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
-              <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: Jumlah Nilai Marhun × kadar pembiayaan. Boleh ubah manual.</p>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <div className="flex h-full flex-col">
+                <label htmlFor="transaction-marhun-value" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Nilai Marhun (RM)</label>
+                <input
+                  id="transaction-marhun-value"
+                  type="number"
+                  step="0.01"
+                  name="marhunValue"
+                  value={formData.marhunValue}
+                  onChange={handleChange}
+                  min="0"
+                  required
+                  className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: berat emas × harga taksiran (RM/g). Boleh ubah manual.</p>
+              </div>
+              <div className="flex h-full flex-col">
+                <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Pembiayaan (RM)</label>
+                <input
+                  id="transaction-loan"
+                  type="number"
+                  step="0.01"
+                  name="loan"
+                  value={formData.loan}
+                  onChange={handleChange}
+                  min="0"
+                  required
+                  className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: Jumlah Nilai Marhun × kadar pembiayaan. Boleh ubah manual.</p>
+              </div>
+              <div className="flex h-full flex-col">
+                <label htmlFor="transaction-projected-profit" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Anggaran Lebihan Tunai Selepas Caj (bukan untung) (RM)</label>
+                <input
+                  id="transaction-projected-profit"
+                  type="number"
+                  step="0.01"
+                  name="profit"
+                  value={formData.profit}
+                  onChange={handleChange}
+                  className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+                />
+                <p className="mt-1 min-h-12 text-xs text-slate-500">
+                  {formData.type.toLowerCase().includes('salin') ||
+                  formData.type.toLowerCase().includes('ol') ||
+                  formData.type.toLowerCase().includes('pusing')
+                    ? 'Salin/OL: pembiayaan baharu − pembiayaan lama − caj tertunggak lama − fi berkaitan baharu. Masukkan jumlah penyelesaian lama sebagai pembiayaan lama + caj tertunggak. Lebihan tunai bukan keuntungan; pembiayaan tetap perlu dibayar balik. Boleh ubah manual.'
+                    : formData.type === 'Pajakan Asal'
+                      ? 'Pajakan asal: masukkan caj sebenar institusi. Nilai ini bukan keuntungan yang telah direalisasikan.'
+                      : formData.type.toLowerCase().includes('tebus')
+                        ? 'Tebusan: rekodkan amaun tebus sebenar mengikut resit institusi.'
+                        : 'Semak amaun dan caj dengan institusi; nilai yang dipaparkan ialah anggaran, bukan keuntungan atau kelulusan.'}
+                </p>
+              </div>
             </div>
-            <div className="flex h-full flex-col">
-              <label htmlFor="transaction-projected-profit" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Anggaran Lebihan Tunai Selepas Caj (bukan untung) (RM)</label>
-              <input
-                id="transaction-projected-profit"
-                type="number"
-                step="0.01"
-                name="profit"
-                value={formData.profit}
-                onChange={handleChange}
-                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
-              />
-              <p className="mt-1 min-h-12 text-xs text-slate-500">
-                {formData.type.toLowerCase().includes('salin') ||
-                formData.type.toLowerCase().includes('ol') ||
-                formData.type.toLowerCase().includes('pusing')
-                  ? 'Salin/OL: pembiayaan baharu − pembiayaan lama − caj tertunggak lama − fi berkaitan baharu. Masukkan jumlah penyelesaian lama sebagai pembiayaan lama + caj tertunggak. Lebihan tunai bukan keuntungan; pembiayaan tetap perlu dibayar balik. Boleh ubah manual.'
-                  : formData.type === 'Pajakan Asal'
-                    ? 'Pajakan asal: masukkan caj sebenar institusi. Nilai ini bukan keuntungan yang telah direalisasikan.'
-                    : formData.type.toLowerCase().includes('tebus')
-                      ? 'Tebusan: rekodkan amaun tebus sebenar mengikut resit institusi.'
-                      : 'Semak amaun dan caj dengan institusi; nilai yang dipaparkan ialah anggaran, bukan keuntungan atau kelulusan.'}
-              </p>
-            </div>
-          </div>
+          </section>
 
           <div className="flex flex-col-reverse sm:flex-row justify-end sm:space-x-3 gap-3 pt-4 border-t border-slate-100">
-            <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-lg transition-colors">
+            <button type="button" onClick={onClose} disabled={isSaving} className="h-11 w-full rounded-xl px-5 text-slate-600 font-semibold transition-colors hover:bg-slate-100 disabled:opacity-50 sm:w-auto">
               Batal
             </button>
-            <button type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center">
-              {initialData ? 'Kemaskini Surat' : 'Simpan Surat'}
+            <button type="submit" disabled={isSaving} className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center disabled:cursor-not-allowed disabled:opacity-50">
+              {isSaving ? 'Menyimpan fail...' : initialData ? 'Kemaskini Surat' : 'Simpan Surat'}
             </button>
           </div>
         </form>
