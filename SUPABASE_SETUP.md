@@ -2,12 +2,23 @@
 
 1. In the Supabase SQL Editor for project `zyikvjbnroicbeezpxvx`, run [`supabase/schema.sql`](./supabase/schema.sql). It creates the per-user data table, enables row-level security, and adds the table to Realtime.
 2. Run [`supabase/audit-trail.sql`](./supabase/audit-trail.sql) in the same project to enable append-only, SHA-256 hash-chained records for portfolio, organization, and membership inserts, updates, and deletes. The Audit Trail page is available to Admin and Manager accounts. Redeploy the updated `user-admin` Edge Function as described in [`supabase/USER-MANAGEMENT.md`](./supabase/USER-MANAGEMENT.md) so administrative account actions include actor/session metadata and audit events.
-3. Run [`supabase/traffic-inspector.sql`](./supabase/traffic-inspector.sql) to add seven-day HTTP telemetry storage and manager-only read access. The migration attempts to schedule physical expiry every 15 minutes using `pg_cron`; if the extension is unavailable, expired rows are pruned on the next recorded request. Check the SQL Editor notices and enable `pg_cron` in Database → Extensions, then rerun the migration if scheduled deletion could not be installed.
-4. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_ANON_KEY` to the project's publishable key (or legacy anon key). The project URL is already filled in. Never use a `service_role` or secret key in this browser app.
-5. Restart the Vite server, open the app, and register/log in with Supabase Auth. If email confirmation is enabled, confirm the account before logging in.
-6. The first login imports the existing browser's transactions, institutions, assets and suppliers only when that account has no cloud data yet. If cloud data already exists, it is loaded as the source of truth.
+3. Run [`supabase/traffic-inspector.sql`](./supabase/traffic-inspector.sql) to add seven-day HTTP telemetry storage and manager-only read access. Rerun it after changes to this file so updated database functions are installed. The migration attempts to schedule physical expiry every 15 minutes using `pg_cron`; if the extension is unavailable, expired rows are pruned on the next recorded request. Check the SQL Editor notices and enable `pg_cron` in Database → Extensions, then rerun the migration if scheduled deletion could not be installed.
+4. Run [`supabase/portfolio-relations.sql`](./supabase/portfolio-relations.sql) to backfill relational records and install foreign keys and automatic synchronization. It must run after `schema.sql`.
+5. Copy `.env.example` to `.env.local` and set `VITE_SUPABASE_ANON_KEY` to the project's publishable key (or legacy anon key). The project URL is already filled in. Never use a `service_role` or secret key in this browser app.
+6. Restart the Vite server, open the app, and register/log in with Supabase Auth. If email confirmation is enabled, confirm the account before logging in.
+7. The first login imports the existing browser's transactions, institutions, assets and suppliers only when that account has no cloud data yet. If cloud data already exists, it is loaded as the source of truth.
 
 Each authenticated user can only read or modify their own row. App changes are saved automatically and updates from other sessions are received through Supabase Realtime.
+
+## Portfolio relationships and analytics
+
+The app continues to save its portfolio JSON in `ar_rahnu_user_data` for compatibility. The portfolio-relations migration backfills that data into separate institution, supplier, asset and transaction tables. Foreign keys connect transactions to institutions and assets, and assets to suppliers. A database trigger keeps those related tables in sync whenever the portfolio JSON changes. The related tables are read-only to authenticated clients and use the same personal-portfolio or organization-manager access rules.
+
+The original JSON remains the source of truth. If an old record points to an institution, asset or supplier that cannot be matched, the migration preserves the record and leaves that relationship unlinked rather than inventing a related record. The migration does not remove original JSON data.
+
+The dashboard records one live gold-price snapshot per Malaysia calendar day, up to 365 days. Its 12-week price line is a linear trend based on at least seven snapshots, not a guaranteed market forecast or an external AI service. The overlap simulation uses the selected transaction's weight and redemption amount, the entered margin and fees, and the institution's saved spread. Positive balance means estimated cash surplus, not profit. The readiness score reflects maturity timing, available cash, EDT/EDR coverage and record completeness; it is not a credit or approval score.
+
+Cash available, monthly income and expenses entered in the analytics page stay in browser storage, keyed to the signed-in account. They are not sent to Supabase or an AI provider, and are not shared across devices. Clearing browser storage removes them. The CSV analytics export includes portfolio records, snapshots and the current overlap scenarios, but not these local financial-readiness values.
 
 ## Audit trail and forensic limitations
 

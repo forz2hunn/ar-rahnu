@@ -50,7 +50,7 @@ begin
     return null;
   end if;
   if p_depth > 12 then
-    return to_jsonb('[TRUNCATED: maximum nesting depth]');
+    return to_jsonb('[TRUNCATED: maximum nesting depth]'::text);
   end if;
 
   if jsonb_typeof(p_payload) = 'object' then
@@ -58,7 +58,7 @@ begin
       entry.key,
       case
         when lower(entry.key) ~ '(password|token|secret|authorization|cookie|email|phone|otp|credential|api.?key|service.?role|access.?key|nric|identity|passport|full.?name|first.?name|last.?name|address)'
-          then to_jsonb('[REDACTED]')
+          then to_jsonb('[REDACTED]'::text)
         else public.ar_rahnu_sanitize_traffic_payload(entry.value, p_depth + 1)
       end
     ), '{}'::jsonb)

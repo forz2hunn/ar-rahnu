@@ -52,8 +52,9 @@ import {
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
 import {
-  LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, ReferenceLine
+  LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
+import { buildGoldForecast, getMalaysiaDateKey, type GoldPriceSnapshot } from './src/lib/portfolio-analytics';
 
 // --- MOCK DATA: PEMBEKAL & KEDAI EMAS MALAYSIA ---
 const initialSuppliers = [
@@ -323,6 +324,34 @@ const initialAssets = [
 
 // --- UTILS ---
 const formatRM = (val) => new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR' }).format(val);
+const calculateMarhunValue = (weight, marhunRate) =>
+  (parseFloat(weight) || 0) * (parseFloat(marhunRate) || 0);
+const getTransactionMarhunValue = (transaction) =>
+  transaction?.marhunValue == null
+    ? calculateMarhunValue(transaction?.weight, transaction?.marhunPrice)
+    : parseFloat(transaction.marhunValue) || 0;
+const csvCell = (value) => {
+  const rawValue = value == null ? '' : String(value);
+  const safeValue = typeof value === 'string' && /^[=+\-@\t\r]/.test(rawValue.trim())
+    ? `'${rawValue}`
+    : rawValue;
+  return `"${safeValue.replace(/"/g, '""')}"`;
+};
+const downloadCsv = (fileName, headers, rows) => {
+  const csvContent = [
+    headers.map(csvCell).join(','),
+    ...rows.map(row => row.map(csvCell).join(','))
+  ].join('\r\n');
+  const blob = new Blob(['\ufeff', csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 const formatMalaysiaDateTime = (timestamp: string) => {
   const date = new Date(timestamp);
   if (Number.isNaN(date.getTime())) return timestamp;
@@ -336,6 +365,69 @@ const formatMalaysiaDateTime = (timestamp: string) => {
     hourCycle: 'h23',
     timeZone: 'Asia/Kuala_Lumpur'
   }).format(date)} MYT`;
+};
+const parseTransactionDateTime = (value) => {
+  const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
+  return new Date(hasTimezone ? value : `${value}+08:00`);
+};
+const getMalaysiaDateTimeInputValue = (value) => {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}T00:00`;
+  const date = parseTransactionDateTime(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date).map(part => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}`;
+};
+const formatTransactionDateTime = (value) => {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const date = new Date(`${value}T12:00:00+08:00`);
+    const dateLabel = new Intl.DateTimeFormat('ms-MY', {
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      timeZone: 'Asia/Kuala_Lumpur'
+    }).format(date);
+    return `${dateLabel} · masa tidak direkod`;
+  }
+  const date = parseTransactionDateTime(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return `${new Intl.DateTimeFormat('ms-MY', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    timeZone: 'Asia/Kuala_Lumpur'
+  }).format(date)} MYT`;
+};
+const getTransactionDateKey = (value) => {
+  if (!value) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const date = parseTransactionDateTime(value);
+  return Number.isNaN(date.getTime()) ? value.slice(0, 10) : getMalaysiaDateKey(date);
+};
+const normalizeTransactionDateTime = (transaction, timestamp = new Date().toISOString()) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(transaction?.date || '')) return transaction;
+  const currentTime = getMalaysiaDateTimeInputValue(timestamp).slice(11);
+  return {
+    ...transaction,
+    date: parseTransactionDateTime(`${transaction.date}T${currentTime}`).toISOString(),
+    updatedAt: transaction.updatedAt || timestamp
+  };
+};
+const getTransactionTimestamp = (value) => {
+  if (!value) return 0;
+  const date = parseTransactionDateTime(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 };
 const getDaysUntilDate = (dateString) => {
   if (!dateString) return null;
@@ -630,11 +722,24 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     try {
       const saved = localStorage.getItem('ar_rahnu_transactions_v2');
       const savedTransactions = saved ? JSON.parse(saved) : initialTransactions;
-      return Array.isArray(savedTransactions)
-        ? savedTransactions.map(transaction => ({ ...transaction, transactionStatus: getTransactionStatus(transaction) }))
-        : initialTransactions;
+      const transactionsToLoad = Array.isArray(savedTransactions) ? savedTransactions : initialTransactions;
+      const migrationTimestamp = new Date().toISOString();
+      return transactionsToLoad.map(transaction => {
+        const normalizedTransaction = normalizeTransactionDateTime(transaction, migrationTimestamp);
+        return {
+          ...normalizedTransaction,
+          transactionStatus: getTransactionStatus(normalizedTransaction)
+        };
+      });
     } catch {
-      return initialTransactions;
+      const migrationTimestamp = new Date().toISOString();
+      return initialTransactions.map(transaction => {
+        const normalizedTransaction = normalizeTransactionDateTime(transaction, migrationTimestamp);
+        return {
+          ...normalizedTransaction,
+          transactionStatus: getTransactionStatus(normalizedTransaction)
+        };
+      });
     }
   });
   const [currentDate, setCurrentDate] = useState(() => new Date());
@@ -743,7 +848,51 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
   }, [assets]);
 
-  const appData = useMemo(() => ({ transactions, institutions, assets, suppliers }), [transactions, institutions, assets, suppliers]);
+  const [goldPriceHistory, setGoldPriceHistory] = useState<GoldPriceSnapshot[]>(() => {
+    try {
+      const saved = localStorage.getItem('ar_rahnu_gold_price_history_v1');
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+      console.error('Sejarah harga emas tersimpan tidak dapat dibaca:', error);
+      return [];
+    }
+  });
+  const [financialReadiness, setFinancialReadiness] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`ar_rahnu_financial_readiness_v1_${user.id}`);
+      const parsed = saved ? JSON.parse(saved) : {};
+      return {
+        cashOnHand: String(parsed.cashOnHand ?? ''),
+        monthlyIncome: String(parsed.monthlyIncome ?? ''),
+        monthlyExpenses: String(parsed.monthlyExpenses ?? '')
+      };
+    } catch (error) {
+      console.error('Maklumat kewangan tersimpan tidak dapat dibaca:', error);
+      return { cashOnHand: '', monthlyIncome: '', monthlyExpenses: '' };
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ar_rahnu_gold_price_history_v1', JSON.stringify(goldPriceHistory));
+    } catch (error) {
+      console.error('Sejarah harga emas tidak dapat disimpan ke browser:', error);
+    }
+  }, [goldPriceHistory]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(`ar_rahnu_financial_readiness_v1_${user.id}`, JSON.stringify(financialReadiness));
+    } catch (error) {
+      console.error('Maklumat kewangan tidak dapat disimpan ke browser:', error);
+    }
+  }, [financialReadiness, user.id]);
+
+  const appData = useMemo(
+    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory }),
+    [transactions, institutions, assets, suppliers, goldPriceHistory]
+  );
   const localSnapshotRef = useRef(appData);
   localSnapshotRef.current = appData;
   const cloudSnapshotRef = useRef('');
@@ -776,23 +925,33 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         throw new Error('Struktur data Supabase tidak lengkap. Pastikan jadual ar_rahnu_user_data menggunakan skema aplikasi.');
       }
 
+      const migrationTimestamp = new Date().toISOString();
       const nextData = {
-        transactions: incoming.transactions.map(transaction => ({
-          ...transaction,
-          transactionStatus: getTransactionStatus(transaction)
-        })),
+        transactions: incoming.transactions.map(transaction => {
+          const normalizedTransaction = normalizeTransactionDateTime(transaction, migrationTimestamp);
+          return {
+            ...normalizedTransaction,
+            transactionStatus: getTransactionStatus(normalizedTransaction)
+          };
+        }),
         institutions: incoming.institutions,
         assets: syncAssetStatuses(incoming.assets, incoming.transactions),
-        suppliers: incoming.suppliers
+        suppliers: incoming.suppliers,
+        goldPriceHistory: Array.isArray(incoming.goldPriceHistory) ? incoming.goldPriceHistory : []
       };
       const serializedData = JSON.stringify(nextData);
-      cloudSnapshotRef.current = JSON.stringify({ ...nextData, assets: incoming.assets });
+      cloudSnapshotRef.current = JSON.stringify({
+        ...nextData,
+        transactions: incoming.transactions,
+        assets: incoming.assets
+      });
       if (JSON.stringify(localSnapshotRef.current) === serializedData) return;
 
       setTransactions(nextData.transactions);
       setInstitutions(nextData.institutions);
       setAssets(nextData.assets);
       setSuppliers(nextData.suppliers);
+      setGoldPriceHistory(nextData.goldPriceHistory);
     };
 
     const loadCloudData = async () => {
@@ -1394,8 +1553,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   // State Harga Live
-  const [currentGoldPrice, setCurrentGoldPrice] = useState(INITIAL_GOLD_SPOT_MYR_PER_GRAM);
+  const [currentGoldPrice, setCurrentGoldPrice] = useState(
+    () => Number(goldPriceHistory[goldPriceHistory.length - 1]?.price) || INITIAL_GOLD_SPOT_MYR_PER_GRAM
+  );
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [scenarioTransactionId, setScenarioTransactionId] = useState(
+    () => transactions.find(transaction => transaction.status === 'Aktif' && !String(transaction.type || '').toLowerCase().includes('tebus'))?.id ?? ''
+  );
+  const [scenarioMargin, setScenarioMargin] = useState('');
+  const [scenarioNewFees, setScenarioNewFees] = useState('');
 
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -1495,6 +1661,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const liveSpot = await fetchGoldSpotMYRPerGram();
       const updatedAt = new Date().toISOString();
       setCurrentGoldPrice(liveSpot.price);
+      setGoldPriceHistory(previousHistory => {
+        const snapshotDate = getMalaysiaDateKey(new Date(updatedAt));
+        const nextHistory = previousHistory.filter(snapshot => snapshot.date !== snapshotDate);
+        nextHistory.push({ date: snapshotDate, capturedAt: updatedAt, price: liveSpot.price });
+        return nextHistory.sort((left, right) => left.date.localeCompare(right.date)).slice(-365);
+      });
       setInstitutions(prev => prev.map(inst => {
         if (institutionId !== null && inst.id !== institutionId) return inst;
         const spread = Number.isFinite(Number(inst.marhunSpread))
@@ -1535,34 +1707,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
   };
 
-  // Data ramalan mingguan bersandarkan harga live semasa untuk 12 minggu.
   const dynamicAiData = useMemo(() => {
-    const today = new Date();
-    const todayLabel = 'Hari Ini';
-    const forecastMilestones = [0, 15, 35, 60];
-    const weeklyForecast = Array.from({ length: 12 }, (_, index) => {
-      const week = index + 1;
-      const milestoneIndex = Math.floor((week - 1) / 4);
-      const progress = (week - milestoneIndex * 4) / 4;
-      const increase = forecastMilestones[milestoneIndex] +
-        (forecastMilestones[milestoneIndex + 1] - forecastMilestones[milestoneIndex]) * progress;
-      const forecastDate = new Date(today);
-      forecastDate.setDate(forecastDate.getDate() + week * 7);
-
-      return {
-        date: forecastDate.toLocaleDateString('ms-MY', { day: '2-digit', month: 'short' }),
-        actual: null,
-        predicted: Number((currentGoldPrice + increase).toFixed(2))
-      };
-    });
-
-    return [
-      { date: 'Sep 2026', actual: 585.00, predicted: null },
-      { date: 'Okt 2026', actual: 560.00, predicted: null },
-      { date: todayLabel, actual: currentGoldPrice, predicted: currentGoldPrice },
-      ...weeklyForecast
-    ];
-  }, [currentGoldPrice]);
+    return buildGoldForecast(goldPriceHistory);
+  }, [goldPriceHistory]);
+  const goldForecastAvailable = dynamicAiData.some(
+    point => point.predicted !== null && point.actual === null
+  );
+  const twelveWeekGoldEstimate = goldForecastAvailable
+    ? dynamicAiData[dynamicAiData.length - 1]?.predicted ?? null
+    : null;
 
   // State untuk Emas Di Tangan (EDT) - Dikira secara dinamik dari Asset Record
   const edtBalance = useMemo(() => assets.filter(a => a.status === 'EDT').reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0), [assets]);
@@ -1570,14 +1723,45 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   // Computed Dashboard Metrics
   const totalCapital = useMemo(() => transactions.reduce((sum, t) => sum + t.loan, 0), [transactions]);
   const totalProfit = useMemo(() => transactions.reduce((sum, t) => sum + t.profit, 0), [transactions]);
+  const profitTrendData = useMemo(() => {
+    const grouped = new Map();
+    transactions.forEach(transaction => {
+      if (!transaction.date) return;
+      const dateKey = getTransactionDateKey(transaction.date);
+      grouped.set(
+        dateKey,
+        (grouped.get(dateKey) || 0) + (Number(transaction.profit) || 0)
+      );
+    });
+    return Array.from(grouped, ([date, profit]) => ({ date, profit }))
+      .sort((left, right) => left.date.localeCompare(right.date));
+  }, [transactions]);
+  const institutionAnalysis = useMemo(() => {
+    const grouped = new Map();
+    transactions.forEach(transaction => {
+      const name = transaction.institution || 'Tiada institusi';
+      const entry = grouped.get(name) || { institution: name, loan: 0, redemption: 0 };
+      entry.loan += Number(transaction.loan) || 0;
+      entry.redemption += Number(transaction.redemption) || 0;
+      grouped.set(name, entry);
+    });
+    return Array.from(grouped.values());
+  }, [transactions]);
+  const transactionTypeAnalysis = useMemo(() => {
+    const grouped = new Map();
+    transactions.forEach(transaction => {
+      const type = getTransactionStatus(transaction);
+      grouped.set(type, (grouped.get(type) || 0) + 1);
+    });
+    return Array.from(grouped, ([name, count]) => ({ name, count }));
+  }, [transactions]);
   const cumulativeMarhunData = useMemo(() => {
     const dailyValues = new Map();
     transactions.forEach(tx => {
-      const weight = Number(tx.weight) || 0;
-      const rate = Number(tx.marhunPrice) || 0;
-      const value = weight * rate;
+      const value = getTransactionMarhunValue(tx);
       if (tx.date && value > 0) {
-        dailyValues.set(tx.date, (dailyValues.get(tx.date) || 0) + value);
+        const dateKey = getTransactionDateKey(tx.date);
+        dailyValues.set(dateKey, (dailyValues.get(dateKey) || 0) + value);
       }
     });
 
@@ -1592,7 +1776,17 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const filteredTransactions = useMemo(() => transactions.filter(transaction =>
     transactionStatusFilter === 'Semua' || getTransactionStatus(transaction) === transactionStatusFilter
   ), [transactions, transactionStatusFilter]);
-  const activeTickets = transactions.filter(t => t.status === 'Aktif' || (!t.status && !t.type.includes('Tebus'))).length;
+  const sortedTransactions = useMemo(() => [...filteredTransactions].sort((left, right) =>
+    getTransactionTimestamp(right.updatedAt || right.createdAt || right.date) -
+      getTransactionTimestamp(left.updatedAt || left.createdAt || left.date) ||
+    getTransactionTimestamp(right.date) - getTransactionTimestamp(left.date) ||
+    String(right.id).localeCompare(String(left.id))
+  ), [filteredTransactions]);
+  const activePortfolioTransactions = useMemo(() => transactions.filter(transaction =>
+    !String(transaction.type || '').toLowerCase().includes('tebus') &&
+    (transaction.status === 'Aktif' || !transaction.status)
+  ), [transactions]);
+  const activeTickets = activePortfolioTransactions.length;
   const redemptionNotifications = useMemo(() => transactions
     .filter(tx => !tx.type.includes('Tebus') && (tx.status === 'Aktif' || !tx.status) && tx.redemptionDate)
     .map(tx => ({ ...tx, daysRemaining: getDaysUntilDate(tx.redemptionDate) }))
@@ -1680,7 +1874,95 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   }, [calendarMonth, transactions, currentDate]);
 
   // Kira Emas Dalam Ar-Rahnu (EDR) dari surat yang belum tebus & aktif
-  const edrBalance = useMemo(() => transactions.filter(t => t.status === 'Aktif' || (!t.status && !t.type.includes('Tebus'))).reduce((sum, t) => sum + (t.weight || 0), 0), [transactions]);
+  const edrBalance = useMemo(
+    () => activePortfolioTransactions.reduce((sum, transaction) => sum + (Number(transaction.weight) || 0), 0),
+    [activePortfolioTransactions]
+  );
+  const cashOnHand = financialReadiness.cashOnHand.trim() === ''
+    ? null
+    : Number.isFinite(Number(financialReadiness.cashOnHand))
+      ? Math.max(0, Number(financialReadiness.cashOnHand))
+      : null;
+  const monthlyIncome = financialReadiness.monthlyIncome.trim() === ''
+    ? null
+    : Number.isFinite(Number(financialReadiness.monthlyIncome))
+      ? Math.max(0, Number(financialReadiness.monthlyIncome))
+      : null;
+  const monthlyExpenses = financialReadiness.monthlyExpenses.trim() === ''
+    ? null
+    : Number.isFinite(Number(financialReadiness.monthlyExpenses))
+      ? Math.max(0, Number(financialReadiness.monthlyExpenses))
+      : null;
+  const activeRedemptionTotal = activePortfolioTransactions.reduce(
+    (sum, transaction) => sum + (Number(transaction.redemption) || 0),
+    0
+  );
+  const cashCoverageRatio = cashOnHand === null
+    ? null
+    : activeRedemptionTotal > 0
+      ? Math.min(cashOnHand / activeRedemptionTotal, 1)
+      : 1;
+  const edtCoverageRatio = edrBalance > 0 ? Math.min(edtBalance / edrBalance, 1) : 1;
+  const riskScores = useMemo(() => activePortfolioTransactions.map(transaction => {
+    const rawDaysRemaining = transaction.redemptionDate ? getDaysUntilDate(transaction.redemptionDate) : null;
+    const daysRemaining = Number.isFinite(rawDaysRemaining) ? rawDaysRemaining : null;
+    const maturityPoints = daysRemaining === null
+      ? 0
+      : daysRemaining < 0
+        ? 0
+        : daysRemaining <= 3
+          ? 5
+          : daysRemaining <= 7
+            ? 10
+            : daysRemaining <= 30
+              ? 20
+              : 30;
+    const cashPoints = cashCoverageRatio === null ? 0 : cashCoverageRatio * 35;
+    const edtPoints = edtCoverageRatio * 20;
+    const completeFields = [
+      Boolean(transaction.refNo),
+      Boolean(transaction.institution),
+      Boolean(transaction.redemptionDate),
+      Number(transaction.weight) > 0,
+      Number(transaction.loan) > 0 && Number(transaction.redemption) > 0
+    ];
+    const recordPoints = completeFields.filter(Boolean).length * 3;
+    const score = cashCoverageRatio === null
+      ? null
+      : Math.round(maturityPoints + cashPoints + edtPoints + recordPoints);
+    return { transaction, daysRemaining, score };
+  }), [activePortfolioTransactions, cashCoverageRatio, edtCoverageRatio, currentDate]);
+  const averageRiskScore = riskScores.length && cashCoverageRatio !== null
+    ? Math.round(riskScores.reduce((sum, item) => sum + (item.score || 0), 0) / riskScores.length)
+    : null;
+  const selectedScenarioTransaction = activePortfolioTransactions.find(
+    transaction => String(transaction.id) === String(scenarioTransactionId)
+  ) || activePortfolioTransactions[0] || null;
+  const scenarioInstitution = institutions.find(
+    institution => institution.name === selectedScenarioTransaction?.institution
+  );
+  const scenarioMarginValue = Math.min(100, Math.max(0, Number(scenarioMargin === ''
+    ? selectedScenarioTransaction?.margin
+    : scenarioMargin) || 0));
+  const scenarioFeesValue = Math.max(0, Number(scenarioNewFees) || 0);
+  const scenarioSpread = Number.isFinite(Number(scenarioInstitution?.marhunSpread))
+    ? Number(scenarioInstitution.marhunSpread)
+    : (Number(scenarioInstitution?.marhunRate) || currentGoldPrice) - currentGoldPrice;
+  const scenarioOutcomes = selectedScenarioTransaction
+    ? [
+        { label: 'Harga turun 10%', change: -0.1 },
+        { label: 'Harga kekal', change: 0 },
+        { label: 'Harga naik 10%', change: 0.1 }
+      ].map(scenario => {
+        const simulatedSpot = currentGoldPrice * (1 + scenario.change);
+        const simulatedRate = Math.max(0, simulatedSpot + scenarioSpread);
+        const newFinancing = (Number(selectedScenarioTransaction.weight) || 0) *
+          simulatedRate * scenarioMarginValue / 100;
+        const cashDifference = newFinancing -
+          (Number(selectedScenarioTransaction.redemption) || 0) - scenarioFeesValue;
+        return { ...scenario, simulatedSpot, simulatedRate, newFinancing, cashDifference };
+      })
+    : [];
 
   // SYSTEM RULES & CONDITIONS INDICATOR ENGINE
   const systemIndicators = useMemo(() => {
@@ -1779,12 +2061,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleFinishAllPendingTasks = () => {
+    const updatedAt = new Date().toISOString();
     // 1. Selesaikan semua surat lama yang telah dipusingkan/salin
     setTransactions(prev => prev.map(t => {
-      if (t.refNo === '1001-1002' || t.refNo === '1003-1004') {
-        return { ...t, status: 'Selesai' };
-      }
-      return { ...t, status: t.status || 'Aktif' };
+      const status = t.refNo === '1001-1002' || t.refNo === '1003-1004'
+        ? 'Selesai'
+        : t.status || 'Aktif';
+      return status === t.status ? t : { ...t, status, updatedAt };
     }));
 
     // 2. Pastikan nisbah EDT seimbang dengan EDR
@@ -1817,10 +2100,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleToggleStatus = (id) => {
+    const updatedAt = new Date().toISOString();
     setTransactions(prev => prev.map(t => {
       if (t.id === id) {
         const nextStatus = t.status === 'Aktif' ? 'Selesai' : 'Aktif';
-        return { ...t, status: nextStatus };
+        return { ...t, status: nextStatus, updatedAt };
       }
       return t;
     }));
@@ -1830,12 +2114,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     if (indicator.type === 'RATIO') {
       setIsAssetModalOpen(true);
     } else if (indicator.type === 'TEBUS') {
-      setTransactions(prev => prev.map(t => t.refNo === indicator.ticket ? { ...t, status: 'Ditebus' } : t));
+      const updatedAt = new Date().toISOString();
+      setTransactions(prev => prev.map(t =>
+        t.refNo === indicator.ticket ? { ...t, status: 'Ditebus', updatedAt } : t
+      ));
       setToastMessage(`Surat #${indicator.ticket} telah berjaya ditebus dan aset dikembalikan ke EDT!`);
       setTimeout(() => setToastMessage(null), 3000);
     } else {
       // Salin / OL
-      setTransactions(prev => prev.map(t => t.refNo === indicator.ticket ? { ...t, status: 'Selesai' } : t));
+      const updatedAt = new Date().toISOString();
+      setTransactions(prev => prev.map(t =>
+        t.refNo === indicator.ticket ? { ...t, status: 'Selesai', updatedAt } : t
+      ));
       setToastMessage(`Tindakan ${indicator.badge} untuk Surat #${indicator.ticket} telah selesai!`);
       setTimeout(() => setToastMessage(null), 3000);
     }
@@ -1861,12 +2151,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleExportCSV = () => {
-    // Headers matching the Google Sheet exactly
     const headers = [
-      "Tarikh", "Jenis Transaksi", "Tempat (Koperasi/Ar-Rahnu)",
+      "Tarikh & Masa", "Jenis Transaksi", "Tempat (Koperasi/Ar-Rahnu)",
       "No. Surat Rujukan", "Berat Emas (g)", "Harga Marhun (RM/g)",
       "Margin (%)", "Jumlah Pinjaman (RM)", "Upah Simpan (RM)",
-      "Jumlah Tebus (RM)", "Lebihan/Profit (RM)", "Catatan"
+      "Jumlah Tebus (RM)", "Lebihan/Profit (RM)", "Catatan", "Jumlah Nilai Marhun (RM)"
     ];
 
     const rows = transactions.map(tx => [
@@ -1881,22 +2170,141 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       tx.fee || 0,
       tx.redemption,
       tx.profit,
-      `"${(tx.remarks || '').replace(/"/g, '""')}"` // Handle quotes and commas in remarks
+      tx.remarks || '',
+      getTransactionMarhunValue(tx)
     ]);
 
-    const csvContent = [
-      headers.join(","),
-      ...rows.map(e => e.join(","))
-    ].join("\n");
+    downloadCsv('Template_Gameplay_Ar-Rahnu_Kop.csv', headers, rows);
+  };
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", "Template_Gameplay_Ar-Rahnu_Kop.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  const handleExportAnalyticsCSV = () => {
+    const headers = [
+      'Jenis rekod', 'Tarikh & Masa', 'Rujukan/Kod', 'Institusi/Pembekal', 'Jenis',
+      'Aset berkaitan', 'Berat (g)', 'Harga Marhun/Kadar (RM/g)',
+      'Pembiayaan/Nilai (RM)', 'Jumlah tebus (RM)',
+      'Lebihan tunai atau untung direkod (RM)', 'Skor risiko (/100)', 'Status', 'Catatan',
+      'Jumlah Nilai Marhun (RM)'
+    ];
+    const transactionRows = transactions.map(transaction => {
+      const linkedAssets = getTransactionAssetIds(transaction)
+        .map(assetId => assets.find(asset => String(asset.id) === String(assetId)))
+        .filter(Boolean)
+        .map(asset => asset.code || asset.id)
+        .join('; ');
+      const risk = riskScores.find(item => String(item.transaction.id) === String(transaction.id));
+      return [
+        'Transaksi',
+        transaction.date,
+        transaction.refNo,
+        transaction.institution,
+        getTransactionStatus(transaction),
+        linkedAssets,
+        transaction.weight,
+        transaction.marhunPrice,
+        transaction.loan,
+        transaction.redemption,
+        transaction.profit,
+        risk?.score ?? '',
+        transaction.status || 'Belum ditetapkan',
+        transaction.remarks,
+        getTransactionMarhunValue(transaction)
+      ];
+    });
+    const assetRows = assets.map(asset => [
+      'Aset',
+      asset.date,
+      asset.code || asset.id,
+      asset.supplier,
+      asset.type,
+      '',
+      asset.weight,
+      '',
+      asset.price,
+      '',
+      '',
+      '',
+      asset.status,
+      asset.purity ? `Ketulenan ${asset.purity}` : '',
+      ''
+    ]);
+    const institutionRows = institutions.map(institution => [
+      'Institusi',
+      '',
+      institution.id,
+      institution.name,
+      institution.category,
+      '',
+      '',
+      institution.marhunRate,
+      '',
+      '',
+      '',
+      '',
+      'Daftar institusi',
+      institution.remarks,
+      ''
+    ]);
+    const supplierRows = suppliers.map(supplier => [
+      'Pembekal',
+      '',
+      supplier.code || supplier.id,
+      supplier.name,
+      supplier.category,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'Daftar pembekal',
+      supplier.remarks || supplier.products,
+      ''
+    ]);
+    const priceRows = goldPriceHistory.map(snapshot => [
+      'Snapshot harga',
+      snapshot.date,
+      '',
+      'Harga spot emas',
+      'Snapshot harian',
+      '',
+      '',
+      snapshot.price,
+      '',
+      '',
+      '',
+      '',
+      'Direkod',
+      `Masa tangkapan: ${snapshot.capturedAt}`,
+      ''
+    ]);
+    const scenarioRows = scenarioOutcomes.map(scenario => [
+      'Simulasi overlap',
+      '',
+      selectedScenarioTransaction?.refNo,
+      selectedScenarioTransaction?.institution,
+      scenario.label,
+      getTransactionAssetIds(selectedScenarioTransaction || {})
+        .map(assetId => assets.find(asset => String(asset.id) === String(assetId))?.code || assetId)
+        .join('; '),
+      selectedScenarioTransaction?.weight,
+      scenario.simulatedRate,
+      scenario.newFinancing,
+      selectedScenarioTransaction?.redemption,
+      scenario.cashDifference,
+      '',
+      scenario.cashDifference >= 0 ? 'Lebihan tunai' : 'Perlu tambah tunai',
+      'Anggaran sahaja, bukan keuntungan atau sebut harga rasmi',
+      calculateMarhunValue(selectedScenarioTransaction?.weight, scenario.simulatedRate)
+    ]);
+
+    downloadCsv(
+      `Laporan_Analitik_ArRahnu_${getMalaysiaDateKey()}.csv`,
+      headers,
+      [...transactionRows, ...assetRows, ...institutionRows, ...supplierRows, ...priceRows, ...scenarioRows]
+    );
+    setToastMessage('Laporan analitik CSV telah dimuat turun.');
+    setTimeout(() => setToastMessage(null), 4000);
   };
 
   const handleImportCSV = (e) => {
@@ -1911,20 +2319,26 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       if (lines.length <= 1) return; // Ignore if empty or only headers
 
       const importedTx = [];
+      const importedAt = new Date().toISOString();
       for (let i = 1; i < lines.length; i++) {
         // Regex to split by comma but ignore commas inside quotes
         const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
 
-        if (cols.length >= 11 && cols[0] !== "Tarikh") { // Ensure row is valid and not a header duplicate
+        if (cols.length >= 11 && !cols[0].startsWith('Tarikh')) { // Ensure row is valid and not a header duplicate
           importedTx.push({
             id: Date.now() + i,
-            date: cols[0],
+            date: normalizeTransactionDateTime({ date: cols[0] }, importedAt).date,
+            createdAt: importedAt,
+            updatedAt: importedAt,
             type: cols[1],
             transactionStatus: getTransactionStatus({ type: cols[1] }),
             institution: cols[2],
             refNo: cols[3],
             weight: parseFloat(cols[4]) || 0,
             marhunPrice: parseFloat(cols[5]) || 0,
+            marhunValue: cols[12] !== undefined && Number.isFinite(parseFloat(cols[12]))
+              ? parseFloat(cols[12])
+              : calculateMarhunValue(parseFloat(cols[4]) || 0, parseFloat(cols[5]) || 0),
             margin: parseFloat(cols[6].replace('%', '')) || 0,
             loan: parseFloat(cols[7]) || 0,
             fee: parseFloat(cols[8]) || 0,
@@ -1949,6 +2363,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleAddTransaction = (newTx) => {
+    const createdAt = new Date().toISOString();
     const selectedAssetIds = !newTx.type.includes('Tebus') ? (newTx.selectedAssetIds || []) : [];
     if (selectedAssetIds.length) {
       setAssets(prev => prev.map(asset =>
@@ -1962,6 +2377,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       ...transactionData,
       transactionStatus: getTransactionStatus(transactionData),
       selectedAssetIds,
+      createdAt,
+      updatedAt: createdAt,
       id: Date.now()
     }]);
     setIsModalOpen(false);
@@ -1973,6 +2390,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveTransaction = (updatedTx) => {
+    const updatedAt = new Date().toISOString();
     const selectedAssetIds = !updatedTx.type.includes('Tebus') ? (updatedTx.selectedAssetIds || []) : [];
     const { selectedAssetId, ...transactionData } = updatedTx;
     const transactionStatus = getTransactionStatus({ ...transactionData, transactionStatus: undefined });
@@ -1984,6 +2402,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             ...transactionData,
             id: transaction.id,
             status: transaction.status,
+            updatedAt,
             transactionStatus,
             selectedAssetIds
           }
@@ -3081,6 +3500,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {/* TAB: DASHBOARD */}
           {activeTab === 'dashboard' && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <h2 className="text-xl font-bold text-slate-800">Ringkasan portfolio</h2>
+                  <p className="text-sm text-slate-500">Angka dan carta dikira daripada rekod portfolio semasa.</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleExportAnalyticsCSV}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800"
+                >
+                  <DownloadCloud size={18} /> Muat turun laporan CSV
+                </button>
+              </div>
+
               {/* KPI Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard title="Total Capital (Loan)" value={formatRM(totalCapital)} icon={<Wallet size={24} />} trend="Aktif" color="emerald" />
@@ -3256,14 +3689,14 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               </section>
 
               {/* Charts Row */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
                 <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center">
-                    <TrendingUp className="mr-2 text-emerald-500" size={20} /> Profit Growth Timeline
+                  <h3 className="text-base font-bold text-slate-800 mb-6 flex items-center">
+                    <TrendingUp className="mr-2 text-emerald-500" size={20} /> Untung direkod mengikut tarikh
                   </h3>
-                  <div className="h-64 sm:h-72">
+                  <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={transactions}>
+                      <AreaChart data={profitTrendData}>
                         <defs>
                           <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
                             <stop offset="5%" stopColor="#0096d8" stopOpacity={0.3} />
@@ -3281,22 +3714,59 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 </div>
 
                 <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center">
-                    <Building2 className="mr-2 text-blue-500" size={20} /> Loan vs Redemption by Institution
+                  <h3 className="text-base font-bold text-slate-800 mb-6 flex items-center">
+                    <Building2 className="mr-2 text-blue-500" size={20} /> Pinjaman dan tebus mengikut institusi
                   </h3>
-                  <div className="h-64 sm:h-72">
+                  <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={transactions}>
+                      <BarChart data={institutionAnalysis}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
                         <XAxis dataKey="institution" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
                         <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
                         <Tooltip cursor={{ fill: '#eeeeef' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
                         <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                        <Bar dataKey="loan" name="Loan (RM)" fill="#047ea0" radius={[4, 4, 0, 0]} maxBarSize={50} />
-                        <Bar dataKey="redemption" name="Redemption (RM)" fill="#a6a7a9" radius={[4, 4, 0, 0]} maxBarSize={50} />
+                        <Bar dataKey="loan" name="Pinjaman (RM)" fill="#047ea0" radius={[4, 4, 0, 0]} maxBarSize={50} />
+                        <Bar dataKey="redemption" name="Jumlah tebus (RM)" fill="#a6a7a9" radius={[4, 4, 0, 0]} maxBarSize={50} />
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                </div>
+
+                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
+                  <h3 className="text-base font-bold text-slate-800 mb-4 flex items-center">
+                    <Scale className="mr-2 text-amber-500" size={20} /> Pecahan jenis rekod
+                  </h3>
+                  {transactionTypeAnalysis.length === 0 ? (
+                    <div className="h-64 flex items-center justify-center text-sm text-slate-400">
+                      Belum ada transaksi untuk dianalisis.
+                    </div>
+                  ) : (
+                    <div className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <PieChart>
+                          <Pie
+                            data={transactionTypeAnalysis}
+                            dataKey="count"
+                            nameKey="name"
+                            cx="50%"
+                            cy="45%"
+                            outerRadius={78}
+                            label={({ name, percent }) => `${name} ${Math.round(percent * 100)}%`}
+                          >
+                            {transactionTypeAnalysis.map((entry, index) => (
+                              <Cell
+                                key={entry.name}
+                                fill={['#059669', '#d97706', '#2563eb', '#64748b', '#a855f7'][index % 5]}
+                              />
+                            ))}
+                          </Pie>
+                          <Tooltip formatter={(value) => [`${value} rekod`, 'Bilangan']} />
+                          <Legend />
+                        </PieChart>
+                      </ResponsiveContainer>
+                    </div>
+                  )}
+                  <p className="mt-2 text-xs text-slate-400">Kiraan transaksi, bukan jumlah nilai pinjaman.</p>
                 </div>
               </div>
 
@@ -3399,10 +3869,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-sm font-semibold uppercase tracking-wider">
-                        <th className="p-4">Date</th>
+                        <th className="p-4">Date &amp; time (MYT)</th>
                         <th className="p-4">Jenis Pajak</th>
                         <th className="p-4">Ref No.</th>
                         <th className="p-4">Asset ID</th>
+                        <th className="p-4 text-right">Jumlah Nilai Marhun (RM)</th>
                         <th className="p-4">Tarikh Tebus</th>
                         <th className="p-4">Institution</th>
                         <th className="p-4 text-right">Loan (RM)</th>
@@ -3413,14 +3884,18 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {filteredTransactions.map((tx) => {
+                      {sortedTransactions.map((tx) => {
                         const linkedAssetIds = tx.selectedAssetIds || (tx.selectedAssetId ? [tx.selectedAssetId] : []);
                         const linkedAssets = linkedAssetIds.map(assetId =>
                           assets.find(asset => String(asset.id) === String(assetId))
                         );
                         return (
                         <tr key={tx.id} className="hover:bg-slate-50/50 transition-colors group">
-                          <td className="p-4 text-slate-600 font-medium">{tx.date}</td>
+                          <td className="p-4 text-slate-600 font-medium">
+                            <time dateTime={tx.date} title={tx.date}>
+                              {formatTransactionDateTime(tx.date)}
+                            </time>
+                          </td>
                           <td className="p-4">
                             <span className={`px-3 py-1 text-xs font-bold rounded-full ${
                                 getTransactionStatus(tx) === 'Pajakan Asal' ? 'bg-emerald-100 text-emerald-700' :
@@ -3450,6 +3925,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               </div>
                             ) : <span className="text-slate-300">-</span>}
                           </td>
+                          <td className="p-4 text-right font-semibold text-amber-700">
+                            {formatRM(getTransactionMarhunValue(tx))}
+                          </td>
                           <td className="p-4">
                             {!tx.type.includes('Tebus') ? (
                               <div className="space-y-1">
@@ -3459,8 +3937,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                   value={tx.redemptionDate || ''}
                                   onChange={event => {
                                     const redemptionDate = event.target.value;
+                                    const updatedAt = new Date().toISOString();
                                     setTransactions(prev => prev.map(item =>
-                                      item.id === tx.id ? { ...item, redemptionDate } : item
+                                      item.id === tx.id ? { ...item, redemptionDate, updatedAt } : item
                                     ));
                                   }}
                                   className={`p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500 ${
@@ -3531,7 +4010,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       })}
                       {filteredTransactions.length === 0 && (
                         <tr>
-                          <td colSpan="11" className="p-8 text-center text-slate-400">
+                          <td colSpan={12} className="p-8 text-center text-slate-400">
                             {transactions.length === 0
                               ? 'No transactions found. Add a new entry to get started.'
                               : `Tiada transaksi untuk jenis "${transactionStatusFilter}".`}
@@ -3962,11 +4441,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center gap-3 mb-4">
                     <div className="flex items-center space-x-2 text-amber-400 bg-emerald-950/50 px-4 py-1.5 rounded-full border border-emerald-700 text-xs sm:text-sm">
                       <Sparkles size={16} />
-                      <span className="font-bold tracking-wide">EGM PROPHET MODEL ACTIVE</span>
+                      <span className="font-bold tracking-wide">ANALISIS BERASASKAN DATA</span>
                     </div>
                     <div className="flex items-center space-x-2 text-emerald-200 bg-emerald-950/50 px-4 py-1.5 rounded-full border border-emerald-700 text-xs sm:text-sm">
                       <Globe size={16} />
-                      <span className="font-bold tracking-wide">Source: Gold API + ExchangeRate-API</span>
+                      <span className="font-bold tracking-wide">Gold API + ExchangeRate-API</span>
                     </div>
                     <button
                       onClick={() => handleRefresh()}
@@ -3974,24 +4453,40 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       className="mt-3 sm:mt-0 sm:ml-auto w-full sm:w-auto flex justify-center items-center space-x-2 bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 sm:py-1.5 rounded-full transition-all border border-emerald-500 shadow-sm disabled:opacity-50"
                     >
                       <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-                      <span className="text-sm font-bold">{isRefreshing ? 'Fetching...' : 'Live Refresh'}</span>
+                      <span className="text-sm font-bold">{isRefreshing ? 'Mengemas kini...' : 'Kemas kini harga'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleExportAnalyticsCSV}
+                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full border border-emerald-500 bg-white/10 px-4 py-2 text-sm font-bold text-white hover:bg-white/20"
+                    >
+                      <DownloadCloud size={16} /> Laporan CSV
                     </button>
                   </div>
-                  <h2 className="text-2xl md:text-3xl font-bold mb-4">Optimal Refinancing Window Detected</h2>
+                  <h2 className="text-2xl md:text-3xl font-bold mb-4">Ramalan dan cadangan portfolio</h2>
 
                   <div className="flex flex-col sm:flex-row flex-wrap gap-4 mb-6">
                     <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-emerald-400/30 flex-1 sm:flex-none">
-                      <p className="text-emerald-200 text-xs font-bold uppercase tracking-wider mb-1">Harga Spot Emas Live</p>
+                      <p className="text-emerald-200 text-xs font-bold uppercase tracking-wider mb-1">Harga spot terakhir dalam aplikasi</p>
                       <p className="text-3xl md:text-4xl font-black text-white">RM {currentGoldPrice.toFixed(2)}<span className="text-base md:text-lg text-emerald-200 font-medium tracking-normal">/g</span></p>
                     </div>
                     <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-amber-400/30 flex-1 sm:flex-none">
-                      <p className="text-amber-200 text-xs font-bold uppercase tracking-wider mb-1">Sasaran AI 12 Minggu</p>
-                      <p className="text-3xl md:text-4xl font-black text-amber-400">RM {(currentGoldPrice + 60).toFixed(2)}<span className="text-base md:text-lg text-amber-200 font-medium tracking-normal">/g</span></p>
+                      <p className="text-amber-200 text-xs font-bold uppercase tracking-wider mb-1">Anggaran trend 12 minggu</p>
+                      <p className="text-3xl md:text-4xl font-black text-amber-400">
+                        {twelveWeekGoldEstimate === null
+                          ? 'Belum tersedia'
+                          : <>RM {twelveWeekGoldEstimate.toFixed(2)}<span className="text-base md:text-lg text-amber-200 font-medium tracking-normal">/g</span></>}
+                      </p>
+                    </div>
+                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-sky-400/30 flex-1 sm:flex-none">
+                      <p className="text-sky-200 text-xs font-bold uppercase tracking-wider mb-1">Snapshot harga</p>
+                      <p className="text-3xl md:text-4xl font-black text-white">{goldPriceHistory.length}</p>
+                      <p className="text-xs text-sky-100">hari direkod</p>
                     </div>
                   </div>
 
                   <p className="text-emerald-100 text-sm md:text-lg leading-relaxed max-w-2xl">
-                    Harga spot emas semasa berdasarkan sebut harga emas USD dan kadar tukaran USD/MYR ialah <strong className="text-white">RM {currentGoldPrice.toFixed(2)}/g</strong>. Kadar marhun institusi yang dipaparkan ialah anggaran spot + spread, bukan sebut harga rasmi institusi. Ramalan AI mingguan menjangkakan harga spot RM {(currentGoldPrice + 60).toFixed(2)}/g dalam 12 minggu. Sila sahkan kadar sebenar terus dengan institusi.
+                    Sistem menyimpan satu snapshot harga bagi setiap hari apabila anda menekan “Kemas kini harga”. Ramalan hanya muncul selepas sekurang-kurangnya 7 hari data, menggunakan trend linear ringkas, bukan jaminan harga. Kadar institusi ialah anggaran spot + spread tersimpan; sahkan kadar dan caj sebenar di kaunter.
                   </p>
                 </div>
               </div>
@@ -4000,22 +4495,35 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 {/* AI Forecast Chart */}
                 <div className="min-w-0 lg:col-span-2 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
                   <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center">
-                    <TrendingUp className="mr-2 text-blue-500" size={20} /> Ramalan Marhun Mingguan (12 Minggu, MYR/g)
+                    <TrendingUp className="mr-2 text-blue-500" size={20} /> Harga spot dan unjuran 12 minggu (RM/g)
                   </h3>
-                  <div className="h-72 sm:h-80">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={dynamicAiData}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
-                        <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
-                        <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                        <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                        <ReferenceLine x="Hari Ini" stroke="#0096d8" strokeDasharray="3 3" label={{ position: 'top', value: 'Hari Ini', fill: '#047ea0', fontSize: 12, fontWeight: 'bold' }} />
-                        <Line type="monotone" dataKey="actual" name="Actual Price" stroke="#047ea0" strokeWidth={3} dot={{ r: 4, fill: '#047ea0', strokeWidth: 2, stroke: '#fff' }} />
-                        <Line type="monotone" dataKey="predicted" name="Ramalan AI Mingguan" stroke="#cf3983" strokeWidth={3} strokeDasharray="5 5" dot={{ r: 3, fill: '#cf3983', strokeWidth: 2, stroke: '#fff' }} />
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
+                  {dynamicAiData.length === 0 ? (
+                    <div className="h-72 sm:h-80 flex flex-col items-center justify-center gap-3 rounded-xl bg-slate-50 px-6 text-center">
+                      <p className="font-semibold text-slate-700">Belum ada snapshot harga.</p>
+                      <p className="max-w-md text-sm text-slate-500">Tekan “Kemas kini harga” untuk mengambil harga daripada sumber live dan mula membina sejarah harian.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="h-72 sm:h-80">
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={dynamicAiData}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
+                            <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
+                            <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
+                            <Tooltip formatter={value => [formatRM(Number(value)), 'Harga per gram']} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                            <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                            <Line type="monotone" dataKey="actual" name="Snapshot sebenar" stroke="#047ea0" strokeWidth={3} dot={{ r: 4, fill: '#047ea0', strokeWidth: 2, stroke: '#fff' }} connectNulls />
+                            <Line type="monotone" dataKey="predicted" name="Trend linear" stroke="#cf3983" strokeWidth={3} strokeDasharray="5 5" dot={{ r: 3, fill: '#cf3983', strokeWidth: 2, stroke: '#fff' }} connectNulls />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      </div>
+                      <p className="mt-3 text-xs text-slate-500">
+                        {goldForecastAvailable
+                          ? 'Unjuran dikira daripada sehingga 30 snapshot harian terkini. Ia tidak mengambil kira perubahan pasaran mendadak.'
+                          : `Ramalan belum diaktifkan. Kumpulkan sekurang-kurangnya 7 snapshot pada hari berlainan. Kini: ${goldPriceHistory.length}.`}
+                      </p>
+                    </>
+                  )}
                 </div>
 
                 {/* AI Actionable Insights */}
@@ -4079,6 +4587,259 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </div>
                 </div>
               </div>
+
+              <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <div className="lg:col-span-2 min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                        <ShieldCheck className="mr-2 text-emerald-600" size={20} /> Skor kesiapsiagaan tebus
+                      </h3>
+                      <p className="mt-1 text-sm text-slate-500">Skor setiap surat aktif berdasarkan data yang anda masukkan.</p>
+                    </div>
+                    <div className="rounded-xl bg-slate-50 px-4 py-3 text-center">
+                      <p className="text-xs font-semibold uppercase text-slate-500">Purata portfolio</p>
+                      <p className="mt-1 text-2xl font-black text-slate-800">
+                        {averageRiskScore === null ? 'Belum dikira' : `${averageRiskScore}/100`}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900">
+                    Skor memberi 30 mata kepada tempoh matang, 35 kepada tunai berbanding jumlah tebus aktif,
+                    20 kepada nisbah EDT/EDR dan 15 kepada kelengkapan rekod. 80 ke atas bermaksud lebih bersedia,
+                    60–79 perlu disemak, bawah 60 perlu perhatian. Ini bukan skor kredit atau jaminan kelulusan.
+                  </div>
+
+                  <div className="mt-4 space-y-3">
+                    {riskScores.length === 0 ? (
+                      <p className="rounded-xl bg-slate-50 p-5 text-center text-sm text-slate-500">
+                        Tiada surat aktif untuk dinilai.
+                      </p>
+                    ) : riskScores.map(({ transaction, daysRemaining, score }) => (
+                      <div key={transaction.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-slate-100 p-3">
+                        <div>
+                          <p className="font-bold text-slate-800">Surat {transaction.refNo || 'tanpa nombor'} · {transaction.institution || 'Institusi belum dipilih'}</p>
+                          <p className="text-xs text-slate-500">
+                            {daysRemaining === null
+                              ? 'Tarikh matang belum diisi'
+                              : daysRemaining < 0
+                                ? `Lewat ${Math.abs(daysRemaining)} hari`
+                                : daysRemaining === 0
+                                  ? 'Matang hari ini'
+                                  : `Baki ${daysRemaining} hari`}
+                            {' · Jumlah tebus '}{formatRM(Number(transaction.redemption) || 0)}
+                          </p>
+                        </div>
+                        <span className={`self-start sm:self-auto rounded-full px-3 py-1 text-sm font-bold ${
+                          score === null
+                            ? 'bg-slate-100 text-slate-600'
+                            : score >= 80
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : score >= 60
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-rose-100 text-rose-800'
+                        }`}>
+                          {score === null
+                            ? 'Masukkan tunai tersedia'
+                            : `${score}/100 · ${score >= 80 ? 'Bersedia' : score >= 60 ? 'Perlu semakan' : 'Perlu perhatian'}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 p-4">
+                    <h4 className="text-sm font-bold text-amber-900">Cadangan tindakan</h4>
+                    <ul className="mt-2 space-y-1.5 text-sm text-amber-900">
+                      {cashOnHand === null && <li>• Masukkan tunai tersedia untuk mengira kemampuan menebus.</li>}
+                      {cashOnHand !== null && cashOnHand < activeRedemptionTotal && (
+                        <li>• Tunai yang direkod kurang {formatRM(activeRedemptionTotal - cashOnHand)} daripada jumlah tebus surat aktif.</li>
+                      )}
+                      {monthlyExpenses !== null && cashOnHand !== null && cashOnHand < monthlyExpenses * 3 && (
+                        <li>• Dana tunai belum mencapai penanda perbelanjaan tiga bulan ({formatRM(monthlyExpenses * 3)}).</li>
+                      )}
+                      {riskScores.some(item => item.daysRemaining !== null && item.daysRemaining <= 7) && (
+                        <li>• Semak surat yang matang dalam tujuh hari atau sudah lewat, kemudian sahkan jumlah tebus dengan institusi.</li>
+                      )}
+                      {activePortfolioTransactions.length > 0 && cashOnHand !== null && cashOnHand >= activeRedemptionTotal &&
+                        !(monthlyExpenses !== null && cashOnHand < monthlyExpenses * 3) &&
+                        !riskScores.some(item => item.daysRemaining !== null && item.daysRemaining <= 7) && (
+                          <li>• Tunai yang direkod meliputi jumlah tebus aktif. Semak tarikh matang dan caj sebelum membuat keputusan.</li>
+                        )}
+                    </ul>
+                  </div>
+                </div>
+
+                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
+                  <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                    <Wallet className="mr-2 text-emerald-600" size={20} /> Kedudukan kewangan
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">Masukkan angka semasa untuk skor dan cadangan.</p>
+                  <div className="mt-4 space-y-3">
+                    <label className="block text-sm font-semibold text-slate-700">
+                      Tunai tersedia (RM)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={financialReadiness.cashOnHand}
+                        onChange={event => setFinancialReadiness(current => ({ ...current, cashOnHand: event.target.value }))}
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                        placeholder="Contoh: 5000"
+                      />
+                    </label>
+                    <label className="block text-sm font-semibold text-slate-700">
+                      Pendapatan bulanan (RM)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={financialReadiness.monthlyIncome}
+                        onChange={event => setFinancialReadiness(current => ({ ...current, monthlyIncome: event.target.value }))}
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                        placeholder="Pilihan"
+                      />
+                    </label>
+                    <label className="block text-sm font-semibold text-slate-700">
+                      Perbelanjaan bulanan (RM)
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={financialReadiness.monthlyExpenses}
+                        onChange={event => setFinancialReadiness(current => ({ ...current, monthlyExpenses: event.target.value }))}
+                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                        placeholder="Pilihan"
+                      />
+                    </label>
+                  </div>
+                  {monthlyExpenses !== null && (
+                    <p className="mt-4 rounded-lg bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">
+                      Penanda tunai tiga bulan: <strong>{formatRM(monthlyExpenses * 3)}</strong>
+                      {cashOnHand !== null && ` · Kekurangan ${formatRM(Math.max(0, monthlyExpenses * 3 - cashOnHand))}`}
+                    </p>
+                  )}
+                  {monthlyIncome !== null && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      Penanda simpanan 10% pendapatan: {formatRM(monthlyIncome * 0.1)} sebulan.
+                    </p>
+                  )}
+                  <p className="mt-3 text-[11px] leading-relaxed text-slate-400">
+                    Nilai disimpan setempat pada browser ini mengikut akaun, bukan di Supabase. Data ini tidak berpindah ke peranti lain dan hilang jika storan browser dipadam.
+                  </p>
+                </div>
+              </section>
+
+              <section className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                      <Scale className="mr-2 text-amber-500" size={20} /> Simulasi andaian overlap
+                    </h3>
+                    <p className="mt-1 max-w-3xl text-sm text-slate-500">
+                      Bandingkan pembiayaan baharu dengan jumlah tebus lama dan fi baharu. Lebihan tunai bukan keuntungan.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExportAnalyticsCSV}
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-100"
+                  >
+                    <Download size={17} /> Muat turun analisis
+                  </button>
+                </div>
+
+                {activePortfolioTransactions.length === 0 ? (
+                  <p className="mt-5 rounded-xl bg-slate-50 p-5 text-sm text-slate-500">
+                    Tambah transaksi aktif untuk menggunakan simulasi ini.
+                  </p>
+                ) : (
+                  <>
+                    <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <label className="text-sm font-semibold text-slate-700">
+                        Pilih surat aktif
+                        <select
+                          value={selectedScenarioTransaction?.id ?? ''}
+                          onChange={event => {
+                            const selected = activePortfolioTransactions.find(
+                              transaction => String(transaction.id) === event.target.value
+                            );
+                            setScenarioTransactionId(event.target.value);
+                            setScenarioMargin(selected ? String(selected.margin ?? '') : '');
+                          }}
+                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                          {activePortfolioTransactions.map(transaction => (
+                            <option key={transaction.id} value={transaction.id}>
+                              {transaction.refNo || `ID ${transaction.id}`} · {transaction.institution || 'Tiada institusi'}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-sm font-semibold text-slate-700">
+                        Margin pembiayaan baharu (%)
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.1"
+                          value={scenarioMargin === '' ? selectedScenarioTransaction?.margin ?? '' : scenarioMargin}
+                          onChange={event => setScenarioMargin(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </label>
+                      <label className="text-sm font-semibold text-slate-700">
+                        Anggaran fi baharu (RM)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={scenarioNewFees}
+                          onChange={event => setScenarioNewFees(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                          placeholder="0"
+                        />
+                      </label>
+                    </div>
+
+                    {goldPriceHistory.length === 0 && (
+                      <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                        Belum ada snapshot live. Simulasi ini menggunakan harga rujukan dalam aplikasi sehingga anda menekan “Kemas kini harga”.
+                      </p>
+                    )}
+
+                    <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
+                      {scenarioOutcomes.map(scenario => (
+                        <div key={scenario.label} className="rounded-xl border border-slate-200 p-4">
+                          <h4 className="font-bold text-slate-800">{scenario.label}</h4>
+                          <dl className="mt-3 space-y-2 text-sm">
+                            <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Anggaran kadar marhun</dt>
+                              <dd className="font-semibold text-slate-800">{formatRM(scenario.simulatedRate)}/g</dd>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Pembiayaan baharu</dt>
+                              <dd className="font-semibold text-slate-800">{formatRM(scenario.newFinancing)}</dd>
+                            </div>
+                            <div className="flex justify-between gap-2 border-t border-slate-100 pt-2">
+                              <dt className="text-slate-500">Baki selepas tebus &amp; fi</dt>
+                              <dd className={`font-bold ${scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                {formatRM(scenario.cashDifference)}
+                              </dd>
+                            </div>
+                          </dl>
+                          <p className={`mt-3 text-xs font-semibold ${scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                            {scenario.cashDifference >= 0 ? 'Lebihan tunai, bukan untung' : 'Perlu tambah tunai'}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="mt-4 text-xs leading-relaxed text-slate-500">
+                      Formula: berat × kadar marhun anggaran × margin − jumlah tebus lama − fi baharu. Kadar anggaran menggunakan spread institusi tersimpan; semak harga, margin, caj dan syarat sebenar sebelum membuat keputusan.
+                    </p>
+                  </>
+                )}
+              </section>
             </div>
           )}
 
@@ -4529,15 +5290,38 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
 }
 
 function TransactionModal({ institutions, availableAssets, pledgedAssets, initialData, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
+  const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
+  const calculateLoan = (marhunValue, margin) =>
+    (parseFloat(marhunValue) || 0) * ((parseFloat(margin) || 0) / 100);
+  const calculateProjectedProfit = (type, loan, redemption) =>
+    type === 'Pajakan Asal' || type.includes('Tebus')
+      ? 0
+      : (parseFloat(loan) || 0) - (parseFloat(redemption) || 0);
+
+  const initialWeight = initialData?.weight ?? 10;
+  const initialMarhunPrice = initialData?.marhunPrice ?? institutions?.[0]?.marhunRate ?? 0;
+  const initialMargin = initialData?.margin ?? institutions?.[0]?.maxMargin ?? 0;
+  const initialType = initialData?.type || 'Pajakan Asal';
+  const initialMarhunValue = initialData?.marhunValue ??
+    calculateMarhunValue(initialWeight, initialMarhunPrice);
+  const initialLoan = initialData?.loan ??
+    calculateLoan(initialMarhunValue, initialMargin);
+  const initialProfit = initialData?.profit ??
+    calculateProjectedProfit(initialType, initialLoan, initialData?.redemption ?? 0);
+  const hasLegacyDateWithoutTime = /^\d{4}-\d{2}-\d{2}$/.test(initialData?.date || '');
+
   const [formData, setFormData] = useState(() => ({
-    date: initialData?.date || new Date().toISOString().split('T')[0],
-    type: initialData?.type || 'Pajakan Asal',
+    date: getMalaysiaDateTimeInputValue(initialData?.date || new Date().toISOString()),
+    type: initialType,
     redemptionDate: initialData?.redemptionDate || '',
     institution: initialData?.institution || institutions?.[0]?.name || '',
     refNo: initialData?.refNo || '',
-    weight: initialData?.weight ?? 10,
-    marhunPrice: initialData?.marhunPrice ?? institutions?.[0]?.marhunRate ?? 0,
-    margin: initialData?.margin ?? institutions?.[0]?.maxMargin ?? 0,
+    weight: initialWeight,
+    marhunPrice: initialMarhunPrice,
+    margin: initialMargin,
+    marhunValue: roundMoney(initialMarhunValue),
+    loan: roundMoney(initialLoan),
+    profit: roundMoney(initialProfit),
     redemption: initialData?.redemption ?? 0,
     fee: initialData?.fee ?? 0,
     remarks: initialData?.remarks || ''
@@ -4545,39 +5329,49 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
   const [selectedAssetIds, setSelectedAssetIds] = useState<number[]>(
     getTransactionAssetIds(initialData || {})
   );
+  const [isDateEdited, setIsDateEdited] = useState(false);
   const [isAssetListOpen, setIsAssetListOpen] = useState(false);
-
-  // Dynamic calculations based on EGM spreadsheet logic
-  const calculatedLoan = (parseFloat(formData.weight) || 0) * (parseFloat(formData.marhunPrice) || 0) * ((parseFloat(formData.margin) || 0) / 100);
+  const recalculateFinancialFields = (data, recalculateMarhunValue = false) => {
+    const marhunValue = recalculateMarhunValue
+      ? calculateMarhunValue(data.weight, data.marhunPrice)
+      : parseFloat(data.marhunValue) || 0;
+    const loan = calculateLoan(marhunValue, data.margin);
+    return {
+      ...data,
+      marhunValue: roundMoney(marhunValue),
+      loan: roundMoney(loan),
+      profit: roundMoney(calculateProjectedProfit(data.type, loan, data.redemption))
+    };
+  };
+  const calculatedMarhunValue = parseFloat(formData.marhunValue) || 0;
+  const loanForSave = parseFloat(formData.loan) || 0;
+  const profitForSave = parseFloat(formData.profit) || 0;
   const hasLoanInputsChanged = !initialData ||
     formData.type !== initialData.type ||
     (parseFloat(formData.weight) || 0) !== (parseFloat(initialData.weight) || 0) ||
     (parseFloat(formData.marhunPrice) || 0) !== (parseFloat(initialData.marhunPrice) || 0) ||
-    (parseFloat(formData.margin) || 0) !== (parseFloat(initialData.margin) || 0);
-  const loanForSave = initialData && !hasLoanInputsChanged
-    ? Number(initialData.loan) || 0
-    : calculatedLoan;
+    (parseFloat(formData.margin) || 0) !== (parseFloat(initialData.margin) || 0) ||
+    calculatedMarhunValue !== Number(initialMarhunValue) ||
+    loanForSave !== (Number(initialData?.loan) || 0);
   const redemptionForSave = formData.type === 'Pajakan Asal'
     ? initialData && !hasLoanInputsChanged
       ? Number(initialData.redemption) || 0
-      : calculatedLoan + (parseFloat(formData.fee) || 0)
+      : loanForSave + (parseFloat(formData.fee) || 0)
     : parseFloat(formData.redemption) || 0;
-  const hasFinancialInputsChanged = hasLoanInputsChanged ||
-    (formData.type !== 'Pajakan Asal' &&
-      redemptionForSave !== (Number(initialData?.redemption) || 0));
-  const profitForSave = initialData && !hasFinancialInputsChanged
-    ? Number(initialData.profit) || 0
-    : formData.type === 'Pajakan Asal' ? 0 : loanForSave - redemptionForSave;
 
   const handleChange = (e) => {
     const { name, value } = e.target;
+    if (name === 'date') setIsDateEdited(true);
     if (name === 'type') {
       setSelectedAssetIds([]);
       setIsAssetListOpen(false);
     }
     setFormData(prev => {
       const updated = { ...prev, [name]: value };
-      if (name === 'type') updated.weight = 10;
+      if (name === 'type') {
+        updated.weight = 10;
+        return recalculateFinancialFields(updated, true);
+      }
 
       // Auto-fill rates if institution changes
       if (name === 'institution') {
@@ -4586,8 +5380,20 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
           updated.marhunPrice = inst.marhunRate;
           updated.margin = inst.maxMargin;
         }
+        return recalculateFinancialFields(updated, true);
       }
 
+      if (name === 'weight' || name === 'marhunPrice') {
+        return recalculateFinancialFields(updated, true);
+      }
+      if (name === 'marhunValue' || name === 'margin') {
+        return recalculateFinancialFields(updated);
+      }
+      if (name === 'loan' || name === 'redemption') {
+        updated.profit = roundMoney(
+          calculateProjectedProfit(updated.type, updated.loan, updated.redemption)
+        );
+      }
       return updated;
     });
   };
@@ -4601,21 +5407,28 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
     const selectedWeight = assetCandidates
       .filter(asset => updatedIds.map(String).includes(String(asset.id)))
       .reduce((total, asset) => total + (parseFloat(asset.weight) || 0), 0);
-    setFormData(prev => ({ ...prev, weight: selectedWeight || 10 }));
+    setFormData(prev => recalculateFinancialFields(
+      { ...prev, weight: selectedWeight || 10 },
+      true
+    ));
   };
 
   const handleSubmit = (e) => {
     e.preventDefault();
     onSave({
       ...formData,
+      date: initialData && !isDateEdited
+        ? initialData.date
+        : parseTransactionDateTime(formData.date).toISOString(),
       selectedAssetIds,
       weight: parseFloat(formData.weight) || 0,
       marhunPrice: parseFloat(formData.marhunPrice) || 0,
+      marhunValue: roundMoney(calculatedMarhunValue),
       margin: parseFloat(formData.margin) || 0,
-      loan: loanForSave,
+      loan: roundMoney(loanForSave),
       fee: parseFloat(formData.fee) || 0,
       redemption: redemptionForSave,
-      profit: profitForSave,
+      profit: roundMoney(profitForSave),
     });
   };
 
@@ -4649,8 +5462,11 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Date</label>
-              <input type="date" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              <label htmlFor="transaction-date" className="text-sm font-semibold text-slate-700">Date &amp; time (MYT)</label>
+              <input id="transaction-date" type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              {hasLegacyDateWithoutTime && (
+                <p className="text-xs text-slate-500">Masa tidak direkod untuk rekod lama. Pilih masa yang betul jika mahu menyimpannya.</p>
+              )}
             </div>
 
             {!formData.type.includes('Tebus') && (
@@ -4761,7 +5577,10 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                       const institution = institutions.find(item => item.name === formData.institution);
                       if (onRefresh && institution) {
                         onRefresh(institution.id, ({ institutionRate }) =>
-                          setFormData(prev => ({ ...prev, marhunPrice: institutionRate.toFixed(2) }))
+                          setFormData(prev => recalculateFinancialFields(
+                            { ...prev, marhunPrice: institutionRate.toFixed(2) },
+                            true
+                          ))
                         );
                       }
                     }}
@@ -4789,16 +5608,47 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
 
           </div>
 
-          {/* Auto-Calculated Preview Block */}
-          <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* Editable financial fields */}
+          <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
-              <p className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1">Calculated Loan</p>
-              <p className="text-xl font-bold text-slate-800">{formatRM(loanForSave)}</p>
+              <label htmlFor="transaction-marhun-value" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Jumlah Nilai Marhun (RM)</label>
+              <input
+                id="transaction-marhun-value"
+                type="number"
+                step="0.01"
+                name="marhunValue"
+                value={formData.marhunValue}
+                onChange={handleChange}
+                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+              />
+              <p className="text-xs text-slate-500">Kiraan asal: berat emas × Marhun (RM/g). Boleh ubah manual.</p>
             </div>
             <div>
-              <p className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1">Projected Profit</p>
-              <p className={`text-xl font-bold ${profitForSave > 0 ? 'text-emerald-600' : 'text-slate-500'}`}>
-                {formData.type === 'Pajakan Asal' ? 'N/A' : (profitForSave > 0 ? `+${formatRM(profitForSave)}` : formatRM(profitForSave))}
+              <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Calculated Loan (RM)</label>
+              <input
+                id="transaction-loan"
+                type="number"
+                step="0.01"
+                name="loan"
+                value={formData.loan}
+                onChange={handleChange}
+                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+              />
+              <p className="text-xs text-slate-500">Kiraan asal: Jumlah Nilai Marhun × Margin. Boleh ubah manual.</p>
+            </div>
+            <div>
+              <label htmlFor="transaction-projected-profit" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Projected Profit / Lebihan Tunai (RM)</label>
+              <input
+                id="transaction-projected-profit"
+                type="number"
+                step="0.01"
+                name="profit"
+                value={formData.profit}
+                onChange={handleChange}
+                className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+              />
+              <p className="text-xs text-slate-500">
+                Salin/OL: pinjaman baharu − kos tebus terdahulu. Pajakan asal/Tebus: RM0. Boleh ubah manual.
               </p>
             </div>
           </div>
