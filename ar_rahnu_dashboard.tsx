@@ -71,7 +71,10 @@ const initialSuppliers = [
 ];
 
 // --- UTILS & HELPERS ---
-const transactionStatusOptions = ['Pajakan Asal', 'Salin', 'OL', 'Tebus Cash', 'Tebus EDT'];
+const transactionStatusOptions = [
+  'Pajakan Asal', 'Salin', 'OL', 'Tebus Cash', 'Tebus EDT',
+  'TS', 'TKS', 'US', 'Pusing', 'Lelong'
+];
 type OrganizationRole = 'Admin' | 'Manager' | 'Staff';
 type OrganizationMembership = {
   organization_id: string;
@@ -214,16 +217,91 @@ const getTransactionStatus = (transaction) => {
   if (type.includes('pajakan')) return 'Pajakan Asal';
   if (type.includes('salin')) return 'Salin';
   if (type.includes('ol')) return 'OL';
+  if (type.includes('tks') || type.includes('tebus sebahagian')) return 'TKS';
+  if (type === 'ts' || type.includes('tebus penuh')) return 'TS';
+  if (type === 'us' || type.includes('upah simpan')) return 'US';
+  if (type.includes('pusing')) return 'Pusing';
+  if (type.includes('lelong')) return 'Lelong';
   if (type.includes('tebus') && type.includes('edt')) return 'Tebus EDT';
   if (type.includes('tebus')) return 'Tebus Cash';
   return 'Lain-lain';
 };
+const isRecordVisible = (record) => !record?.deletedAt;
+const resetRecordsPreservingDeleted = (defaults, currentRecords) => {
+  const deletedRecords = currentRecords.filter(record => !isRecordVisible(record));
+  const deletedIds = new Set(deletedRecords.map(record => String(record.id)));
+  return [
+    ...defaults.filter(record => !deletedIds.has(String(record.id))),
+    ...deletedRecords.filter(record =>
+      !defaults.some(defaultRecord => String(defaultRecord.id) === String(record.id))
+    )
+  ];
+};
 const getTransactionAssetIds = (transaction) =>
   transaction.selectedAssetIds || (transaction.selectedAssetId ? [transaction.selectedAssetId] : []);
+const getMatchingAssetLinkStatus = (leftTransaction, rightTransaction) => {
+  const leftIds = getTransactionAssetIds(leftTransaction).map(String).sort();
+  const rightIds = getTransactionAssetIds(rightTransaction).map(String).sort();
+  if (!leftIds.length || !rightIds.length) return null;
+  return leftIds.length === rightIds.length &&
+    leftIds.every((assetId, index) => assetId === rightIds[index]);
+};
+const getCorrectionEvents = (transaction) =>
+  Array.isArray(transaction?.correctionEvents) ? transaction.correctionEvents : [];
+const getLatestPartialRedemption = (transaction) =>
+  getCorrectionEvents(transaction).slice().reverse().find(event => event.type === 'TKS');
+const getCurrentPledgedWeight = (transaction) => {
+  const latestPartialRedemption = getLatestPartialRedemption(transaction);
+  return latestPartialRedemption?.remainingWeight !== undefined &&
+    latestPartialRedemption?.remainingWeight !== null
+    ? Number(latestPartialRedemption.remainingWeight) || 0
+    : Number(transaction?.weight) || 0;
+};
+const getCurrentPrincipal = (transaction) => {
+  const latestPartialRedemption = getLatestPartialRedemption(transaction);
+  return latestPartialRedemption?.remainingPrincipal !== undefined &&
+    latestPartialRedemption?.remainingPrincipal !== null
+    ? Number(latestPartialRedemption.remainingPrincipal) || 0
+    : Number(transaction?.loan) || 0;
+};
+const getCurrentRedemption = (transaction) => {
+  const latestPartialRedemption = getLatestPartialRedemption(transaction);
+  return latestPartialRedemption?.remainingRedemption !== undefined &&
+    latestPartialRedemption?.remainingRedemption !== null
+    ? Number(latestPartialRedemption.remainingRedemption) || 0
+    : Number(transaction?.redemption) || 0;
+};
+const getCurrentFeeArrears = (transaction) =>
+  Math.max(0, getCurrentRedemption(transaction) - getCurrentPrincipal(transaction));
+const calculateOverlapCashBalance = (newFinancing, oldFinancing, overdueFees, relatedFees) =>
+  Number((
+    (Number(newFinancing) || 0) -
+    (Number(oldFinancing) || 0) -
+    (Number(overdueFees) || 0) -
+    (Number(relatedFees) || 0)
+  ).toFixed(2));
+const getPurityFromAssets = (assets) => {
+  if (!assets.length) return '';
+  const purities = assets.map(asset => String(asset.purity || '').trim());
+  if (purities.some(purity => !purity)) return 'Campuran / Lain-lain';
+  const uniquePurities = [...new Set(purities)];
+  return uniquePurities.length === 1 ? uniquePurities[0] : 'Campuran / Lain-lain';
+};
+const normalizeFeeBasis = (feeBasis) => {
+  if (feeBasis === 'nilaiMarhun' || feeBasis === 'Nilai Marhun') return 'nilaiMarhun';
+  if (feeBasis === 'jumlahPembiayaan' || feeBasis === 'Jumlah Pembiayaan') return 'jumlahPembiayaan';
+  return '';
+};
+const getFeeBasisLabel = (feeBasis) => {
+  const normalizedBasis = normalizeFeeBasis(feeBasis);
+  if (normalizedBasis === 'nilaiMarhun') return 'Nilai Marhun';
+  if (normalizedBasis === 'jumlahPembiayaan') return 'Jumlah Pembiayaan';
+  return '';
+};
 const getCheckedInAssetIds = (transactions) => new Set(
   transactions
     .filter(transaction =>
-      !['Selesai', 'Ditebus'].includes(transaction.status) &&
+      !['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status) &&
       !String(transaction.type || '').toLowerCase().includes('tebus')
     )
     .flatMap(getTransactionAssetIds)
@@ -231,12 +309,14 @@ const getCheckedInAssetIds = (transactions) => new Set(
 );
 const syncAssetStatuses = (assets, transactions) => {
   const checkedInAssetIds = getCheckedInAssetIds(transactions);
+  const updatedAt = new Date().toISOString();
   let changed = false;
   const nextAssets = assets.map(asset => {
+    if (!isRecordVisible(asset) || asset.status === 'Dilelong') return asset;
     const status = checkedInAssetIds.has(String(asset.id)) ? 'Dalam Ar-Rahnu' : 'EDT';
     if (asset.status === status) return asset;
     changed = true;
-    return { ...asset, status };
+    return { ...asset, status, updatedAt };
   });
   return changed ? nextAssets : assets;
 };
@@ -422,6 +502,16 @@ const normalizeTransactionDateTime = (transaction, timestamp = new Date().toISOS
     ...transaction,
     date: parseTransactionDateTime(`${transaction.date}T${currentTime}`).toISOString(),
     updatedAt: transaction.updatedAt || timestamp
+  };
+};
+const normalizeAssetDateTime = (asset, timestamp = new Date().toISOString()) => {
+  const date = asset?.date || timestamp;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return { ...asset, date };
+  const currentTime = getMalaysiaDateTimeInputValue(timestamp).slice(11);
+  return {
+    ...asset,
+    date: parseTransactionDateTime(`${date}T${currentTime}`).toISOString(),
+    updatedAt: asset.updatedAt || timestamp
   };
 };
 const getTransactionTimestamp = (value) => {
@@ -790,16 +880,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [assets, setAssets] = useState(() => {
     try {
       const saved = localStorage.getItem('ar_rahnu_assets_v2');
+      const migrationTimestamp = new Date().toISOString();
       if (saved) {
         const parsed = JSON.parse(saved);
-        return parsed.map((a, idx) => ({
-          ...a,
-          code: a.code || generateAssetCode(a.type, a.supplier, a.purity, a.weight, a.id || idx + 1)
+        return parsed.map((asset, idx) => ({
+          ...normalizeAssetDateTime(asset, migrationTimestamp),
+          code: asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id || idx + 1)
         }));
       }
-      return initialAssets;
+      return initialAssets.map(asset => normalizeAssetDateTime(asset, migrationTimestamp));
     } catch {
-      return initialAssets;
+      const migrationTimestamp = new Date().toISOString();
+      return initialAssets.map(asset => normalizeAssetDateTime(asset, migrationTimestamp));
     }
   });
 
@@ -935,7 +1027,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           };
         }),
         institutions: incoming.institutions,
-        assets: syncAssetStatuses(incoming.assets, incoming.transactions),
+        assets: syncAssetStatuses(
+          incoming.assets.map(asset => normalizeAssetDateTime(asset, migrationTimestamp)),
+          incoming.transactions
+        ),
         suppliers: incoming.suppliers,
         goldPriceHistory: Array.isArray(incoming.goldPriceHistory) ? incoming.goldPriceHistory : []
       };
@@ -1152,10 +1247,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isAssetModalOpen, setIsAssetModalOpen] = useState(false);
+  const [isCorrectionModalOpen, setIsCorrectionModalOpen] = useState(false);
   const [isInstitutionModalOpen, setIsInstitutionModalOpen] = useState(false);
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
+  const [correctionTransaction, setCorrectionTransaction] = useState(null);
+  const [initialCorrectionAction, setInitialCorrectionAction] = useState('TS');
   const [editingAsset, setEditingAsset] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
@@ -1558,10 +1656,33 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   );
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [scenarioTransactionId, setScenarioTransactionId] = useState(
-    () => transactions.find(transaction => transaction.status === 'Aktif' && !String(transaction.type || '').toLowerCase().includes('tebus'))?.id ?? ''
+    () => transactions.find(transaction =>
+      isRecordVisible(transaction) &&
+      transaction.status === 'Aktif' &&
+      !String(transaction.type || '').toLowerCase().includes('tebus')
+    )?.id ?? ''
+  );
+  const [scenarioInstitutionName, setScenarioInstitutionName] = useState(
+    () => transactions.find(transaction =>
+      isRecordVisible(transaction) &&
+      transaction.status === 'Aktif' &&
+      !String(transaction.type || '').toLowerCase().includes('tebus')
+    )?.institution || ''
   );
   const [scenarioMargin, setScenarioMargin] = useState('');
+  const [scenarioOldFees, setScenarioOldFees] = useState('');
   const [scenarioNewFees, setScenarioNewFees] = useState('');
+
+  const visibleTransactions = useMemo(() => transactions.filter(isRecordVisible), [transactions]);
+  const visibleAssets = useMemo(() => assets
+    .filter(isRecordVisible)
+    .sort((left, right) =>
+      getTransactionTimestamp(right.updatedAt || right.createdAt || right.date) -
+        getTransactionTimestamp(left.updatedAt || left.createdAt || left.date) ||
+      String(right.id).localeCompare(String(left.id))
+    ), [assets]);
+  const visibleInstitutions = useMemo(() => institutions.filter(isRecordVisible), [institutions]);
+  const visibleSuppliers = useMemo(() => suppliers.filter(isRecordVisible), [suppliers]);
 
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -1668,6 +1789,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         return nextHistory.sort((left, right) => left.date.localeCompare(right.date)).slice(-365);
       });
       setInstitutions(prev => prev.map(inst => {
+        if (!isRecordVisible(inst)) return inst;
         if (institutionId !== null && inst.id !== institutionId) return inst;
         const spread = Number.isFinite(Number(inst.marhunSpread))
           ? Number(inst.marhunSpread)
@@ -1685,7 +1807,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
       const refreshedInstitution = institutionId === null
         ? null
-        : institutions.find(inst => inst.id === institutionId);
+        : visibleInstitutions.find(inst => inst.id === institutionId);
       if (typeof callback === 'function') {
         const spread = Number(refreshedInstitution?.marhunSpread ??
           (Number(refreshedInstitution?.marhunRate) - INITIAL_GOLD_SPOT_MYR_PER_GRAM));
@@ -1695,7 +1817,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         });
       }
       setToastMessage(institutionId === null
-        ? `Harga spot live RM${liveSpot.price.toFixed(2)}/g; anggaran kadar dikemas kini untuk ${institutions.length} institusi.`
+        ? `Harga spot live RM${liveSpot.price.toFixed(2)}/g; anggaran kadar dikemas kini untuk ${visibleInstitutions.length} institusi.`
         : `Anggaran kadar ${refreshedInstitution?.name || 'institusi'} dikemas kini daripada harga spot live.`);
       setTimeout(() => setToastMessage(null), 5000);
     } catch (error) {
@@ -1718,14 +1840,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     : null;
 
   // State untuk Emas Di Tangan (EDT) - Dikira secara dinamik dari Asset Record
-  const edtBalance = useMemo(() => assets.filter(a => a.status === 'EDT').reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0), [assets]);
+  const edtBalance = useMemo(() => visibleAssets
+    .filter(asset => asset.status === 'EDT')
+    .reduce((sum, asset) => sum + (parseFloat(asset.weight) || 0), 0), [visibleAssets]);
 
   // Computed Dashboard Metrics
-  const totalCapital = useMemo(() => transactions.reduce((sum, t) => sum + t.loan, 0), [transactions]);
-  const totalProfit = useMemo(() => transactions.reduce((sum, t) => sum + t.profit, 0), [transactions]);
+  const totalCapital = useMemo(() => visibleTransactions.reduce((sum, t) => sum + t.loan, 0), [visibleTransactions]);
+  const totalProfit = useMemo(() => visibleTransactions.reduce((sum, t) => sum + t.profit, 0), [visibleTransactions]);
   const profitTrendData = useMemo(() => {
     const grouped = new Map();
-    transactions.forEach(transaction => {
+    visibleTransactions.forEach(transaction => {
       if (!transaction.date) return;
       const dateKey = getTransactionDateKey(transaction.date);
       grouped.set(
@@ -1735,29 +1859,29 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     });
     return Array.from(grouped, ([date, profit]) => ({ date, profit }))
       .sort((left, right) => left.date.localeCompare(right.date));
-  }, [transactions]);
+  }, [visibleTransactions]);
   const institutionAnalysis = useMemo(() => {
     const grouped = new Map();
-    transactions.forEach(transaction => {
+    visibleTransactions.forEach(transaction => {
       const name = transaction.institution || 'Tiada institusi';
       const entry = grouped.get(name) || { institution: name, loan: 0, redemption: 0 };
       entry.loan += Number(transaction.loan) || 0;
-      entry.redemption += Number(transaction.redemption) || 0;
+      entry.redemption += getCurrentRedemption(transaction);
       grouped.set(name, entry);
     });
     return Array.from(grouped.values());
-  }, [transactions]);
+  }, [visibleTransactions]);
   const transactionTypeAnalysis = useMemo(() => {
     const grouped = new Map();
-    transactions.forEach(transaction => {
+    visibleTransactions.forEach(transaction => {
       const type = getTransactionStatus(transaction);
       grouped.set(type, (grouped.get(type) || 0) + 1);
     });
     return Array.from(grouped, ([name, count]) => ({ name, count }));
-  }, [transactions]);
+  }, [visibleTransactions]);
   const cumulativeMarhunData = useMemo(() => {
     const dailyValues = new Map();
-    transactions.forEach(tx => {
+    visibleTransactions.forEach(tx => {
       const value = getTransactionMarhunValue(tx);
       if (tx.date && value > 0) {
         const dateKey = getTransactionDateKey(tx.date);
@@ -1772,26 +1896,26 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         accumulatedValue += dailyValue;
         return { date, dailyValue, accumulatedValue };
       });
-  }, [transactions]);
-  const filteredTransactions = useMemo(() => transactions.filter(transaction =>
+  }, [visibleTransactions]);
+  const filteredTransactions = useMemo(() => visibleTransactions.filter(transaction =>
     transactionStatusFilter === 'Semua' || getTransactionStatus(transaction) === transactionStatusFilter
-  ), [transactions, transactionStatusFilter]);
+  ), [visibleTransactions, transactionStatusFilter]);
   const sortedTransactions = useMemo(() => [...filteredTransactions].sort((left, right) =>
     getTransactionTimestamp(right.updatedAt || right.createdAt || right.date) -
       getTransactionTimestamp(left.updatedAt || left.createdAt || left.date) ||
     getTransactionTimestamp(right.date) - getTransactionTimestamp(left.date) ||
     String(right.id).localeCompare(String(left.id))
   ), [filteredTransactions]);
-  const activePortfolioTransactions = useMemo(() => transactions.filter(transaction =>
+  const activePortfolioTransactions = useMemo(() => visibleTransactions.filter(transaction =>
     !String(transaction.type || '').toLowerCase().includes('tebus') &&
     (transaction.status === 'Aktif' || !transaction.status)
-  ), [transactions]);
+  ), [visibleTransactions]);
   const activeTickets = activePortfolioTransactions.length;
-  const redemptionNotifications = useMemo(() => transactions
+  const redemptionNotifications = useMemo(() => visibleTransactions
     .filter(tx => !tx.type.includes('Tebus') && (tx.status === 'Aktif' || !tx.status) && tx.redemptionDate)
     .map(tx => ({ ...tx, daysRemaining: getDaysUntilDate(tx.redemptionDate) }))
     .filter(tx => tx.daysRemaining <= 3)
-    .sort((a, b) => a.daysRemaining - b.daysRemaining), [transactions, currentDate]);
+    .sort((a, b) => a.daysRemaining - b.daysRemaining), [visibleTransactions, currentDate]);
 
   useEffect(() => {
     if (!notificationsEnabled || !('Notification' in window) || Notification.permission !== 'granted' ||
@@ -1844,7 +1968,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const year = calendarMonth.getFullYear();
     const month = calendarMonth.getMonth();
     const monthPrefix = `${year}-${String(month + 1).padStart(2, '0')}`;
-    const entries = transactions
+    const entries = visibleTransactions
       .filter(tx => !tx.type.includes('Tebus') && tx.redemptionDate)
       .map(tx => ({ ...tx, daysRemaining: getDaysUntilDate(tx.redemptionDate) }))
       .sort((a, b) => a.redemptionDate.localeCompare(b.redemptionDate));
@@ -1871,11 +1995,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     });
 
     return { days, entries: entries.filter(tx => tx.redemptionDate.startsWith(monthPrefix)) };
-  }, [calendarMonth, transactions, currentDate]);
+  }, [calendarMonth, visibleTransactions, currentDate]);
 
   // Kira Emas Dalam Ar-Rahnu (EDR) dari surat yang belum tebus & aktif
   const edrBalance = useMemo(
-    () => activePortfolioTransactions.reduce((sum, transaction) => sum + (Number(transaction.weight) || 0), 0),
+    () => activePortfolioTransactions.reduce((sum, transaction) => sum + getCurrentPledgedWeight(transaction), 0),
     [activePortfolioTransactions]
   );
   const cashOnHand = financialReadiness.cashOnHand.trim() === ''
@@ -1894,7 +2018,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       ? Math.max(0, Number(financialReadiness.monthlyExpenses))
       : null;
   const activeRedemptionTotal = activePortfolioTransactions.reduce(
-    (sum, transaction) => sum + (Number(transaction.redemption) || 0),
+    (sum, transaction) => sum + getCurrentRedemption(transaction),
     0
   );
   const cashCoverageRatio = cashOnHand === null
@@ -1906,6 +2030,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const riskScores = useMemo(() => activePortfolioTransactions.map(transaction => {
     const rawDaysRemaining = transaction.redemptionDate ? getDaysUntilDate(transaction.redemptionDate) : null;
     const daysRemaining = Number.isFinite(rawDaysRemaining) ? rawDaysRemaining : null;
+    const linkedAssets = getTransactionAssetIds(transaction)
+      .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
+      .filter(Boolean);
+    const transactionWeight = getCurrentPledgedWeight(transaction) ||
+      linkedAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
     const maturityPoints = daysRemaining === null
       ? 0
       : daysRemaining < 0
@@ -1920,34 +2049,146 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const cashPoints = cashCoverageRatio === null ? 0 : cashCoverageRatio * 35;
     const edtPoints = edtCoverageRatio * 20;
     const completeFields = [
-      Boolean(transaction.refNo),
-      Boolean(transaction.institution),
-      Boolean(transaction.redemptionDate),
-      Number(transaction.weight) > 0,
-      Number(transaction.loan) > 0 && Number(transaction.redemption) > 0
+      transactionWeight > 0,
+      Boolean(transaction.purity || getPurityFromAssets(linkedAssets)),
+      Number(transaction.marhunPrice) > 0,
+      getTransactionMarhunValue(transaction) > 0,
+      Number(transaction.loan) > 0,
+      Number(transaction.margin) > 0,
+      transaction.feeRate !== null && transaction.feeRate !== undefined &&
+        Number.isFinite(Number(transaction.feeRate)),
+      Boolean(normalizeFeeBasis(transaction.feeBasis)),
+      Boolean(transaction.redemptionDate)
     ];
-    const recordPoints = completeFields.filter(Boolean).length * 3;
+    const recordPoints = Math.round(
+      completeFields.filter(Boolean).length / completeFields.length * 15
+    );
     const score = cashCoverageRatio === null
       ? null
       : Math.round(maturityPoints + cashPoints + edtPoints + recordPoints);
     return { transaction, daysRemaining, score };
-  }), [activePortfolioTransactions, cashCoverageRatio, edtCoverageRatio, currentDate]);
+  }), [activePortfolioTransactions, visibleAssets, cashCoverageRatio, edtCoverageRatio, currentDate]);
   const averageRiskScore = riskScores.length && cashCoverageRatio !== null
     ? Math.round(riskScores.reduce((sum, item) => sum + (item.score || 0), 0) / riskScores.length)
     : null;
+  const sagAiIndicators = useMemo(() => activePortfolioTransactions.map(transaction => {
+    const institution = visibleInstitutions.find(item => item.name === transaction.institution);
+    const weight = getCurrentPledgedWeight(transaction);
+    const loan = getCurrentPrincipal(transaction);
+    const margin = Number(transaction.margin) || 0;
+    const newMargin = Number(institution?.maxMargin) || margin;
+    const currentInstitutionRate = Number(institution?.marhunRate) || 0;
+    const impliedLetterValue = loan > 0 && margin > 0 ? loan / (margin / 100) : null;
+    const currentMarhunValue = weight > 0 && currentInstitutionRate > 0
+      ? weight * currentInstitutionRate
+      : null;
+    const estimatedCashBeforeNewFees = currentMarhunValue === null || loan <= 0
+      ? null
+      : calculateOverlapCashBalance(
+        currentMarhunValue * newMargin / 100,
+        loan,
+        getCurrentFeeArrears(transaction),
+        0
+      );
+    const presumption = estimatedCashBeforeNewFees === null
+      ? 'Data belum mencukupi'
+      : estimatedCashBeforeNewFees > 0
+        ? 'Potensi overlap'
+        : estimatedCashBeforeNewFees < 0
+          ? 'Petunjuk shortfall'
+          : 'Cukup sebelum fi baharu';
+    const recordedMarhunValue = getTransactionMarhunValue(transaction);
+    const hasPartialRedemption = Boolean(getLatestPartialRedemption(transaction));
+    const marhunValueMismatch = !hasPartialRedemption &&
+      impliedLetterValue !== null &&
+      recordedMarhunValue > 0 &&
+      Math.abs(recordedMarhunValue - impliedLetterValue) > 0.01;
+    const hasStoredSpread = institution?.marhunSpread !== null &&
+      institution?.marhunSpread !== undefined &&
+      String(institution.marhunSpread).trim() !== '' &&
+      Number.isFinite(Number(institution.marhunSpread));
+    const spread = hasStoredSpread
+      ? Number(institution.marhunSpread)
+      : currentInstitutionRate > 0 && currentGoldPrice > 0
+        ? currentInstitutionRate - currentGoldPrice
+        : null;
+    const projectedInstitutionRate = twelveWeekGoldEstimate !== null && spread !== null
+      ? Math.max(0, twelveWeekGoldEstimate + spread)
+      : null;
+    const projectedMarhunValue = projectedInstitutionRate !== null && weight > 0
+      ? weight * projectedInstitutionRate
+      : null;
+    const projectedFinancing = projectedMarhunValue !== null && newMargin > 0
+      ? projectedMarhunValue * newMargin / 100
+      : null;
+    const projectedCashBeforeNewFees = projectedFinancing === null
+      ? null
+      : calculateOverlapCashBalance(
+        projectedFinancing,
+        loan,
+        getCurrentFeeArrears(transaction),
+        0
+      );
+    const prediction = projectedCashBeforeNewFees === null
+      ? null
+      : projectedCashBeforeNewFees > 0
+        ? 'Trend 12 minggu menunjukkan potensi overlap sebelum fi baharu'
+        : projectedCashBeforeNewFees < 0
+          ? 'Trend 12 minggu menunjukkan petunjuk shortfall sebelum fi baharu'
+          : 'Trend 12 minggu cukup sebelum fi baharu';
+    const readinessScore = riskScores.find(item =>
+      String(item.transaction.id) === String(transaction.id)
+    )?.score ?? null;
+
+    return {
+      transaction,
+      currentMarhunValue,
+      impliedLetterValue,
+      marhunValueMismatch,
+      presumption,
+      estimatedCashBeforeNewFees,
+      projectedMarhunValue,
+      projectedFinancing,
+      projectedCashBeforeNewFees,
+      prediction,
+      readinessScore
+    };
+  }), [
+    activePortfolioTransactions,
+    visibleInstitutions,
+    currentGoldPrice,
+    twelveWeekGoldEstimate,
+    riskScores
+  ]);
   const selectedScenarioTransaction = activePortfolioTransactions.find(
     transaction => String(transaction.id) === String(scenarioTransactionId)
   ) || activePortfolioTransactions[0] || null;
-  const scenarioInstitution = institutions.find(
-    institution => institution.name === selectedScenarioTransaction?.institution
-  );
+  const scenarioInstitution = visibleInstitutions.find(
+    institution => institution.name === (scenarioInstitutionName || selectedScenarioTransaction?.institution)
+  ) || null;
   const scenarioMarginValue = Math.min(100, Math.max(0, Number(scenarioMargin === ''
-    ? selectedScenarioTransaction?.margin
+    ? scenarioInstitution?.maxMargin ?? selectedScenarioTransaction?.margin
     : scenarioMargin) || 0));
   const scenarioFeesValue = Math.max(0, Number(scenarioNewFees) || 0);
-  const scenarioSpread = Number.isFinite(Number(scenarioInstitution?.marhunSpread))
+  const scenarioFeesEntered = scenarioNewFees !== '' && Number.isFinite(Number(scenarioNewFees));
+  const scenarioOldPrincipal = selectedScenarioTransaction
+    ? getCurrentPrincipal(selectedScenarioTransaction)
+    : 0;
+  const scenarioOldFeesDefault = selectedScenarioTransaction
+    ? getCurrentFeeArrears(selectedScenarioTransaction)
+    : 0;
+  const scenarioOldFeesValue = Math.max(0, Number(scenarioOldFees === ''
+    ? scenarioOldFeesDefault
+    : scenarioOldFees) || 0);
+  const hasScenarioInstitutionSpread = scenarioInstitution?.marhunSpread !== null &&
+    scenarioInstitution?.marhunSpread !== undefined &&
+    String(scenarioInstitution.marhunSpread).trim() !== '' &&
+    Number.isFinite(Number(scenarioInstitution.marhunSpread));
+  const scenarioSpread = hasScenarioInstitutionSpread
     ? Number(scenarioInstitution.marhunSpread)
-    : (Number(scenarioInstitution?.marhunRate) || currentGoldPrice) - currentGoldPrice;
+    : Number.isFinite(Number(scenarioInstitution?.marhunRate))
+      ? Number(scenarioInstitution.marhunRate) - currentGoldPrice
+      : 0;
   const scenarioOutcomes = selectedScenarioTransaction
     ? [
         { label: 'Harga turun 10%', change: -0.1 },
@@ -1956,11 +2197,34 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       ].map(scenario => {
         const simulatedSpot = currentGoldPrice * (1 + scenario.change);
         const simulatedRate = Math.max(0, simulatedSpot + scenarioSpread);
-        const newFinancing = (Number(selectedScenarioTransaction.weight) || 0) *
-          simulatedRate * scenarioMarginValue / 100;
-        const cashDifference = newFinancing -
-          (Number(selectedScenarioTransaction.redemption) || 0) - scenarioFeesValue;
-        return { ...scenario, simulatedSpot, simulatedRate, newFinancing, cashDifference };
+        const newMarhunValue = getCurrentPledgedWeight(selectedScenarioTransaction) * simulatedRate;
+        const newFinancing = newMarhunValue * scenarioMarginValue / 100;
+        const cashDifferenceBeforeNewFees = calculateOverlapCashBalance(
+          newFinancing,
+          scenarioOldPrincipal,
+          scenarioOldFeesValue,
+          0
+        );
+        const cashDifference = scenarioFeesEntered
+          ? calculateOverlapCashBalance(
+            newFinancing,
+            scenarioOldPrincipal,
+            scenarioOldFeesValue,
+            scenarioFeesValue
+          )
+          : null;
+        return {
+          ...scenario,
+          simulatedSpot,
+          simulatedRate,
+          newMarhunValue,
+          newFinancing,
+          oldPrincipal: scenarioOldPrincipal,
+          oldFees: scenarioOldFeesValue,
+          newFees: scenarioFeesEntered ? scenarioFeesValue : null,
+          cashDifferenceBeforeNewFees,
+          cashDifference
+        };
       })
     : [];
 
@@ -1973,21 +2237,22 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       indicators.push({
         id: 'ratio-alert',
         type: 'RATIO',
-        badge: 'Amaran Kritikal: Ratio Tak Balance',
+        badge: 'Semakan: nisbah EDT/EDR',
         ticket: 'PORTFOLIO',
-        title: `Pegi beli Gold Bar (GB) sekarang!`,
-        desc: `Oi acik, Makcik tengok ratio emas belum seimbang. EDT ada ${edtBalance}g, tapi EDR sampai ${edrBalance}g. Tambah Gold Bar supaya nanti ada emas di tangan untuk tebus surat pajakan.`,
-        color: 'rose'
+        title: 'Semak pelan tebus surat aktif',
+        desc: `EDT ada ${edtBalance}g dan EDR ${edrBalance}g. Pertimbangkan tunai tersedia, tebus atau pusing mengikut kemampuan dan syarat institusi; membeli emas bukan satu-satunya pilihan.`,
+        color: 'amber'
       });
     }
 
     // Filter open tickets (hanya tiket yang aktif / belum selesai & belum ditebus)
-    const openTx = transactions.filter(t => t.status === 'Aktif' || (!t.status && !t.type.includes('Tebus')));
+    const openTx = visibleTransactions.filter(t => t.status === 'Aktif' || (!t.status && !t.type.includes('Tebus')));
 
     openTx.forEach(tx => {
       // RULE 3 & 4: Koperasi offer 70% sahaja & rate mesti lebih tinggi dari rate asal & ada untung melebihi kos tebus
-      const best70 = institutions
-        .filter(i => i.maxMargin === 70 && i.marhunRate > tx.marhunPrice && ((i.marhunRate * (i.maxMargin / 100) * tx.weight) > tx.redemption))
+      const best70 = visibleInstitutions
+        .filter(i => i.maxMargin === 70 && i.marhunRate > tx.marhunPrice &&
+          ((i.marhunRate * (i.maxMargin / 100) * getCurrentPledgedWeight(tx)) > getCurrentRedemption(tx)))
         .sort((a, b) => b.marhunRate - a.marhunRate)[0];
 
       if (best70) {
@@ -2002,21 +2267,30 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         });
       }
 
-      // RULE 4: 80% OL dan Pusing (Cari yang margin 80% dan boleh beri lebihan modal)
-      const best80 = institutions
+      // Anggaran OL sebelum fi baharu kerana fi berkaitan bergantung pada sebut harga institusi.
+      const best80 = visibleInstitutions
         .filter(i => i.maxMargin === 80 && i.marhunRate > tx.marhunPrice)
         .sort((a, b) => b.marhunRate - a.marhunRate)[0];
 
       if (best80) {
-        const anggaranLebihan = (best80.marhunRate * (best80.maxMargin / 100) * tx.weight) - tx.redemption;
-        if (anggaranLebihan > 0) {
+        const newFinancing = best80.marhunRate * (best80.maxMargin / 100) *
+          getCurrentPledgedWeight(tx);
+        const oldPrincipal = getCurrentPrincipal(tx);
+        const oldFees = getCurrentFeeArrears(tx);
+        const estimatedCashBeforeNewFees = calculateOverlapCashBalance(
+          newFinancing,
+          oldPrincipal,
+          oldFees,
+          0
+        );
+        if (estimatedCashBeforeNewFees > 0) {
           indicators.push({
             id: `ol-${tx.id}`,
             type: 'OL',
             badge: 'OL / Pusing (80%)',
             ticket: tx.refNo,
-            title: `Over-Lap (OL) ke ${best80.name}`,
-            desc: `Oi acik, Makcik nampak peluang OL di ${best80.name}. Anggaran lebihan tunai RM${anggaranLebihan.toFixed(2)}. Semak kos dan kadar sebenar di kaunter sebelum pusing modal.`,
+            title: `Semak OL di ${best80.name}`,
+            desc: `Pembiayaan baharu dianggarkan ${formatRM(newFinancing)}. Baki sebelum fi baharu: ${formatRM(estimatedCashBeforeNewFees)} selepas menolak pembiayaan lama ${formatRM(oldPrincipal)} dan caj tertunggak ${formatRM(oldFees)}. Masukkan fi berkaitan dan sahkan nilai sebenar dengan institusi.`,
             color: 'blue'
           });
         }
@@ -2038,7 +2312,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
                 : `Surat hampir matang / Perlu ditebus`,
             desc: `Oi acik, Makcik ingatkan tarikh tebus ${tx.redemptionDate}${daysRemaining < 0
               ? `. Dah lewat ${Math.abs(daysRemaining)} hari.`
-              : daysRemaining === 0 ? ' ialah hari ini.' : `. Tinggal ${daysRemaining} hari.`} Anggaran jumlah tebus ${formatRM(Number(tx.redemption) || 0)}. Sediakan tunai atau emas di tangan (EDT).`,
+              : daysRemaining === 0 ? ' ialah hari ini.' : `. Tinggal ${daysRemaining} hari.`} Anggaran jumlah tebus ${formatRM(getCurrentRedemption(tx))}. Sediakan tunai atau emas di tangan (EDT).`,
             color: 'emerald'
           });
         }
@@ -2050,7 +2324,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       if (!acc.find(item => item.id === current.id)) return acc.concat([current]);
       return acc;
     }, []);
-  }, [transactions, institutions, edrBalance, edtBalance, currentDate]);
+  }, [visibleTransactions, visibleInstitutions, edrBalance, edtBalance, currentDate]);
 
   // Color mapper for dynamic tailwind classes (required for compiler)
   const indStyles = {
@@ -2060,49 +2334,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     rose: { border: 'border-rose-200', bg: 'bg-rose-50', strip: 'bg-rose-500', text: 'text-rose-700', badgeBg: 'bg-rose-100' }
   };
 
-  const handleFinishAllPendingTasks = () => {
-    const updatedAt = new Date().toISOString();
-    // 1. Selesaikan semua surat lama yang telah dipusingkan/salin
-    setTransactions(prev => prev.map(t => {
-      const status = t.refNo === '1001-1002' || t.refNo === '1003-1004'
-        ? 'Selesai'
-        : t.status || 'Aktif';
-      return status === t.status ? t : { ...t, status, updatedAt };
-    }));
-
-    // 2. Pastikan nisbah EDT seimbang dengan EDR
-    setAssets(prev => {
-      const edtTotal = prev.filter(a => a.status === 'EDT').reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
-      const activeWeight = 5; // Berat surat aktif 1005-1006
-      if (edtTotal < activeWeight || edtTotal < 10) {
-        const topUpWeight = Math.max(10 - edtTotal, 5);
-        return [
-          ...prev,
-          {
-            id: Date.now(),
-            code: generateAssetCode('Gold Bar', 'Public Gold', '999.9', topUpWeight, prev.length + 1),
-            date: new Date().toISOString().split('T')[0],
-            supplier: 'Public Gold',
-            supplierCodes: ['PG'],
-            type: 'Gold Bar',
-            purity: '999.9',
-            weight: topUpWeight,
-            price: topUpWeight * currentGoldPrice,
-            status: 'EDT'
-          }
-        ];
-      }
-      return prev;
-    });
-
-    setToastMessage('Semua tugasan tertunggak telah berjaya diselesaikan! Portfolio kini 100% seimbang & optimum.');
-    setTimeout(() => setToastMessage(null), 4000);
-  };
-
   const handleToggleStatus = (id) => {
     const updatedAt = new Date().toISOString();
     setTransactions(prev => prev.map(t => {
-      if (t.id === id) {
+      if (isRecordVisible(t) && String(t.id) === String(id) &&
+          !['Ditebus', 'Dilelong'].includes(t.status)) {
         const nextStatus = t.status === 'Aktif' ? 'Selesai' : 'Aktif';
         return { ...t, status: nextStatus, updatedAt };
       }
@@ -2113,66 +2349,67 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const handleResolveIndicator = (indicator) => {
     if (indicator.type === 'RATIO') {
       setIsAssetModalOpen(true);
-    } else if (indicator.type === 'TEBUS') {
-      const updatedAt = new Date().toISOString();
-      setTransactions(prev => prev.map(t =>
-        t.refNo === indicator.ticket ? { ...t, status: 'Ditebus', updatedAt } : t
-      ));
-      setToastMessage(`Surat #${indicator.ticket} telah berjaya ditebus dan aset dikembalikan ke EDT!`);
-      setTimeout(() => setToastMessage(null), 3000);
     } else {
-      // Salin / OL
-      const updatedAt = new Date().toISOString();
-      setTransactions(prev => prev.map(t =>
-        t.refNo === indicator.ticket ? { ...t, status: 'Selesai', updatedAt } : t
-      ));
-      setToastMessage(`Tindakan ${indicator.badge} untuk Surat #${indicator.ticket} telah selesai!`);
-      setTimeout(() => setToastMessage(null), 3000);
+      const transaction = visibleTransactions.find(item => item.refNo === indicator.ticket);
+      if (transaction) handleOpenCorrection(transaction, indicator.type === 'TEBUS' ? 'TS' : 'Pusing');
     }
   };
 
   const handleDeleteAsset = (id) => {
-    const isUsedInLedger = transactions.some(transaction =>
-      (transaction.selectedAssetIds || (transaction.selectedAssetId ? [transaction.selectedAssetId] : []))
-        .map(String)
-        .includes(String(id))
-    );
-    if (isUsedInLedger) {
-      setToastMessage('Aset tidak boleh dipadam kerana telah dipautkan kepada transaksi lejar.');
-      setTimeout(() => setToastMessage(null), 4000);
-      return;
-    }
-    setAssets(assets.filter(a => a.id !== id));
+    const deletedAt = new Date().toISOString();
+    setAssets(prev => prev.map(asset =>
+      asset.id === id ? { ...asset, deletedAt, updatedAt: deletedAt } : asset
+    ));
+    setToastMessage('Rekod aset ditandakan sebagai dipadam dan disorokkan.');
+    setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleDelete = (id) => {
-    const remainingTransactions = transactions.filter(t => t.id !== id);
-    setTransactions(remainingTransactions);
+    const deletedAt = new Date().toISOString();
+    setTransactions(prev => prev.map(transaction =>
+      transaction.id === id ? { ...transaction, deletedAt, updatedAt: deletedAt } : transaction
+    ));
+    setToastMessage('Rekod transaksi ditandakan sebagai dipadam dan disorokkan.');
+    setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleExportCSV = () => {
     const headers = [
       "Tarikh & Masa", "Jenis Transaksi", "Tempat (Koperasi/Ar-Rahnu)",
-      "No. Surat Rujukan", "Berat Emas (g)", "Harga Marhun (RM/g)",
-      "Margin (%)", "Jumlah Pinjaman (RM)", "Upah Simpan (RM)",
-      "Jumlah Tebus (RM)", "Lebihan/Profit (RM)", "Catatan", "Jumlah Nilai Marhun (RM)"
+      "No. Surat Rujukan", "Berat Emas (g)", "Harga Taksiran (RM/g)",
+      "Kadar Pembiayaan (%)", "Jumlah Pembiayaan (RM)", "Jumlah Caj Simpanan (RM)",
+      "Jumlah Tebus (RM)", "Lebihan Tunai Direkod (bukan untung) (RM)", "Catatan", "Jumlah Nilai Marhun (RM)",
+      "Ketulenan", "Kadar Caj Simpanan (% sebulan)", "Asas Kiraan Caj", "Tempoh Pajakan (bulan)",
+      "AI Presumption", "AI Predictive (12 minggu)", "AI Score kesiapsiagaan (/100)"
     ];
 
-    const rows = transactions.map(tx => [
-      tx.date,
-      tx.type,
-      tx.institution,
-      tx.refNo,
-      tx.weight,
-      tx.marhunPrice,
-      `${tx.margin}%`,
-      tx.loan,
-      tx.fee || 0,
-      tx.redemption,
-      tx.profit,
-      tx.remarks || '',
-      getTransactionMarhunValue(tx)
-    ]);
+    const rows = visibleTransactions.map(tx => {
+      const aiIndicator = sagAiIndicators.find(item =>
+        String(item.transaction.id) === String(tx.id)
+      );
+      return [
+        tx.date,
+        tx.type,
+        tx.institution,
+        tx.refNo,
+        getCurrentPledgedWeight(tx),
+        tx.marhunPrice,
+        `${tx.margin}%`,
+        tx.loan,
+        tx.fee || 0,
+        getCurrentRedemption(tx),
+        tx.profit,
+        tx.remarks || '',
+        getTransactionMarhunValue(tx),
+        tx.purity || '',
+        tx.feeRate ?? '',
+        getFeeBasisLabel(tx.feeBasis),
+        tx.feeTermMonths ?? '',
+        aiIndicator?.presumption || '',
+        aiIndicator?.prediction || '',
+        aiIndicator?.readinessScore ?? ''
+      ];
+    });
 
     downloadCsv('Template_Gameplay_Ar-Rahnu_Kop.csv', headers, rows);
   };
@@ -2182,16 +2419,21 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       'Jenis rekod', 'Tarikh & Masa', 'Rujukan/Kod', 'Institusi/Pembekal', 'Jenis',
       'Aset berkaitan', 'Berat (g)', 'Harga Marhun/Kadar (RM/g)',
       'Pembiayaan/Nilai (RM)', 'Jumlah tebus (RM)',
-      'Lebihan tunai atau untung direkod (RM)', 'Skor risiko (/100)', 'Status', 'Catatan',
-      'Jumlah Nilai Marhun (RM)'
+      'Lebihan tunai direkod (bukan untung) (RM)', 'AI Score kesiapsiagaan (/100)', 'Status', 'Catatan',
+      'Jumlah Nilai Marhun (RM)', 'Ketulenan', 'Kadar Caj Simpanan (% sebulan)',
+      'Asas Kiraan Caj', 'Jumlah Caj Simpanan (RM)', 'AI Presumption', 'AI Predictive (12 minggu)',
+      'Tempoh Pajakan (bulan)'
     ];
-    const transactionRows = transactions.map(transaction => {
+    const transactionRows = visibleTransactions.map(transaction => {
       const linkedAssets = getTransactionAssetIds(transaction)
-        .map(assetId => assets.find(asset => String(asset.id) === String(assetId)))
+        .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
         .filter(Boolean)
         .map(asset => asset.code || asset.id)
         .join('; ');
       const risk = riskScores.find(item => String(item.transaction.id) === String(transaction.id));
+      const aiIndicator = sagAiIndicators.find(item =>
+        String(item.transaction.id) === String(transaction.id)
+      );
       return [
         'Transaksi',
         transaction.date,
@@ -2199,18 +2441,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         transaction.institution,
         getTransactionStatus(transaction),
         linkedAssets,
-        transaction.weight,
+        getCurrentPledgedWeight(transaction),
         transaction.marhunPrice,
         transaction.loan,
-        transaction.redemption,
+        getCurrentRedemption(transaction),
         transaction.profit,
         risk?.score ?? '',
         transaction.status || 'Belum ditetapkan',
         transaction.remarks,
-        getTransactionMarhunValue(transaction)
+        getTransactionMarhunValue(transaction),
+        transaction.purity || '',
+        transaction.feeRate ?? '',
+        getFeeBasisLabel(transaction.feeBasis),
+        transaction.fee || 0,
+        aiIndicator?.presumption || '',
+        aiIndicator?.prediction || '',
+        transaction.feeTermMonths ?? ''
       ];
     });
-    const assetRows = assets.map(asset => [
+    const assetRows = visibleAssets.map(asset => [
       'Aset',
       asset.date,
       asset.code || asset.id,
@@ -2225,9 +2474,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       '',
       asset.status,
       asset.purity ? `Ketulenan ${asset.purity}` : '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       ''
     ]);
-    const institutionRows = institutions.map(institution => [
+    const institutionRows = visibleInstitutions.map(institution => [
       'Institusi',
       '',
       institution.id,
@@ -2242,9 +2498,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       '',
       'Daftar institusi',
       institution.remarks,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       ''
     ]);
-    const supplierRows = suppliers.map(supplier => [
+    const supplierRows = visibleSuppliers.map(supplier => [
       'Pembekal',
       '',
       supplier.code || supplier.id,
@@ -2259,6 +2522,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       '',
       'Daftar pembekal',
       supplier.remarks || supplier.products,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       ''
     ]);
     const priceRows = goldPriceHistory.map(snapshot => [
@@ -2276,26 +2546,48 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       '',
       'Direkod',
       `Masa tangkapan: ${snapshot.capturedAt}`,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
       ''
     ]);
     const scenarioRows = scenarioOutcomes.map(scenario => [
       'Simulasi overlap',
       '',
       selectedScenarioTransaction?.refNo,
-      selectedScenarioTransaction?.institution,
+      scenarioInstitution?.name || scenarioInstitutionName || selectedScenarioTransaction?.institution,
       scenario.label,
       getTransactionAssetIds(selectedScenarioTransaction || {})
-        .map(assetId => assets.find(asset => String(asset.id) === String(assetId))?.code || assetId)
+        .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
+        .filter(Boolean)
+        .map(asset => asset.code || asset.id)
         .join('; '),
-      selectedScenarioTransaction?.weight,
+      getCurrentPledgedWeight(selectedScenarioTransaction || {}),
       scenario.simulatedRate,
       scenario.newFinancing,
-      selectedScenarioTransaction?.redemption,
-      scenario.cashDifference,
+      scenario.oldPrincipal + scenario.oldFees,
+      scenario.cashDifference ?? '',
       '',
-      scenario.cashDifference >= 0 ? 'Lebihan tunai' : 'Perlu tambah tunai',
-      'Anggaran sahaja, bukan keuntungan atau sebut harga rasmi',
-      calculateMarhunValue(selectedScenarioTransaction?.weight, scenario.simulatedRate)
+      scenario.cashDifference === null
+        ? 'Fi baharu belum dimasukkan'
+        : scenario.cashDifference >= 0 ? 'Lebihan tunai' : 'Perlu tambah tunai',
+      `Pembiayaan lama ${formatRM(scenario.oldPrincipal)}; caj tertunggak ${formatRM(scenario.oldFees)}; fi baharu ${scenario.newFees === null ? 'belum dimasukkan' : formatRM(scenario.newFees)}; margin ${scenarioMarginValue}%. Anggaran sahaja, bukan keuntungan atau sebut harga rasmi.`,
+      scenario.newMarhunValue,
+      selectedScenarioTransaction?.purity || '',
+      selectedScenarioTransaction?.feeRate ?? '',
+      getFeeBasisLabel(selectedScenarioTransaction?.feeBasis),
+      scenario.newFees ?? '',
+      sagAiIndicators.find(item =>
+        String(item.transaction.id) === String(selectedScenarioTransaction?.id)
+      )?.presumption || '',
+      sagAiIndicators.find(item =>
+        String(item.transaction.id) === String(selectedScenarioTransaction?.id)
+      )?.prediction || '',
+      selectedScenarioTransaction?.feeTermMonths ?? ''
     ]);
 
     downloadCsv(
@@ -2344,7 +2636,15 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             fee: parseFloat(cols[8]) || 0,
             redemption: parseFloat(cols[9]) || 0,
             profit: parseFloat(cols[10]) || 0,
-            remarks: cols[11] || ''
+            remarks: cols[11] || '',
+            purity: cols[13] || '',
+            feeRate: cols[14] !== undefined && cols[14] !== ''
+              ? parseFloat(cols[14]) || 0
+              : null,
+            feeBasis: normalizeFeeBasis(cols[15]),
+            feeTermMonths: cols[16] !== undefined && cols[16] !== ''
+              ? parseFloat(cols[16]) || 0
+              : null
           });
         }
       }
@@ -2367,8 +2667,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const selectedAssetIds = !newTx.type.includes('Tebus') ? (newTx.selectedAssetIds || []) : [];
     if (selectedAssetIds.length) {
       setAssets(prev => prev.map(asset =>
-        selectedAssetIds.map(String).includes(String(asset.id))
-          ? { ...asset, status: 'Dalam Ar-Rahnu' }
+        isRecordVisible(asset) && selectedAssetIds.map(String).includes(String(asset.id))
+          ? { ...asset, status: 'Dalam Ar-Rahnu', updatedAt: createdAt }
           : asset
       ));
     }
@@ -2387,6 +2687,112 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const handleEditTransaction = (transaction) => {
     setEditingTransaction(transaction);
     setIsModalOpen(true);
+  };
+
+  const handleOpenCorrection = (transaction, action = 'TS') => {
+    setCorrectionTransaction(transaction);
+    setInitialCorrectionAction(action);
+    setIsCorrectionModalOpen(true);
+  };
+
+  const handleSaveCorrection = (correction) => {
+    if (!correctionTransaction) return;
+    if (correction.type === 'Lelong' && !correction.institutionConfirmed) {
+      setToastMessage('Pengesahan institusi wajib direkod sebelum status lelong dikemas kini.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    let linkedTransaction = null;
+    let pusingNewFinancing = null;
+    let pusingCashDifference = null;
+    if (correction.type === 'Pusing') {
+      linkedTransaction = visibleTransactions.find(transaction =>
+        String(transaction.id) === String(correction.linkedTransactionId)
+      );
+      if (!linkedTransaction || String(linkedTransaction.id) === String(correctionTransaction.id) ||
+          (linkedTransaction.status !== 'Aktif' && linkedTransaction.status) ||
+          String(linkedTransaction.type || '').toLowerCase().includes('tebus') ||
+          getMatchingAssetLinkStatus(correctionTransaction, linkedTransaction) === false) {
+        setToastMessage('Pilih SAG baharu yang sedia ada dan masih aktif untuk dipautkan.');
+        setTimeout(() => setToastMessage(null), 4000);
+        return;
+      }
+      if (!correction.sameGoldConfirmed ||
+          !Number.isFinite(Number(correction.oldFinancing)) ||
+          Number(correction.oldFinancing) < 0 ||
+          !Number.isFinite(Number(correction.oldFees)) ||
+          Number(correction.oldFees) < 0 ||
+          !Number.isFinite(Number(correction.relatedFees)) ||
+          Number(correction.relatedFees) < 0) {
+        setToastMessage('Sahkan emas yang sama dan masukkan pembiayaan lama, caj tertunggak serta fi berkaitan.');
+        setTimeout(() => setToastMessage(null), 4000);
+        return;
+      }
+      pusingNewFinancing = getCurrentPrincipal(linkedTransaction);
+      pusingCashDifference = calculateOverlapCashBalance(
+        pusingNewFinancing,
+        correction.oldFinancing,
+        correction.oldFees,
+        correction.relatedFees
+      );
+    }
+    const updatedAt = new Date().toISOString();
+    const correctionEvent = {
+      ...correction,
+      totalPaid: correction.type === 'Pusing'
+        ? Number(correction.oldFinancing) + Number(correction.oldFees)
+        : correction.totalPaid,
+      id: `${Date.now()}`,
+      recordedAt: updatedAt,
+      date: parseTransactionDateTime(correction.date).toISOString(),
+      linkedRefNo: linkedTransaction?.refNo,
+      newFinancing: pusingNewFinancing,
+      cashDifference: pusingCashDifference
+    };
+    const linkedTransactionId = correction.type === 'Pusing'
+      ? correction.linkedTransactionId
+      : null;
+
+    setTransactions(previous => previous.map(transaction => {
+      if (String(transaction.id) === String(correctionTransaction.id)) {
+        const status = correction.type === 'TS'
+          ? 'Ditebus'
+          : correction.type === 'Lelong'
+            ? 'Dilelong'
+            : correction.type === 'Pusing'
+              ? 'Selesai'
+              : transaction.status || 'Aktif';
+        return {
+          ...transaction,
+          correctionEvents: [...getCorrectionEvents(transaction), correctionEvent],
+          status,
+          updatedAt
+        };
+      }
+      if (linkedTransactionId && String(transaction.id) === String(linkedTransactionId)) {
+        return {
+          ...transaction,
+          parentTransactionId: correctionTransaction.id,
+          parentRefNo: correctionTransaction.refNo,
+          updatedAt
+        };
+      }
+      return transaction;
+    }));
+
+    if (correction.type === 'Lelong') {
+      const linkedAssetIds = getTransactionAssetIds(correctionTransaction).map(String);
+      setAssets(previous => previous.map(asset =>
+        isRecordVisible(asset) && linkedAssetIds.includes(String(asset.id))
+          ? { ...asset, status: 'Dilelong', updatedAt }
+          : asset
+      ));
+    }
+
+    setToastMessage(`Tindakan ${correction.type} untuk Surat #${correctionTransaction.refNo} telah direkodkan.`);
+    setIsCorrectionModalOpen(false);
+    setCorrectionTransaction(null);
+    setTimeout(() => setToastMessage(null), 4000);
   };
 
   const handleSaveTransaction = (updatedTx) => {
@@ -2421,6 +2827,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleDuplicateAsset = (asset) => {
     const newId = Date.now();
+    const createdAt = new Date().toISOString();
     const currentCode = asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id);
     const match = currentCode.match(/^(.*)-(\d+)$/);
     const newCode = match 
@@ -2432,7 +2839,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       id: newId,
       code: newCode,
       supplier: `${asset.supplier} (Salinan)`,
-      date: new Date().toISOString().split('T')[0]
+      date: createdAt,
+      createdAt,
+      updatedAt: createdAt
     };
     setAssets(prev => [...prev, duplicated]);
     setToastMessage(`Aset [${newCode}] berjaya diduplikasi!`);
@@ -2440,12 +2849,34 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveAsset = (assetData) => {
+    const updatedAt = new Date().toISOString();
+    const normalizedAssetData = {
+      ...assetData,
+      date: parseTransactionDateTime(assetData.date).toISOString()
+    };
     const code = assetData.code?.trim() || generateAssetCode(assetData.type, assetData.supplierCodes || assetData.supplier, assetData.purity, assetData.weight, editingAsset ? editingAsset.id : Date.now(), suppliers);
     if (editingAsset) {
-      setAssets(prev => prev.map(a => a.id === editingAsset.id ? { ...assetData, code, id: editingAsset.id, status: assetData.status || editingAsset.status } : a));
+      setAssets(prev => prev.map(asset => asset.id === editingAsset.id
+        ? {
+            ...asset,
+            ...normalizedAssetData,
+            code,
+            id: editingAsset.id,
+            status: assetData.status || editingAsset.status,
+            updatedAt
+          }
+        : asset
+      ));
       setToastMessage(`Aset [${code}] berjaya dikemaskini!`);
     } else {
-      setAssets(prev => [...prev, { ...assetData, code, id: Date.now(), status: assetData.status || 'EDT' }]);
+      setAssets(prev => [...prev, {
+        ...normalizedAssetData,
+        code,
+        id: Date.now(),
+        status: assetData.status || 'EDT',
+        createdAt: updatedAt,
+        updatedAt
+      }]);
       setToastMessage(`Aset [${code}] berjaya didaftarkan!`);
     }
     setIsAssetModalOpen(false);
@@ -2459,14 +2890,17 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteInstitution = (id) => {
-    if (institutions.length <= 1) {
+    if (institutions.filter(isRecordVisible).length <= 1) {
       setToastMessage('Perlu sekurang-kurangnya 1 institusi aktif dalam sistem.');
       setTimeout(() => setToastMessage(null), 3000);
       return;
     }
     const inst = institutions.find(i => i.id === id);
-    setInstitutions(prev => prev.filter(i => i.id !== id));
-    setToastMessage(`Institusi "${inst?.name || ''}" telah dipadam.`);
+    const deletedAt = new Date().toISOString();
+    setInstitutions(prev => prev.map(item =>
+      item.id === id ? { ...item, deletedAt, updatedAt: deletedAt } : item
+    ));
+    setToastMessage(`Institusi "${inst?.name || ''}" ditandakan sebagai dipadam dan disorokkan.`);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
@@ -2485,7 +2919,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleResetInstitutions = () => {
-    setInstitutions(initialInstitutions);
+    setInstitutions(prev => resetRecordsPreservingDeleted(initialInstitutions, prev));
     setToastMessage('Senarai institusi Bangi telah dimuat semula ke tetapan asal!');
     setTimeout(() => setToastMessage(null), 3000);
   };
@@ -2497,17 +2931,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleDeleteSupplier = (id) => {
     const supplier = suppliers.find(item => item.id === id);
-    const inUse = assets.some(asset =>
-      (asset.supplierCodes || []).includes(supplier?.code) ||
-      (!asset.supplierCodes && asset.supplier === supplier?.name)
-    );
-    if (inUse) {
-      setToastMessage(`Pembekal "${supplier.name}" tidak boleh dipadam kerana telah digunakan dalam rekod aset.`);
-      setTimeout(() => setToastMessage(null), 4000);
-      return;
-    }
-    setSuppliers(prev => prev.filter(item => item.id !== id));
-    setToastMessage(`Pembekal "${supplier?.name || ''}" telah dipadam.`);
+    const deletedAt = new Date().toISOString();
+    setSuppliers(prev => prev.map(item =>
+      item.id === id ? { ...item, deletedAt, updatedAt: deletedAt } : item
+    ));
+    setToastMessage(`Pembekal "${supplier?.name || ''}" ditandakan sebagai dipadam dan disorokkan.`);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
@@ -2526,6 +2954,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     const updatedSupplier = { ...supplierData, code: normalizedCode, name: supplierData.name.trim() };
     if (editingSupplier) {
+      const assetUpdatedAt = new Date().toISOString();
       setSuppliers(prev => prev.map(item => item.id === editingSupplier.id ? { ...updatedSupplier, id: editingSupplier.id } : item));
       setAssets(prev => prev.map(asset => {
         const codes = asset.supplierCodes || suppliers
@@ -2538,7 +2967,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             ? updatedSupplier.name
             : suppliers.find(item => item.code === code)?.name
         ).filter(Boolean);
-        return { ...asset, supplierCodes: updatedCodes, supplier: updatedNames.join(', ') };
+        return {
+          ...asset,
+          supplierCodes: updatedCodes,
+          supplier: updatedNames.join(', '),
+          updatedAt: assetUpdatedAt
+        };
       }));
       setToastMessage(`Maklumat pembekal "${updatedSupplier.name}" berjaya dikemaskini!`);
     } else {
@@ -2551,25 +2985,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleResetSuppliers = () => {
-    setSuppliers(initialSuppliers);
+    setSuppliers(prev => resetRecordsPreservingDeleted(initialSuppliers, prev));
     setSupplierSearch('');
     setToastMessage('Senarai 10 pembekal asal telah dimuat semula!');
     setTimeout(() => setToastMessage(null), 3000);
   };
 
-  const filteredSuppliers = suppliers.filter(supplier =>
+  const filteredSuppliers = visibleSuppliers.filter(supplier =>
     [supplier.code, supplier.name, supplier.category, supplier.products]
       .some(value => String(value || '').toLowerCase().includes(supplierSearch.trim().toLowerCase()))
   );
   const checkedInAssetIds = useMemo(() => getCheckedInAssetIds(transactions), [transactions]);
   const availableAssetsForTransaction = useMemo(
-    () => assets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
-    [assets, checkedInAssetIds]
+    () => visibleAssets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
+    [visibleAssets, checkedInAssetIds]
   );
   const editingTransactionAssetIds = new Set(
     (editingTransaction ? getTransactionAssetIds(editingTransaction) : []).map(String)
   );
-  const editingTransactionAssets = assets.filter(asset => editingTransactionAssetIds.has(String(asset.id)));
+  const editingTransactionAssets = visibleAssets.filter(asset => editingTransactionAssetIds.has(String(asset.id)));
   const getTransactionModalAssets = candidateAssets => [
     ...candidateAssets,
     ...editingTransactionAssets.filter(asset =>
@@ -2678,7 +3112,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         <nav className={`flex-1 py-6 space-y-2 overflow-y-auto custom-scrollbar ${isSidebarCompact ? 'px-3' : 'px-4'}`}>
           <NavItem compact={isSidebarCompact} theme={theme} icon={<LayoutDashboard size={20} />} label="Dashboard" isActive={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
           <NavItem compact={isSidebarCompact} theme={theme} icon={<Database size={20} />} label="Asset Record" isActive={activeTab === 'assets'} onClick={() => { setActiveTab('assets'); setIsSidebarOpen(false); }} />
-          <NavItem compact={isSidebarCompact} theme={theme} icon={<ArrowRightLeft size={20} />} label="Transactions" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<ArrowRightLeft size={20} />} label="Pengurusan Surat Gadaian (SAG)" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
           <div>
             <button
               type="button"
@@ -2805,7 +3239,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               <Menu size={22} />
             </button>
             <h2 className="min-w-0 text-base sm:text-xl md:text-2xl font-bold text-slate-800 capitalize tracking-tight truncate flex items-center">
-              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Transaction Ledger' : 'Executive Dashboard'}
+              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : 'Executive Dashboard'}
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1 sm:gap-2 md:gap-4">
@@ -3517,7 +3951,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               {/* KPI Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
                 <StatCard title="Total Capital (Loan)" value={formatRM(totalCapital)} icon={<Wallet size={24} />} trend="Aktif" color="emerald" />
-                <StatCard title="Total Net Profit" value={formatRM(totalProfit)} icon={<TrendingUp size={24} />} trend="+8.2%" color="amber" />
+                <StatCard title="Lebihan Tunai Direkod (bukan untung)" value={formatRM(totalProfit)} icon={<TrendingUp size={24} />} trend="Pembiayaan tetap perlu dibayar" color="amber" />
                 <StatCard title="Emas Ar-Rahnu (EDR)" value={`${edrBalance}g`} icon={<Clock size={24} />} trend={`${activeTickets} Surat Aktif`} color="blue" />
                 <StatCard
                   title="Emas Di Tangan (EDT)"
@@ -3652,7 +4086,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   ) : (
                     <div className="space-y-2">
                       {maturityCalendar.entries.map(tx => {
-                        const isSettled = tx.status === 'Selesai' || tx.status === 'Ditebus';
+                        const isSettled = ['Selesai', 'Ditebus', 'Dilelong'].includes(tx.status);
                         const statusLabel = isSettled
                           ? tx.status
                           : tx.daysRemaining < 0
@@ -3665,7 +4099,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             <div className="min-w-0">
                               <p className="text-sm font-bold text-slate-800">Surat #{tx.refNo} · {tx.institution}</p>
                               <p className="maturity-alert-detail text-xs text-slate-500">
-                                Matang {new Date(`${tx.redemptionDate}T00:00:00`).toLocaleDateString('ms-MY', { day: 'numeric', month: 'long', year: 'numeric' })} · {formatRM(Number(tx.redemption) || 0)}
+                                Matang {new Date(`${tx.redemptionDate}T00:00:00`).toLocaleDateString('ms-MY', { day: 'numeric', month: 'long', year: 'numeric' })} · {formatRM(getCurrentRedemption(tx))}
                               </p>
                             </div>
                             <div className="flex items-center justify-between sm:justify-end gap-3">
@@ -3692,7 +4126,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
                 <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
                   <h3 className="text-base font-bold text-slate-800 mb-6 flex items-center">
-                    <TrendingUp className="mr-2 text-emerald-500" size={20} /> Untung direkod mengikut tarikh
+                    <TrendingUp className="mr-2 text-emerald-500" size={20} /> Lebihan tunai direkod mengikut tarikh (bukan untung)
                   </h3>
                   <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
@@ -3821,7 +4255,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
               <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
                 <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                  <ArrowRightLeft className="mr-2 text-emerald-600" size={20} /> Transaction Ledger
+                  <ArrowRightLeft className="mr-2 text-emerald-600" size={20} /> Pengurusan Surat Gadaian (SAG)
                 </h3>
                 <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                   <label className="flex flex-1 sm:flex-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-600">
@@ -3859,7 +4293,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     onClick={() => { setEditingTransaction(null); setIsModalOpen(true); }}
                     className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm"
                   >
-                    <Plus size={18} className="mr-2" /> New Entry
+                    <Plus size={18} className="mr-2" /> Tambah Surat
                   </button>
                 </div>
               </div>
@@ -3869,25 +4303,35 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-sm font-semibold uppercase tracking-wider">
-                        <th className="p-4">Date &amp; time (MYT)</th>
-                        <th className="p-4">Jenis Pajak</th>
-                        <th className="p-4">Ref No.</th>
-                        <th className="p-4">Asset ID</th>
-                        <th className="p-4 text-right">Jumlah Nilai Marhun (RM)</th>
-                        <th className="p-4">Tarikh Tebus</th>
-                        <th className="p-4">Institution</th>
-                        <th className="p-4 text-right">Loan (RM)</th>
-                        <th className="p-4 text-right">Redeem (RM)</th>
-                        <th className="p-4 text-right">Profit (RM)</th>
+                        <th className="p-4">Tarikh &amp; Masa (MYT)</th>
+                        <th className="p-4">Jenis Pajakan</th>
+                        <th className="p-4">No. Rujukan</th>
+                        <th className="p-4">ID Aset</th>
+                        <th className="p-4 text-right">Berat Emas (g)</th>
+                        <th className="p-4">Ketulenan</th>
+                        <th className="p-4 text-right">Harga Taksiran (RM/g)</th>
+                        <th className="p-4 text-right">Nilai Marhun (RM)</th>
+                        <th className="p-4 text-right">Kadar Pembiayaan (%)</th>
+                        <th className="p-4">Kadar Caj / Asas</th>
+                        <th className="p-4">Tarikh Matang</th>
+                        <th className="p-4">Institusi</th>
+                        <th className="p-4 text-right">Baki Pembiayaan (RM)</th>
+                        <th className="p-4 text-right">Jumlah Tebus (RM)</th>
+                        <th className="p-4 text-right">Lebihan Tunai (bukan untung) (RM)</th>
                         <th className="p-4 text-center">Status</th>
-                        <th className="p-4 text-center">Actions</th>
+                        <th className="p-4">AI Indicator</th>
+                        <th className="p-4 text-center">Tindakan</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {sortedTransactions.map((tx) => {
                         const linkedAssetIds = tx.selectedAssetIds || (tx.selectedAssetId ? [tx.selectedAssetId] : []);
                         const linkedAssets = linkedAssetIds.map(assetId =>
-                          assets.find(asset => String(asset.id) === String(assetId))
+                          visibleAssets.find(asset => String(asset.id) === String(assetId))
+                        );
+                        const purity = tx.purity || getPurityFromAssets(linkedAssets.filter(Boolean));
+                        const aiIndicator = sagAiIndicators.find(item =>
+                          String(item.transaction.id) === String(tx.id)
                         );
                         return (
                         <tr key={tx.id} className="hover:bg-slate-50/50 transition-colors group">
@@ -3901,6 +4345,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 getTransactionStatus(tx) === 'Pajakan Asal' ? 'bg-emerald-100 text-emerald-700' :
                                 getTransactionStatus(tx) === 'Salin' ? 'bg-amber-100 text-amber-700' :
                                 getTransactionStatus(tx) === 'OL' ? 'bg-blue-100 text-blue-700' :
+                                getTransactionStatus(tx) === 'Lelong' ? 'bg-rose-100 text-rose-700' :
+                                getTransactionStatus(tx) === 'US' || getTransactionStatus(tx) === 'Pusing' ? 'bg-cyan-100 text-cyan-700' :
+                                getTransactionStatus(tx) === 'TS' || getTransactionStatus(tx) === 'TKS' ? 'bg-slate-200 text-slate-700' :
                                 getTransactionStatus(tx).startsWith('Tebus') ? 'bg-slate-200 text-slate-700' :
                                   'bg-slate-100 text-slate-600'
                               }`}>
@@ -3925,8 +4372,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               </div>
                             ) : <span className="text-slate-300">-</span>}
                           </td>
+                          <td className="p-4 text-right text-slate-600">
+                            {getCurrentPledgedWeight(tx)}g
+                            {getLatestPartialRedemption(tx) && <span className="ml-1 text-xs text-amber-700">baki</span>}
+                          </td>
+                          <td className="p-4 text-slate-600">{purity || '-'}</td>
+                          <td className="p-4 text-right text-slate-600">{formatRM(Number(tx.marhunPrice) || 0)}/g</td>
                           <td className="p-4 text-right font-semibold text-amber-700">
                             {formatRM(getTransactionMarhunValue(tx))}
+                          </td>
+                          <td className="p-4 text-right text-slate-600">{Number(tx.margin) || 0}%</td>
+                          <td className="p-4 text-slate-600">
+                            {tx.feeRate !== undefined || tx.feeBasis
+                              ? `${(Number(tx.feeRate) || 0).toFixed(2)}% / bulan · ${getFeeBasisLabel(tx.feeBasis) || 'Asas belum dipilih'}`
+                              : '-'}
                           </td>
                           <td className="p-4">
                             {!tx.type.includes('Tebus') ? (
@@ -3953,8 +4412,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             ) : <span className="text-slate-300">-</span>}
                           </td>
                           <td className="p-4 text-slate-600">{tx.institution}</td>
-                          <td className="p-4 text-right font-semibold text-slate-800">{formatRM(tx.loan)}</td>
-                          <td className="p-4 text-right text-slate-500">{formatRM(tx.redemption)}</td>
+                          <td className="p-4 text-right font-semibold text-slate-800">{formatRM(getCurrentPrincipal(tx))}</td>
+                          <td className="p-4 text-right text-slate-500">{formatRM(getCurrentRedemption(tx))}</td>
                           <td className="p-4 text-right">
                             <span className={`font-bold ${tx.profit > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
                               {tx.profit > 0 ? `+${formatRM(tx.profit)}` : '-'}
@@ -3969,17 +4428,61 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                   ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' 
                                   : tx.status === 'Ditebus'
                                   ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
+                                  : tx.status === 'Dilelong'
+                                  ? 'bg-rose-100 text-rose-700'
                                   : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
                               }`}
+                              disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
                             >
                               {tx.status === 'Selesai' ? (
                                 <><span>✓</span><span>Selesai</span></>
                               ) : tx.status === 'Ditebus' ? (
                                 <><span>✓</span><span>Ditebus</span></>
+                              ) : tx.status === 'Dilelong' ? (
+                                <><span>!</span><span>Dilelong</span></>
                               ) : (
                                 <><span>●</span><span>Aktif</span></>
                               )}
                             </button>
+                          </td>
+                          <td className="p-4 whitespace-normal min-w-64">
+                            {aiIndicator ? (
+                              <div
+                                className="space-y-1 text-xs"
+                                title={`Nilai marhun semasa anggaran: ${aiIndicator.currentMarhunValue === null ? 'belum tersedia' : formatRM(aiIndicator.currentMarhunValue)}. Nilai asas surat dikira daripada jumlah pembiayaan ÷ margin: ${aiIndicator.impliedLetterValue === null ? 'belum tersedia' : formatRM(aiIndicator.impliedLetterValue)}.`}
+                              >
+                                <p className={`font-bold ${
+                                  aiIndicator.presumption === 'Potensi overlap'
+                                    ? 'text-emerald-700'
+                                    : aiIndicator.presumption === 'Petunjuk shortfall'
+                                      ? 'text-rose-700'
+                                      : 'text-slate-600'
+                                }`}>
+                                  Anggaran OL sebelum fi baharu: {aiIndicator.presumption}
+                                </p>
+                                <p className="text-slate-600">
+                                  Ramalan: {aiIndicator.prediction || 'Belum tersedia (perlukan 7 snapshot harga)'}
+                                </p>
+                                <p className="font-semibold text-slate-700">
+                                  AI Score: {aiIndicator.readinessScore === null
+                                    ? 'Belum dikira · rekod tunai'
+                                    : `${aiIndicator.readinessScore}/100 · ${aiIndicator.readinessScore >= 80
+                                      ? 'Bersedia'
+                                      : aiIndicator.readinessScore >= 60
+                                        ? 'Perlu semakan'
+                                        : 'Perlu perhatian'}`}
+                                </p>
+                                {aiIndicator.marhunValueMismatch && (
+                                  <p className="font-semibold text-amber-700">Semak nilai marhun berbanding pembiayaan ÷ margin.</p>
+                                )}
+                              </div>
+                            ) : (
+                              <span className="text-xs text-slate-400">
+                                {tx.status === 'Selesai' || tx.status === 'Ditebus' || tx.status === 'Dilelong' || tx.type.includes('Tebus')
+                                  ? 'Surat selesai / ditebus'
+                                  : 'Tidak dinilai'}
+                              </span>
+                            )}
                           </td>
                           <td className="p-4 text-center space-x-1">
                             <button
@@ -3991,9 +4494,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <Pencil size={18} />
                             </button>
                             <button
+                              onClick={() => handleOpenCorrection(tx)}
+                              className="text-slate-400 hover:text-amber-600 transition-colors p-2 rounded-lg hover:bg-amber-50"
+                              title={`Rekod tindakan pembetulan (${getCorrectionEvents(tx).length})`}
+                              aria-label={`Buka rekod tindakan pembetulan ${tx.refNo}`}
+                            >
+                              <Settings2 size={18} />
+                            </button>
+                            <button
                               onClick={() => handleToggleStatus(tx.id)}
+                              disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
                               className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50"
-                              title={tx.status === 'Aktif' ? 'Tanda sebagai Selesai' : 'Tanda sebagai Aktif'}
+                              title={['Ditebus', 'Dilelong'].includes(tx.status)
+                                ? 'Status terminal hanya boleh diubah melalui rekod pembetulan'
+                                : tx.status === 'Aktif' ? 'Tanda sebagai Selesai' : 'Tanda sebagai Aktif'}
                             >
                               <CheckCircle2 size={18} className={tx.status === 'Selesai' || tx.status === 'Ditebus' ? 'text-emerald-600' : ''} />
                             </button>
@@ -4010,8 +4524,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       })}
                       {filteredTransactions.length === 0 && (
                         <tr>
-                          <td colSpan={12} className="p-8 text-center text-slate-400">
-                            {transactions.length === 0
+                          <td colSpan={18} className="p-8 text-center text-slate-400">
+                            {visibleTransactions.length === 0
                               ? 'No transactions found. Add a new entry to get started.'
                               : `Tiada transaksi untuk jenis "${transactionStatusFilter}".`}
                           </td>
@@ -4048,7 +4562,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-sm font-semibold uppercase tracking-wider">
                         <th className="p-4">Asset ID</th>
-                        <th className="p-4">Date</th>
+                        <th className="p-4">Date &amp; Time (MYT)</th>
                         <th className="p-4">Item Type</th>
                         <th className="p-4">Supplier</th>
                         <th className="p-4">Purity</th>
@@ -4059,7 +4573,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {assets.map((asset) => (
+                      {visibleAssets.map((asset) => (
                         <tr key={asset.id} className="hover:bg-slate-50/50 transition-colors group">
                           <td className="p-4">
                             <span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200/90 px-2.5 py-1 rounded-md shadow-xs inline-flex items-center space-x-1.5">
@@ -4067,16 +4581,25 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
                             </span>
                           </td>
-                          <td className="p-4 text-slate-600 font-medium">{asset.date}</td>
+                          <td className="p-4 text-slate-600 font-medium">{formatTransactionDateTime(asset.date)}</td>
                           <td className="p-4 font-semibold text-slate-700">{asset.type}</td>
                           <td className="p-4 text-slate-600">{asset.supplier}</td>
                           <td className="p-4 text-slate-600">{asset.purity}</td>
                           <td className="p-4 text-right font-bold text-slate-800">{asset.weight}g</td>
                           <td className="p-4 text-right text-slate-600">{formatRM(asset.price)}</td>
                           <td className="p-4 text-center">
-                            <span className={`px-3 py-1 text-xs font-bold rounded-full ${asset.status === 'EDT' ? 'bg-emerald-100 text-emerald-700' : 'bg-blue-100 text-blue-700'
+                              <span className={`px-3 py-1 text-xs font-bold rounded-full ${
+                                asset.status === 'EDT'
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : asset.status === 'Dilelong'
+                                    ? 'bg-rose-100 text-rose-700'
+                                    : 'bg-blue-100 text-blue-700'
                               }`}>
-                              {asset.status === 'EDT' ? 'EDT · Available' : 'EDR · Dalam Ar-Rahnu'}
+                                {asset.status === 'EDT'
+                                  ? 'EDT · Tersedia'
+                                  : asset.status === 'Dilelong'
+                                    ? 'Dilelong'
+                                    : 'EDR · Dalam Ar-Rahnu'}
                             </span>
                           </td>
                           <td className="p-4 text-center space-x-1">
@@ -4104,7 +4627,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           </td>
                         </tr>
                       ))}
-                      {assets.length === 0 && (
+                      {visibleAssets.length === 0 && (
                         <tr>
                           <td colSpan="9" className="p-8 text-center text-slate-400">No assets found. Add a new gold bar or jewelry to track.</td>
                         </tr>
@@ -4157,7 +4680,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Jumlah Pembekal</p>
-                    <p className="text-2xl font-bold text-slate-800 mt-1">{suppliers.length}</p>
+                    <p className="text-2xl font-bold text-slate-800 mt-1">{visibleSuppliers.length}</p>
                   </div>
                   <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center"><Store size={20} /></div>
                 </div>
@@ -4232,7 +4755,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                   <button
                     onClick={() => handleRefresh()}
-                    disabled={isRefreshing || institutions.length === 0}
+                    disabled={isRefreshing || visibleInstitutions.length === 0}
                     className="flex-1 sm:flex-none justify-center bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-3.5 py-2.5 rounded-lg font-semibold flex items-center transition-colors text-xs shadow-sm"
                     title="Segar semula anggaran kadar untuk semua institusi"
                   >
@@ -4263,7 +4786,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Institusi Berdaftar</p>
-                    <p className="text-2xl font-bold text-slate-800 mt-1">{institutions.length} Koperasi/Pajak</p>
+                    <p className="text-2xl font-bold text-slate-800 mt-1">{visibleInstitutions.length} Koperasi/Pajak</p>
                   </div>
                   <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
                     <Building2 size={20} />
@@ -4273,7 +4796,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Margin Tertinggi</p>
                     <p className="text-2xl font-bold text-emerald-700 mt-1">
-                      {institutions.length > 0 ? Math.max(...institutions.map(i => i.maxMargin)) : 0}%
+                      {visibleInstitutions.length > 0 ? Math.max(...visibleInstitutions.map(i => i.maxMargin)) : 0}%
                     </p>
                     <p className="text-xs text-slate-500">Sesuai Over-Lap (OL)</p>
                   </div>
@@ -4285,7 +4808,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Marhun Tertinggi</p>
                     <p className="text-2xl font-bold text-amber-600 mt-1">
-                      RM {institutions.length > 0 ? Math.max(...institutions.map(i => i.marhunRate)).toFixed(2) : '0.00'}
+                      RM {visibleInstitutions.length > 0 ? Math.max(...visibleInstitutions.map(i => i.marhunRate)).toFixed(2) : '0.00'}
                     </p>
                     <p className="text-xs text-slate-500">Sesuai Salin / Parking</p>
                   </div>
@@ -4297,7 +4820,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Purata Marhun Semasa</p>
                     <p className="text-2xl font-bold text-slate-800 mt-1">
-                      RM {institutions.length > 0 ? (institutions.reduce((s, i) => s + i.marhunRate, 0) / institutions.length).toFixed(2) : '0.00'}
+                      RM {visibleInstitutions.length > 0 ? (visibleInstitutions.reduce((sum, institution) => sum + institution.marhunRate, 0) / visibleInstitutions.length).toFixed(2) : '0.00'}
                     </p>
                     <p className="text-xs text-slate-500">Benchmark pasaran Bangi</p>
                   </div>
@@ -4324,7 +4847,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {institutions.map((inst) => {
+                      {visibleInstitutions.map((inst) => {
                         const is80 = inst.maxMargin >= 80;
                         const is70 = inst.maxMargin === 70;
                         return (
@@ -4417,7 +4940,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           </tr>
                         );
                       })}
-                      {institutions.length === 0 && (
+                      {visibleInstitutions.length === 0 && (
                         <tr>
                           <td colSpan="8" className="p-8 text-center text-slate-400">Tiada institusi didaftarkan. Sila klik "Reset Bangi" atau "Tambah Institusi".</td>
                         </tr>
@@ -4491,6 +5014,87 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 </div>
               </div>
 
+              <section className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm sm:p-6">
+                <div className="mb-4">
+                  <h3 className="text-lg font-bold text-slate-800">AI Presumption, AI Predictive &amp; AI Score Surat Gadaian</h3>
+                  <p className="mt-1 text-sm leading-relaxed text-slate-500">
+                    Andaian membandingkan nilai semasa anggaran (berat × kadar institusi tersimpan) dengan nilai asas surat (jumlah pembiayaan ÷ margin).
+                    Ramalan menggunakan trend linear harga spot 12 minggu, sekurang-kurangnya 7 snapshot harian, dan andaian spread institusi kekal.
+                    Ia tidak meramal caj, tempoh lanjutan atau lelong.
+                    AI Score mengukur kesiapsiagaan tebus (tempoh matang, tunai, nisbah EDT/EDR dan kelengkapan data), bukan ramalan harga.
+                    Ini indikator berasaskan formula, bukan model machine learning;
+                    ia tidak mengubah Status surat secara automatik. Pastikan kadar institusi sepadan dengan ketulenan emas dan sahkan kadar serta caj sebenar dengan institusi.
+                  </p>
+                </div>
+                {sagAiIndicators.length === 0 ? (
+                  <p className="rounded-xl bg-slate-50 p-5 text-center text-sm text-slate-500">
+                    Tiada surat aktif untuk dianalisis.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {sagAiIndicators.map(indicator => (
+                      <article key={indicator.transaction.id} className="rounded-xl border border-slate-200 p-4">
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <h4 className="font-bold text-slate-800">Surat {indicator.transaction.refNo || 'tanpa nombor'}</h4>
+                            <p className="text-xs text-slate-500">{indicator.transaction.institution || 'Institusi belum dipilih'}</p>
+                          </div>
+                          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700">
+                            {indicator.transaction.status || 'Aktif'}
+                          </span>
+                        </div>
+                        <dl className="mt-4 space-y-3 text-sm">
+                          <div>
+                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Presumption</dt>
+                            <dd className={`font-bold ${
+                              indicator.presumption === 'Potensi overlap'
+                                ? 'text-emerald-700'
+                                : indicator.presumption === 'Petunjuk shortfall'
+                                  ? 'text-rose-700'
+                                  : 'text-slate-700'
+                            }`}>{indicator.presumption}</dd>
+                            <dd className="text-xs text-slate-500">
+                              {indicator.currentMarhunValue === null || indicator.impliedLetterValue === null
+                                ? 'Lengkapkan nilai surat dan kadar institusi untuk perbandingan.'
+                                : `Anggaran semasa ${formatRM(indicator.currentMarhunValue)} · asas surat ${formatRM(indicator.impliedLetterValue)}`}
+                            </dd>
+                          </div>
+                          <div>
+                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Predictive · 12 minggu</dt>
+                            <dd className="font-semibold text-slate-700">
+                              {indicator.prediction || 'Belum tersedia — kumpulkan 7 snapshot harga harian.'}
+                            </dd>
+                            {indicator.projectedMarhunValue !== null && (
+                              <dd className="text-xs text-slate-500">
+                                Nilai marhun unjuran {formatRM(indicator.projectedMarhunValue)}
+                                {indicator.projectedFinancing !== null && ` · pembiayaan anggaran ${formatRM(indicator.projectedFinancing)}`}
+                              </dd>
+                            )}
+                          </div>
+                          <div>
+                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Score kesiapsiagaan</dt>
+                            <dd className="font-bold text-slate-800">
+                              {indicator.readinessScore === null
+                                ? 'Belum dikira — masukkan tunai tersedia'
+                                : `${indicator.readinessScore}/100 · ${indicator.readinessScore >= 80
+                                  ? 'Bersedia'
+                                  : indicator.readinessScore >= 60
+                                    ? 'Perlu semakan'
+                                    : 'Perlu perhatian'}`}
+                            </dd>
+                          </div>
+                        </dl>
+                        {indicator.marhunValueMismatch && (
+                          <p className="mt-3 rounded-lg bg-amber-50 p-2 text-xs font-semibold text-amber-800">
+                            Nilai marhun yang direkod berbeza daripada jumlah pembiayaan ÷ margin. Sila semak angka surat.
+                          </p>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </section>
+
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* AI Forecast Chart */}
                 <div className="min-w-0 lg:col-span-2 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
@@ -4534,28 +5138,18 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <p className="text-xs text-slate-500 mb-4">Rules &amp; Indicators · Pesanan untuk portfolio acik</p>
                   <div className="flex-1 space-y-4 overflow-y-auto pr-2 custom-scrollbar">
 
-                    {systemIndicators.length > 0 && (
-                      <button 
-                        onClick={handleFinishAllPendingTasks}
-                        className="w-full flex items-center justify-center space-x-2 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs sm:text-sm rounded-xl transition-all shadow-md hover:shadow-lg active:scale-95"
-                      >
-                        <CheckCircle2 size={16} />
-                        <span>Selesaikan Semua Tugasan Tertunggak</span>
-                      </button>
-                    )}
-
                     {systemIndicators.length === 0 && (
                       <div className="p-6 bg-gradient-to-br from-emerald-50 via-teal-50 to-emerald-100/50 border border-emerald-200 rounded-2xl text-center space-y-3 shadow-sm animate-in fade-in duration-300">
                         <div className="w-12 h-12 bg-emerald-600 text-white rounded-full flex items-center justify-center mx-auto shadow-md">
                           <CheckCircle2 size={26} />
                         </div>
-                        <h4 className="font-bold text-slate-800 text-base">Semua Tugasan Telah Selesai!</h4>
+                        <h4 className="font-bold text-slate-800 text-base">Tiada indikator tindakan aktif</h4>
                         <p className="text-xs text-slate-600 leading-relaxed max-w-sm mx-auto">
-                          Tahniah! Semua surat aktif telah dioptimumkan & nisbah simpanan (EDT: {edtBalance}g) selamat melebihi gadaian (EDR: {edrBalance}g). Tiada surat tertunggak.
+                          Tiada peraturan amaran yang dicetuskan sekarang. Semak tarikh matang dan syarat institusi secara berkala.
                         </p>
                         <div className="inline-flex items-center space-x-1.5 px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-full border border-emerald-300">
                           <ShieldCheck size={14} className="text-emerald-600" />
-                          <span>Portfolio 100% Optimum & Selamat</span>
+                          <span>Indikator sahaja; bukan pengesahan keselamatan portfolio</span>
                         </div>
                       </div>
                     )}
@@ -4576,8 +5170,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               onClick={() => handleResolveIndicator(indicator)}
                               className="text-[11px] font-semibold px-2.5 py-1 text-slate-500 hover:text-slate-800 hover:bg-white/70 rounded-md transition-colors flex items-center space-x-1"
                             >
-                              <Check size={13} />
-                              <span>{indicator.type === 'RATIO' ? 'Tambah aset' : indicator.type === 'TEBUS' ? 'Tandakan ditebus' : 'Tandakan selesai'}</span>
+                              {indicator.type === 'RATIO' ? <Plus size={13} /> : <ArrowRightLeft size={13} />}
+                              <span>{indicator.type === 'RATIO' ? 'Tambah aset' : 'Rekod tindakan'}</span>
                             </button>
                           </div>
                         </div>
@@ -4593,9 +5187,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
                     <div>
                       <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                        <ShieldCheck className="mr-2 text-emerald-600" size={20} /> Skor kesiapsiagaan tebus
+                        <ShieldCheck className="mr-2 text-emerald-600" size={20} /> AI Score kesiapsiagaan tebus
                       </h3>
-                      <p className="mt-1 text-sm text-slate-500">Skor setiap surat aktif berdasarkan data yang anda masukkan.</p>
+                      <p className="mt-1 text-sm text-slate-500">Skor heuristik bagi setiap surat aktif menggunakan data surat dan kewangan portfolio.</p>
                     </div>
                     <div className="rounded-xl bg-slate-50 px-4 py-3 text-center">
                       <p className="text-xs font-semibold uppercase text-slate-500">Purata portfolio</p>
@@ -4606,9 +5200,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </div>
 
                   <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900">
-                    Skor memberi 30 mata kepada tempoh matang, 35 kepada tunai berbanding jumlah tebus aktif,
-                    20 kepada nisbah EDT/EDR dan 15 kepada kelengkapan rekod. 80 ke atas bermaksud lebih bersedia,
-                    60–79 perlu disemak, bawah 60 perlu perhatian. Ini bukan skor kredit atau jaminan kelulusan.
+                    AI Score memberi 30 mata kepada tempoh matang, 35 kepada tunai berbanding jumlah tebus aktif,
+                    20 kepada nisbah EDT/EDR dan 15 kepada kelengkapan sembilan medan utama surat gadaian.
+                    80 ke atas bermaksud lebih bersedia, 60–79 perlu disemak, bawah 60 perlu perhatian.
+                    Ini skor berasaskan peraturan, bukan model machine learning, skor kredit atau jaminan kelulusan.
                   </div>
 
                   <div className="mt-4 space-y-3">
@@ -4628,7 +5223,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 : daysRemaining === 0
                                   ? 'Matang hari ini'
                                   : `Baki ${daysRemaining} hari`}
-                            {' · Jumlah tebus '}{formatRM(Number(transaction.redemption) || 0)}
+                            {' · Jumlah tebus '}{formatRM(getCurrentRedemption(transaction))}
                           </p>
                         </div>
                         <span className={`self-start sm:self-auto rounded-full px-3 py-1 text-sm font-bold ${
@@ -4737,7 +5332,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       <Scale className="mr-2 text-amber-500" size={20} /> Simulasi andaian overlap
                     </h3>
                     <p className="mt-1 max-w-3xl text-sm text-slate-500">
-                      Bandingkan pembiayaan baharu dengan jumlah tebus lama dan fi baharu. Lebihan tunai bukan keuntungan.
+                      Nilai semula emas yang sama, kira pembiayaan baharu dan selesaikan surat lama. Baki tunai ialah perbezaan pembiayaan selepas caj dan fi; ia bukan keuntungan.
                     </p>
                   </div>
                   <button
@@ -4755,17 +5350,23 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </p>
                 ) : (
                   <>
-                    <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                       <label className="text-sm font-semibold text-slate-700">
-                        Pilih surat aktif
+                        Surat lama aktif
                         <select
                           value={selectedScenarioTransaction?.id ?? ''}
                           onChange={event => {
                             const selected = activePortfolioTransactions.find(
                               transaction => String(transaction.id) === event.target.value
                             );
+                            const targetInstitution = visibleInstitutions.find(
+                              institution => institution.name === selected?.institution
+                            );
                             setScenarioTransactionId(event.target.value);
-                            setScenarioMargin(selected ? String(selected.margin ?? '') : '');
+                            setScenarioInstitutionName(selected?.institution || '');
+                            setScenarioMargin(String(targetInstitution?.maxMargin ?? selected?.margin ?? ''));
+                            setScenarioOldFees('');
+                            setScenarioNewFees('');
                           }}
                           className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500"
                         >
@@ -4777,19 +5378,57 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         </select>
                       </label>
                       <label className="text-sm font-semibold text-slate-700">
+                        Institusi pajakan baharu
+                        <select
+                          value={scenarioInstitutionName || selectedScenarioTransaction?.institution || ''}
+                          onChange={event => {
+                            const institution = visibleInstitutions.find(item => item.name === event.target.value);
+                            setScenarioInstitutionName(event.target.value);
+                            setScenarioMargin(String(institution?.maxMargin ?? ''));
+                            setScenarioNewFees('');
+                          }}
+                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500"
+                        >
+                          {visibleInstitutions.map(institution => (
+                            <option key={institution.id} value={institution.name}>{institution.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-semibold text-slate-700">Pembiayaan lama</span>
+                        <p className="mt-1 text-slate-600">{formatRM(scenarioOldPrincipal)}</p>
+                      </div>
+                      <label className="text-sm font-semibold text-slate-700">
+                        Caj tertunggak surat lama (RM)
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={scenarioOldFees === '' ? scenarioOldFeesDefault : scenarioOldFees}
+                          onChange={event => setScenarioOldFees(event.target.value)}
+                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
+                          placeholder="Masukkan caj sebenar"
+                        />
+                        <span className="mt-1 block text-xs font-normal text-slate-500">
+                          Anggaran awal daripada jumlah tebus lama − pembiayaan lama; sahkan dengan institusi.
+                        </span>
+                      </label>
+                      <label className="text-sm font-semibold text-slate-700">
                         Margin pembiayaan baharu (%)
                         <input
                           type="number"
                           min="0"
                           max="100"
                           step="0.1"
-                          value={scenarioMargin === '' ? selectedScenarioTransaction?.margin ?? '' : scenarioMargin}
+                          value={scenarioMargin === ''
+                            ? scenarioInstitution?.maxMargin ?? selectedScenarioTransaction?.margin ?? ''
+                            : scenarioMargin}
                           onChange={event => setScenarioMargin(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
                         />
                       </label>
                       <label className="text-sm font-semibold text-slate-700">
-                        Anggaran fi baharu (RM)
+                        Fi berkaitan baharu (RM)
                         <input
                           type="number"
                           min="0"
@@ -4797,8 +5436,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           value={scenarioNewFees}
                           onChange={event => setScenarioNewFees(event.target.value)}
                           className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                          placeholder="0"
+                          placeholder="Masukkan fi / caj berkaitan"
                         />
+                        <span className="mt-1 block text-xs font-normal text-slate-500">
+                          Masukkan caj yang dikenakan untuk pajakan baharu. Baki akhir tidak dikira sehingga nilai ini diisi.
+                        </span>
                       </label>
                     </div>
 
@@ -4814,6 +5456,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           <h4 className="font-bold text-slate-800">{scenario.label}</h4>
                           <dl className="mt-3 space-y-2 text-sm">
                             <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Nilai marhun baharu (emas sama)</dt>
+                              <dd className="font-semibold text-slate-800">{formatRM(scenario.newMarhunValue)}</dd>
+                            </div>
+                            <div className="flex justify-between gap-2">
                               <dt className="text-slate-500">Anggaran kadar marhun</dt>
                               <dd className="font-semibold text-slate-800">{formatRM(scenario.simulatedRate)}/g</dd>
                             </div>
@@ -4821,21 +5467,53 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <dt className="text-slate-500">Pembiayaan baharu</dt>
                               <dd className="font-semibold text-slate-800">{formatRM(scenario.newFinancing)}</dd>
                             </div>
+                            <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Tolak pembiayaan lama</dt>
+                              <dd className="font-semibold text-slate-800">−{formatRM(scenario.oldPrincipal)}</dd>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Tolak caj tertunggak lama</dt>
+                              <dd className="font-semibold text-slate-800">−{formatRM(scenario.oldFees)}</dd>
+                            </div>
                             <div className="flex justify-between gap-2 border-t border-slate-100 pt-2">
-                              <dt className="text-slate-500">Baki selepas tebus &amp; fi</dt>
-                              <dd className={`font-bold ${scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                                {formatRM(scenario.cashDifference)}
+                              <dt className="text-slate-500">Baki sebelum fi baharu</dt>
+                              <dd className="font-bold text-slate-700">
+                                {formatRM(scenario.cashDifferenceBeforeNewFees)}
+                              </dd>
+                            </div>
+                            <div className="flex justify-between gap-2">
+                              <dt className="text-slate-500">Tolak fi berkaitan baharu</dt>
+                              <dd className="font-semibold text-slate-800">
+                                {scenario.newFees === null ? 'Belum dimasukkan' : `−${formatRM(scenario.newFees)}`}
+                              </dd>
+                            </div>
+                            <div className="flex justify-between gap-2 border-t border-slate-100 pt-2">
+                              <dt className="text-slate-500">Baki tunai akhir</dt>
+                              <dd className={`font-bold ${
+                                scenario.cashDifference === null
+                                  ? 'text-amber-700'
+                                  : scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                              }`}>
+                                {scenario.cashDifference === null
+                                  ? 'Fi baharu diperlukan'
+                                  : formatRM(scenario.cashDifference)}
                               </dd>
                             </div>
                           </dl>
-                          <p className={`mt-3 text-xs font-semibold ${scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
-                            {scenario.cashDifference >= 0 ? 'Lebihan tunai, bukan untung' : 'Perlu tambah tunai'}
+                          <p className={`mt-3 text-xs font-semibold ${
+                            scenario.cashDifference === null
+                              ? 'text-amber-700'
+                              : scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'
+                          }`}>
+                            {scenario.cashDifference === null
+                              ? 'Masukkan fi berkaitan untuk baki akhir'
+                              : scenario.cashDifference >= 0 ? 'Lebihan tunai, bukan untung' : 'Perlu tambah tunai'}
                           </p>
                         </div>
                       ))}
                     </div>
                     <p className="mt-4 text-xs leading-relaxed text-slate-500">
-                      Formula: berat × kadar marhun anggaran × margin − jumlah tebus lama − fi baharu. Kadar anggaran menggunakan spread institusi tersimpan; semak harga, margin, caj dan syarat sebenar sebelum membuat keputusan.
+                      Formula: baki tunai = pembiayaan baharu − pembiayaan lama − caj tertunggak surat lama − fi berkaitan baharu. Pembiayaan baharu = nilai marhun emas yang sama × margin institusi baharu. Harga turun/kekal/naik ialah simulasi ±10%, bukan ramalan atau kelulusan; sahkan nilai semasa, caj penebusan dan syarat institusi.
                     </p>
                   </>
                 )}
@@ -4849,15 +5527,28 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {/* NEW TRANSACTION MODAL */}
       {isModalOpen && (
         <TransactionModal
-          institutions={institutions}
+          institutions={visibleInstitutions}
           availableAssets={getTransactionModalAssets(availableAssetsForTransaction)}
-          pledgedAssets={getTransactionModalAssets(assets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id))))}
+          pledgedAssets={getTransactionModalAssets(visibleAssets.filter(asset => asset.status === 'Dalam Ar-Rahnu' && checkedInAssetIds.has(String(asset.id))))}
           initialData={editingTransaction}
           onClose={() => { setIsModalOpen(false); setEditingTransaction(null); }}
           onSave={editingTransaction ? handleSaveTransaction : handleAddTransaction}
           currentGoldPrice={currentGoldPrice}
           isRefreshing={isRefreshing}
           onRefresh={handleRefresh}
+        />
+      )}
+
+      {isCorrectionModalOpen && correctionTransaction && (
+        <CorrectionActionModal
+          transaction={correctionTransaction}
+          transactions={visibleTransactions}
+          initialAction={initialCorrectionAction}
+          onClose={() => {
+            setIsCorrectionModalOpen(false);
+            setCorrectionTransaction(null);
+          }}
+          onSave={handleSaveCorrection}
         />
       )}
 
@@ -5289,25 +5980,269 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
   );
 }
 
+function CorrectionActionModal({ transaction, transactions, initialAction, onClose, onSave }) {
+  const [actionType, setActionType] = useState(initialAction);
+  const [formData, setFormData] = useState({
+    date: getMalaysiaDateTimeInputValue(new Date().toISOString()),
+    totalPaid: '',
+    feePaid: '',
+    releasedWeight: '',
+    remainingWeight: '',
+    remainingPrincipal: '',
+    remainingRedemption: '',
+    paidThroughDate: '',
+    linkedTransactionId: '',
+    relatedFees: '',
+    sameGoldConfirmed: false,
+    institutionConfirmed: false,
+    auctionProceeds: '',
+    remarks: ''
+  });
+  const isTerminal = ['Ditebus', 'Dilelong', 'Selesai'].includes(transaction.status);
+  const eligibleRolloverTransactions = transactions.filter(candidate =>
+    String(candidate.id) !== String(transaction.id) &&
+    (candidate.status === 'Aktif' || !candidate.status) &&
+    !String(candidate.type || '').toLowerCase().includes('tebus') &&
+    getMatchingAssetLinkStatus(transaction, candidate) !== false
+  );
+  const selectedRolloverTransaction = eligibleRolloverTransactions.find(candidate =>
+    String(candidate.id) === String(formData.linkedTransactionId)
+  );
+  const pusingCashPreview = selectedRolloverTransaction &&
+    formData.totalPaid !== '' &&
+    formData.relatedFees !== ''
+    ? calculateOverlapCashBalance(
+      getCurrentPrincipal(selectedRolloverTransaction),
+      formData.totalPaid,
+      0,
+      formData.relatedFees
+    )
+    : null;
+  const history = getCorrectionEvents(transaction).slice().reverse();
+
+  const handleChange = (event) => {
+    const { name, value, type, checked } = event.target;
+    setFormData(previous => ({ ...previous, [name]: type === 'checkbox' ? checked : value }));
+  };
+
+  const handleSubmit = (event) => {
+    event.preventDefault();
+    onSave({ ...formData, type: actionType });
+  };
+
+  const renderNumberField = (name, label, required = true) => (
+    <label className="space-y-1">
+      <span className="block text-sm font-semibold text-slate-700">{label}</span>
+      <input
+        type="number"
+        min="0"
+        step="0.01"
+        name={name}
+        value={formData[name]}
+        onChange={handleChange}
+        required={required}
+        className="w-full rounded-lg border border-slate-300 p-2.5 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500"
+      />
+    </label>
+  );
+
+  const formatEventAmount = (value) =>
+    value === undefined || value === null || value === '' ? null : formatRM(Number(value) || 0);
+
+  return (
+    <div className="fixed inset-0 z-[58] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm sm:p-4">
+      <div className="max-h-[95dvh] w-full max-w-2xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-100 bg-white p-4 sm:p-6">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">Rekod tindakan SAG</h2>
+            <p className="text-sm text-slate-500">Surat #{transaction.refNo} · {transaction.institution}</p>
+          </div>
+          <button type="button" onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700" aria-label="Tutup">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="space-y-5 p-4 sm:p-6">
+          {history.length > 0 && (
+            <section className="space-y-3">
+              <h3 className="font-bold text-slate-800">Sejarah tindakan</h3>
+              <div className="space-y-2">
+                {history.map(event => (
+                  <article key={event.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <strong className="text-sm text-slate-800">{event.type}</strong>
+                      <span className="text-xs text-slate-500">{formatTransactionDateTime(event.date)}</span>
+                    </div>
+                    <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+                      {event.totalPaid !== undefined && (
+                        <span>{event.type === 'Pusing' ? 'Penyelesaian surat lama' : 'Bayaran'}: {formatEventAmount(event.totalPaid)}</span>
+                      )}
+                      {event.feePaid !== undefined && <span>Caj dibayar: {formatEventAmount(event.feePaid)}</span>}
+                      {event.relatedFees !== undefined && <span>Fi berkaitan: {formatEventAmount(event.relatedFees)}</span>}
+                      {event.newFinancing !== undefined && event.newFinancing !== null && <span>Pembiayaan baharu: {formatEventAmount(event.newFinancing)}</span>}
+                      {event.cashDifference !== undefined && event.cashDifference !== null && (
+                        <span>Baki tunai bukan untung: {formatEventAmount(event.cashDifference)}</span>
+                      )}
+                      {event.releasedWeight !== undefined && <span>Berat dilepaskan: {Number(event.releasedWeight) || 0}g</span>}
+                      {event.remainingWeight !== undefined && <span>Baki berat: {Number(event.remainingWeight) || 0}g</span>}
+                      {event.remainingPrincipal !== undefined && <span>Baki prinsipal: {formatEventAmount(event.remainingPrincipal)}</span>}
+                      {event.remainingRedemption !== undefined && <span>Baki tebus: {formatEventAmount(event.remainingRedemption)}</span>}
+                      {event.paidThroughDate && <span>Dibayar hingga: {event.paidThroughDate}</span>}
+                      {event.linkedRefNo && <span>SAG baharu: #{event.linkedRefNo}</span>}
+                      {event.auctionProceeds !== undefined && event.auctionProceeds !== '' && <span>Hasil lelong: {formatEventAmount(event.auctionProceeds)}</span>}
+                      {event.institutionConfirmed && <span>Pengesahan institusi direkodkan</span>}
+                      {event.sameGoldConfirmed && <span>Emas sama disahkan</span>}
+                    </div>
+                    {event.remarks && <p className="mt-2 text-xs text-slate-600">{event.remarks}</p>}
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {isTerminal ? (
+            <p className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+              Surat ini berstatus {transaction.status}. Sejarah boleh dilihat, tetapi tindakan baharu tidak boleh direkodkan.
+            </p>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <label className="space-y-1">
+                  <span className="block text-sm font-semibold text-slate-700">Jenis tindakan</span>
+                  <select value={actionType} onChange={event => setActionType(event.target.value)} className="w-full rounded-lg border border-slate-300 p-2.5">
+                    <option value="TS">TS · Tebus penuh</option>
+                    <option value="TKS">TKS · Tebus sebahagian</option>
+                    <option value="US">US · Bayar upah simpan</option>
+                    <option value="Pusing">Pusing · Pautkan SAG baharu</option>
+                    <option value="Lelong">Lelong · Selepas pengesahan institusi</option>
+                  </select>
+                </label>
+                <label className="space-y-1">
+                  <span className="block text-sm font-semibold text-slate-700">Tarikh &amp; masa tindakan</span>
+                  <input type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5" />
+                </label>
+              </div>
+
+              {actionType === 'TS' && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {renderNumberField('totalPaid', 'Jumlah bayaran sebenar (RM)')}
+                  {renderNumberField('feePaid', 'Caj sebenar dibayar (RM)')}
+                </div>
+              )}
+
+              {actionType === 'TKS' && (
+                <>
+                  <p className="rounded-lg bg-amber-50 p-3 text-xs leading-relaxed text-amber-800">
+                    Masukkan baki selepas transaksi seperti yang disahkan institusi. Tiada kiraan pro-rata dibuat dan inventori aset tidak akan diubah secara automatik.
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {renderNumberField('totalPaid', 'Jumlah bayaran sebenar (RM)')}
+                    {renderNumberField('releasedWeight', 'Berat dilepaskan (g)')}
+                    {renderNumberField('remainingWeight', 'Baki berat (g)')}
+                    {renderNumberField('remainingPrincipal', 'Baki prinsipal (RM)')}
+                    {renderNumberField('remainingRedemption', 'Baki jumlah tebus (RM)')}
+                  </div>
+                </>
+              )}
+
+              {actionType === 'US' && (
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {renderNumberField('feePaid', 'Upah simpan dibayar (RM)')}
+                  <label className="space-y-1">
+                    <span className="block text-sm font-semibold text-slate-700">Dibayar hingga</span>
+                    <input type="date" name="paidThroughDate" value={formData.paidThroughDate} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5" />
+                  </label>
+                </div>
+              )}
+
+              {actionType === 'Pusing' && (
+                <div className="space-y-4">
+                  <label className="block space-y-1">
+                    <span className="block text-sm font-semibold text-slate-700">SAG baharu yang telah direkodkan untuk emas yang sama</span>
+                    <select name="linkedTransactionId" value={formData.linkedTransactionId} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5">
+                      <option value="">Pilih SAG aktif</option>
+                      {eligibleRolloverTransactions.map(candidate => (
+                        <option key={candidate.id} value={candidate.id}>#{candidate.refNo} · {candidate.institution}</option>
+                      ))}
+                    </select>
+                    {eligibleRolloverTransactions.length === 0 && (
+                      <span className="block text-xs text-amber-700">Tiada SAG aktif yang boleh dipautkan. Rekodkan SAG baharu untuk emas sama dahulu.</span>
+                    )}
+                  </label>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {renderNumberField('totalPaid', 'Jumlah penyelesaian surat lama (pembiayaan + caj tertunggak) (RM)')}
+                    {renderNumberField('relatedFees', 'Fi berkaitan OL baharu (RM)')}
+                  </div>
+                  <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+                    <input type="checkbox" name="sameGoldConfirmed" checked={formData.sameGoldConfirmed} onChange={handleChange} required className="mt-1" />
+                    <span>Saya mengesahkan emas yang dinilai semula untuk SAG baharu ialah emas yang sama seperti surat lama.</span>
+                  </label>
+                  {selectedRolloverTransaction && (
+                    <p className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                      Anggaran baki tunai: pembiayaan baharu {formatRM(getCurrentPrincipal(selectedRolloverTransaction))} − penyelesaian lama {formatRM(Number(formData.totalPaid) || 0)} − fi OL {formatRM(Number(formData.relatedFees) || 0)} ={' '}
+                      <strong className={pusingCashPreview !== null && pusingCashPreview >= 0 ? 'text-emerald-700' : 'text-rose-700'}>
+                        {pusingCashPreview === null ? 'lengkapkan amaun di atas' : formatRM(pusingCashPreview)}
+                      </strong>
+                      <span className="mt-1 block text-xs text-slate-500">Anggaran sahaja; baki tunai bukan keuntungan dan perlu disahkan dengan institusi.</span>
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {actionType === 'Lelong' && (
+                <div className="space-y-4">
+                  <label className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                    <input type="checkbox" name="institutionConfirmed" checked={formData.institutionConfirmed} onChange={handleChange} required className="mt-1" />
+                    <span>Saya mengesahkan lelong telah disahkan oleh institusi. Status hanya akan dikemas kini selepas pengesahan ini.</span>
+                  </label>
+                  {renderNumberField('auctionProceeds', 'Hasil lelong direkod (RM)', false)}
+                </div>
+              )}
+
+              <label className="block space-y-1">
+                <span className="text-sm font-semibold text-slate-700">Catatan</span>
+                <textarea name="remarks" value={formData.remarks} onChange={handleChange} rows={2} className="w-full rounded-lg border border-slate-300 p-2.5" />
+              </label>
+
+              <div className="flex flex-col-reverse gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:justify-end">
+                <button type="button" onClick={onClose} className="rounded-lg px-5 py-2.5 font-semibold text-slate-600 hover:bg-slate-100">Batal</button>
+                <button type="submit" className="rounded-lg bg-emerald-600 px-5 py-2.5 font-semibold text-white hover:bg-emerald-700">Simpan tindakan</button>
+              </div>
+            </form>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TransactionModal({ institutions, availableAssets, pledgedAssets, initialData, onClose, onSave, currentGoldPrice, isRefreshing, onRefresh }) {
   const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
   const calculateLoan = (marhunValue, margin) =>
     (parseFloat(marhunValue) || 0) * ((parseFloat(margin) || 0) / 100);
-  const calculateProjectedProfit = (type, loan, redemption) =>
+  const calculateProjectedProfit = (type, loan, redemption, fee) =>
     type === 'Pajakan Asal' || type.includes('Tebus')
       ? 0
-      : (parseFloat(loan) || 0) - (parseFloat(redemption) || 0);
+      : (parseFloat(loan) || 0) - (parseFloat(redemption) || 0) - (parseFloat(fee) || 0);
 
-  const initialWeight = initialData?.weight ?? 10;
+  const transactionAssets = [...availableAssets, ...pledgedAssets];
+  const initialLinkedAssets = getTransactionAssetIds(initialData || {})
+    .map(assetId => transactionAssets.find(asset => String(asset.id) === String(assetId)))
+    .filter(Boolean);
+  const initialWeight = initialData?.weight ?? 0;
+  const initialPurity = initialData?.purity || getPurityFromAssets(initialLinkedAssets);
   const initialMarhunPrice = initialData?.marhunPrice ?? institutions?.[0]?.marhunRate ?? 0;
   const initialMargin = initialData?.margin ?? institutions?.[0]?.maxMargin ?? 0;
+  const initialFeeRate = initialData?.feeRate ?? 0;
+  const initialFeeTermMonths = initialData?.feeTermMonths ?? '';
+  const initialFeeBasis = initialData?.feeBasis || '';
   const initialType = initialData?.type || 'Pajakan Asal';
   const initialMarhunValue = initialData?.marhunValue ??
     calculateMarhunValue(initialWeight, initialMarhunPrice);
   const initialLoan = initialData?.loan ??
     calculateLoan(initialMarhunValue, initialMargin);
   const initialProfit = initialData?.profit ??
-    calculateProjectedProfit(initialType, initialLoan, initialData?.redemption ?? 0);
+    calculateProjectedProfit(initialType, initialLoan, initialData?.redemption ?? 0, initialData?.fee ?? 0);
   const hasLegacyDateWithoutTime = /^\d{4}-\d{2}-\d{2}$/.test(initialData?.date || '');
 
   const [formData, setFormData] = useState(() => ({
@@ -5317,8 +6252,12 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
     institution: initialData?.institution || institutions?.[0]?.name || '',
     refNo: initialData?.refNo || '',
     weight: initialWeight,
+    purity: initialPurity,
     marhunPrice: initialMarhunPrice,
     margin: initialMargin,
+    feeRate: initialFeeRate,
+    feeTermMonths: initialFeeTermMonths,
+    feeBasis: initialFeeBasis,
     marhunValue: roundMoney(initialMarhunValue),
     loan: roundMoney(initialLoan),
     profit: roundMoney(initialProfit),
@@ -5340,19 +6279,31 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
       ...data,
       marhunValue: roundMoney(marhunValue),
       loan: roundMoney(loan),
-      profit: roundMoney(calculateProjectedProfit(data.type, loan, data.redemption))
+      profit: roundMoney(calculateProjectedProfit(data.type, loan, data.redemption, data.fee))
     };
   };
   const calculatedMarhunValue = parseFloat(formData.marhunValue) || 0;
   const loanForSave = parseFloat(formData.loan) || 0;
   const profitForSave = parseFloat(formData.profit) || 0;
+  const feeBasisAmount = formData.feeBasis === 'nilaiMarhun'
+    ? calculatedMarhunValue
+    : formData.feeBasis === 'jumlahPembiayaan'
+      ? loanForSave
+      : 0;
+  const estimatedMonthlyStorageFee = roundMoney(
+    feeBasisAmount * ((parseFloat(formData.feeRate) || 0) / 100)
+  );
+  const feeTermMonths = parseFloat(formData.feeTermMonths) || 0;
+  const estimatedTotalStorageFee = roundMoney(estimatedMonthlyStorageFee * feeTermMonths);
+  const estimatedTotalRedemption = roundMoney(loanForSave + estimatedTotalStorageFee);
   const hasLoanInputsChanged = !initialData ||
     formData.type !== initialData.type ||
     (parseFloat(formData.weight) || 0) !== (parseFloat(initialData.weight) || 0) ||
     (parseFloat(formData.marhunPrice) || 0) !== (parseFloat(initialData.marhunPrice) || 0) ||
     (parseFloat(formData.margin) || 0) !== (parseFloat(initialData.margin) || 0) ||
     calculatedMarhunValue !== Number(initialMarhunValue) ||
-    loanForSave !== (Number(initialData?.loan) || 0);
+    loanForSave !== (Number(initialData?.loan) || 0) ||
+    (parseFloat(formData.fee) || 0) !== (Number(initialData?.fee) || 0);
   const redemptionForSave = formData.type === 'Pajakan Asal'
     ? initialData && !hasLoanInputsChanged
       ? Number(initialData.redemption) || 0
@@ -5369,7 +6320,6 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
     setFormData(prev => {
       const updated = { ...prev, [name]: value };
       if (name === 'type') {
-        updated.weight = 10;
         return recalculateFinancialFields(updated, true);
       }
 
@@ -5389,9 +6339,9 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
       if (name === 'marhunValue' || name === 'margin') {
         return recalculateFinancialFields(updated);
       }
-      if (name === 'loan' || name === 'redemption') {
+      if (name === 'loan' || name === 'redemption' || name === 'fee') {
         updated.profit = roundMoney(
-          calculateProjectedProfit(updated.type, updated.loan, updated.redemption)
+          calculateProjectedProfit(updated.type, updated.loan, updated.redemption, updated.fee)
         );
       }
       return updated;
@@ -5404,11 +6354,12 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
       ? selectedAssetIds.filter(selectedId => String(selectedId) !== String(assetId))
       : [...selectedAssetIds, assetId];
     setSelectedAssetIds(updatedIds);
-    const selectedWeight = assetCandidates
-      .filter(asset => updatedIds.map(String).includes(String(asset.id)))
+    const updatedAssets = assetCandidates
+      .filter(asset => updatedIds.map(String).includes(String(asset.id)));
+    const selectedWeight = updatedAssets
       .reduce((total, asset) => total + (parseFloat(asset.weight) || 0), 0);
     setFormData(prev => recalculateFinancialFields(
-      { ...prev, weight: selectedWeight || 10 },
+      { ...prev, weight: selectedWeight, purity: getPurityFromAssets(updatedAssets) },
       true
     ));
   };
@@ -5422,9 +6373,13 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
         : parseTransactionDateTime(formData.date).toISOString(),
       selectedAssetIds,
       weight: parseFloat(formData.weight) || 0,
+      purity: formData.purity,
       marhunPrice: parseFloat(formData.marhunPrice) || 0,
       marhunValue: roundMoney(calculatedMarhunValue),
       margin: parseFloat(formData.margin) || 0,
+      feeRate: parseFloat(formData.feeRate) || 0,
+      feeTermMonths,
+      feeBasis: formData.feeBasis,
       loan: roundMoney(loanForSave),
       fee: parseFloat(formData.fee) || 0,
       redemption: redemptionForSave,
@@ -5439,8 +6394,8 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
         <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
           <h2 className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
             {initialData
-              ? <><Pencil className="mr-2 text-emerald-600" size={20} /> Edit Ledger Entry</>
-              : <><Plus className="mr-2 text-emerald-600" size={20} /> Add Ledger Entry</>}
+              ? <><Pencil className="mr-2 text-emerald-600" size={20} /> Edit Surat Gadaian</>
+              : <><Plus className="mr-2 text-emerald-600" size={20} /> Tambah Surat Gadaian</>}
           </h2>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200">
             <X size={20} />
@@ -5451,18 +6406,23 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Status / Jenis Pajak</label>
+              <label className="text-sm font-semibold text-slate-700">Status / Jenis Pajakan</label>
               <select name="type" value={formData.type} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
                 <option value="Pajakan Asal">Pajakan Asal</option>
                 <option value="Salin / Parking (70%)">Salin</option>
                 <option value="OL / Pusing (80%)">OL</option>
                 <option value="Tebus (Cash)">Tebus Cash</option>
                 <option value="Tebus (EDT)">Tebus EDT</option>
+                <option value="Tebus Penuh (TS)">TS · Tebus Penuh</option>
+                <option value="Tebus Sebahagian (TKS)">TKS · Tebus Sebahagian</option>
+                <option value="Upah Simpan (US)">US · Upah Simpan</option>
+                <option value="Pusing">Pusing</option>
+                <option value="Lelong">Lelong</option>
               </select>
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="transaction-date" className="text-sm font-semibold text-slate-700">Date &amp; time (MYT)</label>
+              <label htmlFor="transaction-date" className="text-sm font-semibold text-slate-700">Tarikh &amp; Masa (MYT)</label>
               <input id="transaction-date" type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
               {hasLegacyDateWithoutTime && (
                 <p className="text-xs text-slate-500">Masa tidak direkod untuk rekod lama. Pilih masa yang betul jika mahu menyimpannya.</p>
@@ -5471,7 +6431,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
 
             {!formData.type.includes('Tebus') && (
               <div className="space-y-1">
-                <label htmlFor="redemption-date" className="text-sm font-semibold text-slate-700">Tarikh Tebus / Matang</label>
+                <label htmlFor="redemption-date" className="text-sm font-semibold text-slate-700">Tarikh Matang</label>
                 <input
                   id="redemption-date"
                   type="date"
@@ -5537,7 +6497,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             )}
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Institution</label>
+              <label className="text-sm font-semibold text-slate-700">Institusi</label>
               <select name="institution" value={formData.institution} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
                 {institutions.map(inst => (
                   <option key={inst.id} value={inst.name}>{inst.name}</option>
@@ -5546,8 +6506,32 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Reference No.</label>
-              <input type="text" name="refNo" value={formData.refNo} onChange={handleChange} placeholder="e.g. 1007-1008" required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              <label className="text-sm font-semibold text-slate-700">No. Surat Rujukan</label>
+              <input type="text" name="refNo" value={formData.refNo} onChange={handleChange} placeholder="cth. 1007-1008" required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-semibold text-slate-700">Ketulenan</label>
+              <select
+                name="purity"
+                value={formData.purity}
+                onChange={handleChange}
+                required={!formData.type.includes('Tebus')}
+                className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
+              >
+                <option value="">Pilih ketulenan</option>
+                {formData.purity && !['916', '999', '999.9', '950', '875', '833', '750', 'Campuran / Lain-lain'].includes(String(formData.purity)) && (
+                  <option value={formData.purity}>{formData.purity}</option>
+                )}
+                <option value="916">916</option>
+                <option value="999">999</option>
+                <option value="999.9">999.9</option>
+                <option value="950">950</option>
+                <option value="875">875</option>
+                <option value="833">833</option>
+                <option value="750">750</option>
+                <option value="Campuran / Lain-lain">Campuran / Lain-lain</option>
+              </select>
             </div>
 
             <div className="space-y-1 md:col-span-2">
@@ -5562,15 +6546,14 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
               />
             </div>
 
-            <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Gold Weight (g)</label>
-              <input type="number" step="0.01" name="weight" value={formData.weight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
-            </div>
-
-            <div className="flex space-x-4">
-              <div className="space-y-1 flex-1">
+            <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-4 items-end">
+              <div className="space-y-1">
+                <label className="text-sm font-semibold text-slate-700">Berat Emas (g)</label>
+                <input type="number" step="0.01" min="0" name="weight" value={formData.weight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
+              </div>
+              <div className="space-y-1">
                 <div className="flex justify-between items-center">
-                  <label className="text-sm font-semibold text-slate-700">Marhun (RM/g)</label>
+                  <label className="text-sm font-semibold text-slate-700">Harga Taksiran (RM/g)</label>
                   <button
                     type="button"
                     onClick={() => {
@@ -5591,27 +6574,99 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                     {isRefreshing ? 'Fetching...' : 'Live Refresh'}
                   </button>
                 </div>
-                <input type="number" step="0.01" name="marhunPrice" value={formData.marhunPrice} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" />
+                <input type="number" step="0.01" min="0" name="marhunPrice" value={formData.marhunPrice} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" />
               </div>
-              <div className="space-y-1 w-1/3">
-                <label className="text-sm font-semibold text-slate-700">Margin (%)</label>
-                <input type="number" name="margin" value={formData.margin} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50" />
+              <div className="space-y-1">
+                <label className="text-sm font-semibold text-slate-700">Kadar Pembiayaan (%)</label>
+                <input type="number" step="0.01" name="margin" value={formData.margin} onChange={handleChange} min="0" max="100" required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50" />
               </div>
             </div>
 
+            {!formData.type.includes('Tebus') && (
+              <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-4 gap-4">
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-700">Kadar Caj Simpanan (% sebulan)</label>
+                  <input
+                    type="number"
+                    name="feeRate"
+                    min="0"
+                    step="0.01"
+                    value={formData.feeRate}
+                    onChange={handleChange}
+                    required
+                    className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-700">Tempoh Pajakan (bulan)</label>
+                  <input
+                    type="number"
+                    name="feeTermMonths"
+                    min="1"
+                    step="1"
+                    value={formData.feeTermMonths}
+                    onChange={handleChange}
+                    required
+                    className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-700">Asas Kiraan Caj</label>
+                  <select
+                    name="feeBasis"
+                    value={formData.feeBasis}
+                    onChange={handleChange}
+                    required
+                    className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                  >
+                    <option value="">Pilih asas caj</option>
+                    <option value="nilaiMarhun">Nilai Marhun</option>
+                    <option value="jumlahPembiayaan">Jumlah Pembiayaan</option>
+                  </select>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-700">
+                    {formData.type.includes('OL') || formData.type.toLowerCase().includes('pusing')
+                      ? 'Fi berkaitan baharu sebenar (RM)'
+                      : 'Caj Simpanan Sebenar (RM)'}
+                  </label>
+                  <input
+                    type="number"
+                    name="fee"
+                    min="0"
+                    step="0.01"
+                    value={formData.fee}
+                    onChange={handleChange}
+                    required
+                    className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+                <p className="sm:col-span-3 text-xs text-slate-500">
+                  {formData.feeBasis
+                    ? `Anggaran upah simpan: ${formatRM(feeBasisAmount)} × ${(parseFloat(formData.feeRate) || 0).toFixed(2)}% × ${feeTermMonths || 0} bulan. Anggaran bulanan ${formatRM(estimatedMonthlyStorageFee)}, jumlah ${formatRM(estimatedTotalStorageFee)}, jumlah tebus anggaran ${formatRM(estimatedTotalRedemption)}. Untuk OL, masukkan jumlah fi berkaitan sebenar mengikut sebut harga institusi.`
+                    : 'Pilih asas caj mengikut terma Ar-Rahnu untuk melihat anggaran caj bulanan.'}
+                </p>
+              </div>
+            )}
+
             {formData.type !== 'Pajakan Asal' && (
               <div className="space-y-1 md:col-span-2">
-                <label className="text-sm font-semibold text-slate-700">Previous Redemption Cost (RM)</label>
-                <input type="number" step="0.01" name="redemption" value={formData.redemption} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all bg-amber-50" placeholder="Amount needed to redeem original pawn" />
+                <label className="text-sm font-semibold text-slate-700">Jumlah penyelesaian surat lama (RM)</label>
+                <input type="number" step="0.01" min="0" name="redemption" value={formData.redemption} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all bg-amber-50" placeholder="Pembiayaan lama + caj tertunggak" />
+                {(formData.type.includes('OL') || formData.type.toLowerCase().includes('pusing')) && (
+                  <p className="text-xs leading-relaxed text-slate-500">
+                    Masukkan jumlah penyelesaian sebenar daripada institusi (pembiayaan lama + caj tertunggak). Formula baki tunai: pembiayaan baharu − jumlah penyelesaian surat lama − fi berkaitan baharu.
+                  </p>
+                )}
               </div>
             )}
 
           </div>
 
           {/* Editable financial fields */}
-          <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div>
-              <label htmlFor="transaction-marhun-value" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Jumlah Nilai Marhun (RM)</label>
+          <div className="bg-emerald-50 p-4 rounded-xl border border-emerald-100 mb-6 grid grid-cols-1 sm:grid-cols-3 gap-4 items-stretch">
+            <div className="flex h-full flex-col">
+              <label htmlFor="transaction-marhun-value" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Nilai Marhun (RM)</label>
               <input
                 id="transaction-marhun-value"
                 type="number"
@@ -5619,12 +6674,14 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                 name="marhunValue"
                 value={formData.marhunValue}
                 onChange={handleChange}
+                min="0"
+                required
                 className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
               />
-              <p className="text-xs text-slate-500">Kiraan asal: berat emas × Marhun (RM/g). Boleh ubah manual.</p>
+              <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: berat emas × harga taksiran (RM/g). Boleh ubah manual.</p>
             </div>
-            <div>
-              <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Calculated Loan (RM)</label>
+            <div className="flex h-full flex-col">
+              <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Pembiayaan (RM)</label>
               <input
                 id="transaction-loan"
                 type="number"
@@ -5632,12 +6689,14 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                 name="loan"
                 value={formData.loan}
                 onChange={handleChange}
+                min="0"
+                required
                 className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
               />
-              <p className="text-xs text-slate-500">Kiraan asal: Jumlah Nilai Marhun × Margin. Boleh ubah manual.</p>
+              <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: Jumlah Nilai Marhun × kadar pembiayaan. Boleh ubah manual.</p>
             </div>
-            <div>
-              <label htmlFor="transaction-projected-profit" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block">Projected Profit / Lebihan Tunai (RM)</label>
+            <div className="flex h-full flex-col">
+              <label htmlFor="transaction-projected-profit" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Anggaran Lebihan Tunai Selepas Caj (bukan untung) (RM)</label>
               <input
                 id="transaction-projected-profit"
                 type="number"
@@ -5647,18 +6706,26 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, initia
                 onChange={handleChange}
                 className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
               />
-              <p className="text-xs text-slate-500">
-                Salin/OL: pinjaman baharu − kos tebus terdahulu. Pajakan asal/Tebus: RM0. Boleh ubah manual.
+              <p className="mt-1 min-h-12 text-xs text-slate-500">
+                {formData.type.toLowerCase().includes('salin') ||
+                formData.type.toLowerCase().includes('ol') ||
+                formData.type.toLowerCase().includes('pusing')
+                  ? 'Salin/OL: pembiayaan baharu − pembiayaan lama − caj tertunggak lama − fi berkaitan baharu. Masukkan jumlah penyelesaian lama sebagai pembiayaan lama + caj tertunggak. Lebihan tunai bukan keuntungan; pembiayaan tetap perlu dibayar balik. Boleh ubah manual.'
+                  : formData.type === 'Pajakan Asal'
+                    ? 'Pajakan asal: masukkan caj sebenar institusi. Nilai ini bukan keuntungan yang telah direalisasikan.'
+                    : formData.type.toLowerCase().includes('tebus')
+                      ? 'Tebusan: rekodkan amaun tebus sebenar mengikut resit institusi.'
+                      : 'Semak amaun dan caj dengan institusi; nilai yang dipaparkan ialah anggaran, bukan keuntungan atau kelulusan.'}
               </p>
             </div>
           </div>
 
           <div className="flex flex-col-reverse sm:flex-row justify-end sm:space-x-3 gap-3 pt-4 border-t border-slate-100">
             <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-lg transition-colors">
-              Cancel
+              Batal
             </button>
             <button type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center">
-              {initialData ? 'Kemaskini Transaksi' : 'Save Transaction'}
+              {initialData ? 'Kemaskini Surat' : 'Simpan Surat'}
             </button>
           </div>
         </form>
@@ -5674,9 +6741,12 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
   const [selectedSupplierCodes, setSelectedSupplierCodes] = useState(initialSupplierCodes);
   const [isSupplierListOpen, setIsSupplierListOpen] = useState(false);
   const [supplierError, setSupplierError] = useState('');
+  const selectableSuppliers = suppliers.filter(item =>
+    isRecordVisible(item) || selectedSupplierCodes.includes(item.code)
+  );
   const [formData, setFormData] = useState({
     code: initialData?.code || '',
-    date: initialData?.date || new Date().toISOString().split('T')[0],
+    date: getMalaysiaDateTimeInputValue(initialData?.date || new Date().toISOString()),
     type: initialData?.type || 'Gold Bar',
     supplier: initialData?.supplier || '',
     purity: initialData?.purity || '999.9',
@@ -5750,6 +6820,7 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
     const finalCode = formData.code?.trim() || generateAssetCode(formData.type, selectedSupplierCodes, formData.purity, formData.weight, initialData?.id || Date.now(), suppliers);
     onSave({
       ...formData,
+      date: parseTransactionDateTime(formData.date).toISOString(),
       supplier: supplierNames.join(', '),
       supplierCodes: selectedSupplierCodes,
       code: finalCode,
@@ -5814,8 +6885,8 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Purchase Date</label>
-              <input type="date" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              <label className="text-sm font-semibold text-slate-700">Purchase Date &amp; Time</label>
+              <input type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
             </div>
 
             <div className="space-y-1">
@@ -5835,7 +6906,7 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
               </button>
               {isSupplierListOpen && (
                 <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-lg custom-scrollbar">
-                  {suppliers.map(supplier => (
+                  {selectableSuppliers.map(supplier => (
                     <label key={supplier.id} className="flex items-center gap-3 px-3 py-2.5 hover:bg-emerald-50 cursor-pointer border-b last:border-b-0 border-slate-100">
                       <input
                         type="checkbox"
@@ -5847,7 +6918,7 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
                       <span className="text-sm text-slate-700">{supplier.name}</span>
                     </label>
                   ))}
-                  {suppliers.length === 0 && <p className="p-3 text-sm text-slate-500">Tiada pembekal. Daftar pembekal terlebih dahulu.</p>}
+                  {selectableSuppliers.length === 0 && <p className="p-3 text-sm text-slate-500">Tiada pembekal aktif. Daftar pembekal terlebih dahulu.</p>}
                 </div>
               )}
               {supplierError && <p className="text-xs text-red-600">{supplierError}</p>}
@@ -5883,6 +6954,7 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
               <select name="status" value={formData.status} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all">
                 <option value="EDT">EDT · Available / Check-out</option>
                 <option value="Dalam Ar-Rahnu">EDR · Dalam Ar-Rahnu / Check-in</option>
+                <option value="Dilelong">Dilelong · Tidak lagi dalam inventori tersedia</option>
               </select>
             </div>
 
