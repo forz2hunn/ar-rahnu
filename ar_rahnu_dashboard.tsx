@@ -11988,6 +11988,9 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
   const [imagePreview, setImagePreview] = useState('');
   const [imageError, setImageError] = useState('');
   const [isImageViewerOpen, setIsImageViewerOpen] = useState(false);
+  const [savedImage, setSavedImage] = useState<{ path: string; name?: string; type?: string; size?: number } | null>(initialData?.image || null);
+  const [isDeleteImagePending, setIsDeleteImagePending] = useState(false);
+  const [isDeletingImage, setIsDeletingImage] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const selectableSuppliers = suppliers.filter(item =>
     isRecordVisible(item) || selectedSupplierCodes.includes(item.code)
@@ -12017,6 +12020,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
   useEffect(() => {
     const handleAssetModalKeyDown = (event: KeyboardEvent) => {
       if (isImageViewerOpen) return;
+      if (isDeleteImagePending) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (!isSaving) onClose();
@@ -12028,7 +12032,19 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     };
     window.addEventListener('keydown', handleAssetModalKeyDown);
     return () => window.removeEventListener('keydown', handleAssetModalKeyDown);
-  }, [onClose, isSaving, isImageViewerOpen]);
+  }, [onClose, isSaving, isImageViewerOpen, isDeleteImagePending]);
+
+  useEffect(() => {
+    if (!isDeleteImagePending) return;
+    const handleConfirmKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsDeleteImagePending(false);
+      }
+    };
+    window.addEventListener('keydown', handleConfirmKeyDown);
+    return () => window.removeEventListener('keydown', handleConfirmKeyDown);
+  }, [isDeleteImagePending]);
 
   const liveMarketValuation = (parseFloat(formData.weight) || 0) * (currentGoldPrice || 0);
   const costPrice = parseFloat(formData.price) || 0;
@@ -12106,6 +12122,22 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     setIsImageViewerOpen(true);
   };
 
+  const handleDeleteImage = async () => {
+    if (!savedImage?.path) return;
+    setIsDeletingImage(true);
+    setImageError('');
+    try {
+      const { error } = await supabaseClient.storage.from(transactionAttachmentsBucket).remove([savedImage.path]);
+      if (error) throw error;
+      setSavedImage(null);
+      setIsDeleteImagePending(false);
+    } catch (error) {
+      setImageError(`Gambar tidak dapat dibuang: ${error instanceof Error ? error.message : 'Ralat storan.'}`);
+    } finally {
+      setIsDeletingImage(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (isSaving) return;
@@ -12118,7 +12150,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     const supplierNames = selectedSuppliers.map(item => item.name);
     const finalCode = formData.code?.trim() || generateAssetCode(formData.type, selectedSupplierCodes, formData.purity, formData.weight, initialData?.id || Date.now(), suppliers);
     try {
-      let image = initialData?.image || null;
+      let image = savedImage;
       if (imageFile) {
         const path = `${storageOwnerId}/asset-images/${crypto.randomUUID()}`;
         const { error } = await supabaseClient.storage.from(transactionAttachmentsBucket).upload(path, imageFile, { contentType: imageFile.type, upsert: false });
@@ -12281,12 +12313,24 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                 <label htmlFor="asset-image" className="text-sm font-semibold text-slate-700">Gambar aset <span className="font-normal text-slate-500">(pilihan)</span></label>
                 <p id="asset-image-help" className="mt-1 text-xs text-slate-600">JPEG, PNG atau WebP, maksimum 5 MB. Gambar baharu menggantikan gambar sedia ada selepas disimpan.</p>
               </div>
-              {(initialData?.image?.path || imagePreview) && (
+              {(savedImage?.path || imagePreview) && (
                 <div className="flex flex-wrap items-start gap-4">
-                  {initialData?.image?.path && (
+                  {savedImage?.path && (
                     <figure className="space-y-1">
                       <figcaption className="text-xs font-semibold text-slate-600">Gambar tersimpan</figcaption>
-                      <AssetThumbnail large path={initialData.image.path} label={initialData.code || 'aset'} supabaseClient={supabaseClient} onView={handleViewImage} />
+                      <div className="relative">
+                        <AssetThumbnail large path={savedImage.path} label={initialData?.code || 'aset'} supabaseClient={supabaseClient} onView={handleViewImage} />
+                        <button
+                          type="button"
+                          onClick={() => setIsDeleteImagePending(true)}
+                          disabled={isSaving || isDeletingImage}
+                          aria-label="Buang gambar tersimpan"
+                          title="Buang gambar"
+                          className="absolute -right-2 -top-2 inline-flex h-8 w-8 items-center justify-center rounded-full border border-rose-200 bg-white text-rose-600 shadow-sm transition-colors hover:bg-rose-50 disabled:opacity-50"
+                        >
+                          <Trash2 size={15} />
+                        </button>
+                      </div>
                     </figure>
                   )}
                   {imagePreview && (
@@ -12297,7 +12341,10 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                   )}
                 </div>
               )}
-              {initialData?.image?.path && <button type="button" onClick={handleViewImage} disabled={isSaving} className="text-sm font-semibold text-corporate-teal-700 underline underline-offset-2 disabled:opacity-50">Lihat gambar tersimpan</button>}
+              {savedImage?.path && <button type="button" onClick={handleViewImage} disabled={isSaving} className="text-sm font-semibold text-corporate-teal-700 underline underline-offset-2 disabled:opacity-50">Lihat gambar tersimpan</button>}
+              {!savedImage?.path && initialData?.image?.path && (
+                <p className="text-xs font-semibold text-rose-700">Gambar akan dibuang apabila anda menyimpan aset ini.</p>
+              )}
               <input id="asset-image" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="asset-image-help" onChange={handleImageSelection} disabled={isSaving} className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-2 file:font-semibold file:text-emerald-800" />
               {imageFile && <button type="button" onClick={() => { setImageFile(null); setImageError(''); }} disabled={isSaving} className="text-sm font-semibold text-slate-600 underline">Batal pilihan gambar baharu</button>}
               {imageError && <p role="alert" className="text-sm text-rose-700">{imageError}</p>}
@@ -12351,13 +12398,38 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
         </form>
       </div>
 
-      {isImageViewerOpen && initialData?.image?.path && (
+      {isImageViewerOpen && savedImage?.path && (
         <AssetImageViewer
-          path={initialData.image.path}
-          label={initialData.code || 'aset'}
+          path={savedImage.path}
+          label={initialData?.code || 'aset'}
           supabaseClient={supabaseClient}
           onClose={() => setIsImageViewerOpen(false)}
         />
+      )}
+
+      {isDeleteImagePending && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/60 p-4 backdrop-blur-sm" role="alertdialog" aria-modal="true" aria-labelledby="delete-asset-image-title">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl">
+            <div className="flex items-start gap-3">
+              <span className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-rose-100 text-rose-600">
+                <Trash2 size={18} />
+              </span>
+              <div>
+                <h3 id="delete-asset-image-title" className="text-base font-bold text-slate-800">Adakah anda pasti ingin membuang gambar ini?</h3>
+                <p className="mt-1 text-sm text-slate-600">Gambar akan dipadam daripada storan dan tidak boleh dipulihkan.</p>
+              </div>
+            </div>
+            {imageError && <p role="alert" className="mt-3 text-sm text-rose-700">{imageError}</p>}
+            <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+              <button type="button" onClick={() => setIsDeleteImagePending(false)} disabled={isDeletingImage} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-100 disabled:opacity-50 sm:w-auto">
+                Tidak
+              </button>
+              <button type="button" onClick={handleDeleteImage} disabled={isDeletingImage} className="w-full rounded-xl bg-rose-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-rose-700 disabled:opacity-50 sm:w-auto">
+                {isDeletingImage ? 'Membuang...' : 'Ya'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
