@@ -656,7 +656,7 @@ const formatIcNumber = (value: string) => {
 const maskIcNumber = (value: string) => {
   const digits = normalizeIcDigits(value);
   if (digits.length < 12) return digits ? 'Belum lengkap' : '-';
-  return `******-**-${digits.slice(-4)}`;
+  return `${digits.slice(0, 6)}-${digits.slice(6, 8)}-****`;
 };
 const generateMemberNumber = (existing: string[], year = new Date().getFullYear()) => {
   const prefix = `ARK-${year}-`;

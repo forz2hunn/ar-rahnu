@@ -47,7 +47,7 @@ The **Keahlian Ahli** menu is visible only to accounts with the `Admin` role. It
 - **No. Keahlian** is generated as `ARK-<year>-<4-digit sequence>` (for example `ARK-2026-0001`). The generator reads every number already in use, so generated numbers never collide; the module also rejects a manually entered number that another member already owns and rejects a duplicated 12-digit IC.
 - Data is stored in the organization portfolio row (`ar_rahnu_user_data.data.memberRegistry`) as `{ userId, fullName, icNumber, memberNo, updatedAt }`. Because it lives in the shared organization record, every Admin and Manager sees the same directory after a reload or realtime update, and it is covered by the existing organization-scoped row-level security.
 - Use **Jana Semua No. Keahlian** to assign numbers to every member that does not have one yet. Members without a name or IC are listed as "Belum diisi"/"-" so they can be completed one by one.
-- The IC is masked in the table (`******-**-5678`, only the last four digits are shown) and only shown in full inside the edit dialog.
+- The IC is masked in the table (`900101-14-****`, only the last four digits are hidden) and only shown in full inside the edit dialog.
 - Saving a member calls the `update-member-profile` action of the `user-admin` Edge Function. That action writes `full_name`, `ic_number`, `member_no`, `identity_locked`, and `identity_updated_at` into the member's `user_metadata`, so the member's own profile shows the official name, IC, and membership number. Deploy the function after changing `functions/user-admin/index.ts`; otherwise the directory still saves but the account is not synchronised and the app shows a sync warning.
 
 
