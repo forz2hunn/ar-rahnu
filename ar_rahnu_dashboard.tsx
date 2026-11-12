@@ -3918,7 +3918,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {/* MAIN CONTENT */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col h-full w-full lg:w-auto overflow-hidden">
         {/* HEADER */}
-        <header className={`h-16 sm:h-20 ${theme === 'dark' ? 'bg-white/80' : 'bg-[#F8F3EA]'} backdrop-blur-md border-b-2 border-corporate-teal-500 flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0`}>
+        <header className={`h-16 sm:h-20 backdrop-blur-md flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0 border-b-2 ${theme === 'dark' ? 'bg-white/80 border-corporate-teal-500' : 'bg-corporate-magenta-600 border-corporate-magenta-800'}`}>
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
             <button
               className="lg:hidden p-2 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors"
@@ -3926,7 +3926,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             >
               <Menu size={22} />
             </button>
-            <h2 className="min-w-0 text-base sm:text-xl md:text-2xl font-bold text-slate-800 capitalize tracking-tight truncate flex items-center">
+            <h2 className={`min-w-0 text-base sm:text-xl md:text-2xl font-bold capitalize tracking-tight truncate flex items-center ${theme === 'dark' ? 'text-slate-800' : 'text-white'}`}>
               {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'members' ? 'Keahlian Ahli' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : 'Executive Dashboard'}
             </h2>
           </div>
@@ -4040,9 +4040,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               </>
             )}
 
-            <div className="text-right mr-2 md:mr-4 hidden md:block border-l border-slate-200 pl-4">
-              <p className="text-sm font-semibold text-slate-800">{user.user_metadata?.full_name || user.user_metadata?.name || 'Nama Paparan'}</p>
-              <p className="text-xs text-slate-500">Disimpan per akaun</p>
+            <div className={`text-right mr-2 md:mr-4 hidden md:block border-l pl-4 ${theme === 'dark' ? 'border-slate-200' : 'border-white/30'}`}>
+              <p className={`text-sm font-semibold ${theme === 'dark' ? 'text-slate-800' : 'text-white'}`}>{user.user_metadata?.full_name || user.user_metadata?.name || 'Nama Paparan'}</p>
+              <p className={`text-xs ${theme === 'dark' ? 'text-slate-500' : 'text-white/75'}`}>Disimpan per akaun</p>
             </div>
             <button
               type="button"
@@ -4060,7 +4060,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 .join('')
                 .toUpperCase() || (user.email || 'AR').slice(0, 2).toUpperCase()}
             </button>
-            <button onClick={onSignOut} title="Log keluar" aria-label="Log keluar" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+            <button onClick={onSignOut} title="Log keluar" aria-label="Log keluar" className={`rounded-lg p-2 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'text-white/80 hover:bg-white/15 hover:text-white'}`}>
               <LogOut size={18} />
             </button>
           </div>
