@@ -646,6 +646,33 @@ const getAssetStatusBadge = (asset: any) => {
     dotClass: 'bg-emerald-500'
   };
 };
+const normalizeIcDigits = (value: string) => String(value || '').replace(/\D/g, '').slice(0, 12);
+const formatIcNumber = (value: string) => {
+  const digits = normalizeIcDigits(value);
+  if (digits.length <= 6) return digits;
+  if (digits.length <= 8) return `${digits.slice(0, 6)}-${digits.slice(6)}`;
+  return `${digits.slice(0, 6)}-${digits.slice(6, 8)}-${digits.slice(8)}`;
+};
+const maskIcNumber = (value: string) => {
+  const digits = normalizeIcDigits(value);
+  if (digits.length < 12) return digits ? 'Belum lengkap' : '-';
+  return `${digits.slice(0, 6)}-**-${digits.slice(8)}`;
+};
+const generateMemberNumber = (existing: string[], year = new Date().getFullYear()) => {
+  const prefix = `ARK-${year}-`;
+  const usedNumbers = existing
+    .filter(value => String(value || '').startsWith(prefix))
+    .map(value => Number(String(value).slice(prefix.length)))
+    .filter(value => Number.isFinite(value));
+  const nextSequence = (usedNumbers.length ? Math.max(...usedNumbers) : 0) + 1;
+  let candidate = `${prefix}${String(nextSequence).padStart(4, '0')}`;
+  let counter = nextSequence;
+  while (existing.includes(candidate)) {
+    counter += 1;
+    candidate = `${prefix}${String(counter).padStart(4, '0')}`;
+  }
+  return candidate;
+};
 const isMissingSupabaseTableError = (error) =>
   error?.code === 'PGRST205' ||
   error?.code === '42P01' ||
@@ -1141,9 +1168,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     };
   });
 
+  const [memberRegistry, setMemberRegistry] = useState<{ userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string }[]>([]);
+
   const appData = useMemo(
-    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions }),
-    [transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions]
+    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry }),
+    [transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry]
   );
   const localSnapshotRef = useRef(appData);
   localSnapshotRef.current = appData;
@@ -1194,11 +1223,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         suppliers: incoming.suppliers,
         goldPriceHistory: Array.isArray(incoming.goldPriceHistory) ? incoming.goldPriceHistory : []
       };
+      const nextMemberRegistry = Array.isArray(incoming.memberRegistry) ? incoming.memberRegistry : localSnapshotRef.current.memberRegistry || [];
       const nextRolePermissions = incoming.rolePermissions && typeof incoming.rolePermissions === 'object'
         ? incoming.rolePermissions
         : localSnapshotRef.current.rolePermissions;
       // Serialize exactly like appData so the persistence effect can compare snapshots reliably.
-      const serializedData = JSON.stringify({ ...nextData, rolePermissions: nextRolePermissions });
+      const serializedData = JSON.stringify({ ...nextData, rolePermissions: nextRolePermissions, memberRegistry: nextMemberRegistry });
       cloudSnapshotRef.current = serializedData;
       if (JSON.stringify(localSnapshotRef.current) === serializedData) return;
 
@@ -1207,6 +1237,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setAssets(nextData.assets);
       setSuppliers(nextData.suppliers);
       setGoldPriceHistory(nextData.goldPriceHistory);
+      setMemberRegistry(nextMemberRegistry);
       if (nextRolePermissions !== localSnapshotRef.current.rolePermissions) {
         setRolePermissions(nextRolePermissions);
       }
@@ -1275,7 +1306,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             transactions: [],
             institutions: initialInstitutions,
             assets: [],
-            suppliers: initialSuppliers
+            suppliers: initialSuppliers,
+            memberRegistry: []
           };
           applyCloudData(firstSave);
           const { error: saveError } = await supabaseClient
@@ -1413,6 +1445,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isCorrectionModalOpen, setIsCorrectionModalOpen] = useState(false);
   const [isInstitutionModalOpen, setIsInstitutionModalOpen] = useState(false);
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
+  const [memberSearch, setMemberSearch] = useState('');
+  const [editingMember, setEditingMember] = useState(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [correctionTransaction, setCorrectionTransaction] = useState(null);
@@ -1553,6 +1587,45 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const canManageOrganizationUsers = ['Admin', 'Manager'].includes(organizationMembership?.role);
   const isOrganizationAdmin = organizationMembership?.role === 'Admin';
+
+  const handleSaveMemberProfile = (member, payload) => {
+    setMemberRegistry(previous => [
+      ...previous.filter(entry => entry.userId !== member.id),
+      { userId: member.id, ...payload, updatedAt: new Date().toISOString() }
+    ]);
+    setEditingMember(null);
+    setToastMessage(`Maklumat ahli ${payload.fullName} disimpan (${payload.memberNo}).`);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const handleGenerateAllMemberNumbers = () => {
+    const usedNumbers: string[] = memberRegistry.map(entry => entry.memberNo).filter(Boolean);
+    const additions: { userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string }[] = [];
+    organizationUsers.forEach(member => {
+      const current = memberRegistry.find(entry => entry.userId === member.id);
+      if (current?.memberNo) return;
+      const memberNo = generateMemberNumber(usedNumbers);
+      usedNumbers.push(memberNo);
+      additions.push({
+        userId: member.id,
+        fullName: current?.fullName || '',
+        icNumber: current?.icNumber || '',
+        memberNo,
+        updatedAt: new Date().toISOString()
+      });
+    });
+    if (!additions.length) {
+      setToastMessage('Semua ahli sudah mempunyai No. Keahlian unik.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    setMemberRegistry(previous => [
+      ...previous.filter(entry => !additions.some(addition => addition.userId === entry.userId)),
+      ...additions
+    ]);
+    setToastMessage(`${additions.length} No. Keahlian baharu dijana.`);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
   const [auditView, setAuditView] = useState<'trail' | 'traffic'>('trail');
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [auditSearch, setAuditSearch] = useState('');
@@ -1827,7 +1900,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   useEffect(() => {
-    const shouldLoadUsers = activeTab === 'users' || (activeTab === 'audit' && auditView === 'trail');
+    const shouldLoadUsers = activeTab === 'users' || activeTab === 'members' || (activeTab === 'audit' && auditView === 'trail');
     if (!shouldLoadUsers || !canManageOrganizationUsers) return;
     let active = true;
     setUserManagementError('');
@@ -3777,6 +3850,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {canManageOrganizationUsers && (
             <NavItem compact={isSidebarCompact} theme={theme} icon={<FileSearch size={20} />} label="Audit Trail" isActive={activeTab === 'audit'} onClick={() => { setActiveTab('audit'); setIsSidebarOpen(false); }} />
           )}
+          {isOrganizationAdmin && (
+            <NavItem compact={isSidebarCompact} theme={theme} icon={<UserCheck size={20} />} label="Keahlian Ahli" isActive={activeTab === 'members'} onClick={() => { setActiveTab('members'); setIsSidebarOpen(false); }} />
+          )}
         </nav>
 
         <div className="space-y-3 p-3 sm:p-4">
@@ -3827,7 +3903,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               <Menu size={22} />
             </button>
             <h2 className="min-w-0 text-base sm:text-xl md:text-2xl font-bold text-slate-800 capitalize tracking-tight truncate flex items-center">
-              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : 'Executive Dashboard'}
+              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'members' ? 'Keahlian Ahli' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : 'Executive Dashboard'}
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1 sm:gap-2 md:gap-4">
@@ -3990,6 +4066,175 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
         {/* SCROLLABLE CONTENT AREA */}
         <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 md:p-8 relative custom-scrollbar">
+
+          {activeTab === 'members' && isOrganizationAdmin && (() => {
+            const registryMap = new Map(memberRegistry.map(entry => [entry.userId, entry]));
+            const memberRows = organizationUsers.map(member => ({ ...member, registry: registryMap.get(member.id) || null }));
+            const query = memberSearch.trim().toLowerCase();
+            const filteredMembers = memberRows.filter(member => !query || [
+              member.registry?.fullName,
+              member.registry?.icNumber,
+              member.registry?.memberNo,
+              member.email,
+              member.role
+            ].some(value => String(value || '').toLowerCase().includes(query)));
+            const withMemberNumber = memberRows.filter(member => Boolean(member.registry?.memberNo)).length;
+            const completeProfiles = memberRows.filter(member => Boolean(member.registry?.fullName && member.registry?.icNumber)).length;
+
+            return (
+              <section className="mx-auto max-w-7xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <div className="rounded-2xl bg-gradient-to-br from-teal-950 via-teal-900 to-emerald-800 p-6 text-white shadow-lg sm:p-8">
+                  <div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
+                    <div>
+                      <p className="text-xs font-bold uppercase tracking-widest text-teal-200">Pentadbiran · Akses Admin Sahaja</p>
+                      <h3 className="mt-2 text-2xl font-bold tracking-tight sm:text-3xl">Keahlian Ahli</h3>
+                      <p className="mt-2 max-w-2xl text-sm text-teal-100">
+                        Kemas kini nama penuh dan No. Kad Pengenalan ahli, serta jana No. Keahlian unik bagi setiap ahli.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleGenerateAllMemberNumbers}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm transition-colors hover:bg-teal-50"
+                    >
+                      <RefreshCw size={16} /> Jana Semua No. Keahlian
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Jumlah Ahli</p>
+                      <p className="mt-1 text-2xl font-bold text-slate-800">{memberRows.length}</p>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><Users size={20} /></div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">No. Keahlian Dijana</p>
+                      <p className="mt-1 text-2xl font-bold text-slate-800">{withMemberNumber}</p>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600"><Tag size={20} /></div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Profil Lengkap</p>
+                      <p className="mt-1 text-2xl font-bold text-emerald-700">{completeProfiles}</p>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600"><UserCheck size={20} /></div>
+                  </div>
+                  <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
+                    <div>
+                      <p className="text-xs font-semibold uppercase text-slate-500">Belum Lengkap</p>
+                      <p className="mt-1 text-2xl font-bold text-[#b45309]">{memberRows.length - completeProfiles}</p>
+                    </div>
+                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#fffbeb] text-[#b45309]"><AlertCircle size={20} /></div>
+                  </div>
+                </div>
+
+                <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-800">Direktori Ahli</h4>
+                      <p className="text-xs text-slate-500">{filteredMembers.length} daripada {memberRows.length} ahli dipaparkan</p>
+                    </div>
+                    <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 sm:w-80">
+                      <Search size={16} className="shrink-0 text-slate-400" />
+                      <input
+                        type="search"
+                        value={memberSearch}
+                        onChange={event => setMemberSearch(event.target.value)}
+                        placeholder="Cari nama, IC, no. keahlian atau e-mel"
+                        aria-label="Cari ahli"
+                        className="w-full border-0 bg-transparent text-sm outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="min-w-0 w-full overflow-x-auto custom-scrollbar" role="region" aria-label="Jadual keahlian ahli" tabIndex={0}>
+                    <table className="w-full min-w-max border-collapse text-left text-xs">
+                      <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                        <tr>
+                          <th className="px-4 py-3 font-bold sm:px-6">No. Keahlian</th>
+                          <th className="px-4 py-3 font-bold">Nama Penuh</th>
+                          <th className="px-4 py-3 font-bold">No. Kad Pengenalan</th>
+                          <th className="px-4 py-3 font-bold">Emel</th>
+                          <th className="px-4 py-3 font-bold">Peranan</th>
+                          <th className="px-4 py-3 font-bold">Status</th>
+                          <th className="px-4 py-3 text-center font-bold">Tindakan</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                        {filteredMembers.map(member => (
+                          <tr
+                            key={member.id}
+                            onClick={() => setEditingMember(member)}
+                            tabIndex={0}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                setEditingMember(member);
+                              }
+                            }}
+                            aria-label={`Kemaskini maklumat ahli ${member.email || ''}`}
+                            className="cursor-pointer transition-colors hover:bg-slate-50/70 focus:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500"
+                          >
+                            <td className="px-4 py-3 sm:px-6">
+                              {member.registry?.memberNo ? (
+                                <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 font-mono text-xs font-black text-amber-900">
+                                  <Tag size={12} className="shrink-0 text-amber-600" />
+                                  {member.registry.memberNo}
+                                </span>
+                              ) : (
+                                <span className="rounded-md bg-slate-100 px-2 py-1 text-[11px] font-bold text-slate-500">Belum dijana</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="block text-sm font-bold text-slate-800">{member.registry?.fullName || <span className="text-xs font-medium text-slate-400">Belum diisi</span>}</span>
+                              {member.isOrganizationOwner && <span className="text-[10px] font-bold uppercase text-emerald-700">Pemilik Organisasi</span>}
+                            </td>
+                            <td className="px-4 py-3 font-mono text-slate-600">{maskIcNumber(member.registry?.icNumber || '')}</td>
+                            <td className="px-4 py-3 text-slate-600">{member.email || '-'}</td>
+                            <td className="px-4 py-3">
+                              <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-bold text-slate-700">{member.role}</span>
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${member.active ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-slate-100 text-slate-600'}`}>
+                                <span className={`h-1.5 w-1.5 rounded-full ${member.active ? 'bg-emerald-500' : 'bg-slate-400'}`} />
+                                {member.active ? 'Aktif' : 'Digantung'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-center" onClick={event => event.stopPropagation()}>
+                              <button
+                                type="button"
+                                onClick={() => setEditingMember(member)}
+                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+                                aria-label={`Kemaskini nama, IC dan no. keahlian ${member.email || ''}`}
+                              >
+                                <Pencil size={13} /> Kemaskini
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                        {filteredMembers.length === 0 && (
+                          <tr>
+                            <td colSpan={7} className="p-8 text-center text-slate-500">
+                              {organizationUsers.length === 0 ? 'Tiada ahli dimuatkan. Sila semak sambungan pengurusan pengguna.' : 'Tiada ahli sepadan dengan carian.'}
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <p className="border-t border-slate-100 p-3 text-[11px] text-slate-500">
+                    Nama penuh dan No. Kad Pengenalan hanya boleh diubah oleh Admin. No. Keahlian dijana secara automatik dan unik untuk setiap ahli.
+                  </p>
+                </div>
+              </section>
+            );
+          })()}
 
           {activeTab === 'audit' && canManageOrganizationUsers && (
             <section className="mx-auto max-w-7xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -8848,6 +9093,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         />
       )}
 
+      {editingMember && (
+        <MemberAdminModal
+          member={editingMember}
+          registryEntry={memberRegistry.find(entry => entry.userId === editingMember.id) || null}
+          existingMemberNumbers={memberRegistry.filter(entry => entry.userId !== editingMember.id).map(entry => entry.memberNo).filter(Boolean)}
+          existingIcNumbers={memberRegistry
+            .filter(entry => entry.userId !== editingMember.id)
+            .map(entry => normalizeIcDigits(entry.icNumber))
+            .filter(Boolean)}
+          onClose={() => setEditingMember(null)}
+          onSave={payload => handleSaveMemberProfile(editingMember, payload)}
+        />
+      )}
+
       {isProfileModalOpen && (
         <ProfileModal
           user={user}
@@ -8921,6 +9180,118 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 }
 
 // --- SUB-COMPONENTS ---
+
+function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existingIcNumbers, onClose, onSave }) {
+  const [fullName, setFullName] = useState(String(registryEntry?.fullName || ''));
+  const [icDigits, setIcDigits] = useState(normalizeIcDigits(registryEntry?.icNumber || ''));
+  const [memberNo, setMemberNo] = useState(String(registryEntry?.memberNo || ''));
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const handleSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    const normalizedName = fullName.trim().replace(/\s+/g, ' ');
+    if (normalizedName.length < 2 || normalizedName.length > 120) {
+      setError('Nama penuh hendaklah antara 2 hingga 120 aksara.');
+      return;
+    }
+    if (icDigits.length !== 12) {
+      setError('No. Kad Pengenalan mesti 12 digit.');
+      return;
+    }
+    if (existingIcNumbers.includes(icDigits)) {
+      setError('No. Kad Pengenalan ini sudah digunakan oleh ahli lain.');
+      return;
+    }
+    const finalMemberNo = (memberNo.trim() || generateMemberNumber(existingMemberNumbers)).toUpperCase();
+    if (existingMemberNumbers.includes(finalMemberNo)) {
+      setError('No. Keahlian ini sudah digunakan. Sila jana nombor baharu.');
+      return;
+    }
+    onSave({ fullName: normalizedName, icNumber: icDigits, memberNo: finalMemberNo });
+  };
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`Kemaskini maklumat ahli ${member.email || ''}`} className="fixed inset-0 z-[66] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
+          <div>
+            <h2 className="text-lg font-bold text-slate-800">Kemaskini Maklumat Ahli</h2>
+            <p className="text-xs text-slate-500">{member.email || '-'} · {member.role}</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Tutup kemaskini ahli" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          <label className="block text-sm font-medium text-slate-700">
+            <span>Nama Penuh<span className="ml-0.5 text-rose-600">*</span></span>
+            <input
+              type="text"
+              required
+              autoFocus
+              value={fullName}
+              onChange={event => setFullName(event.target.value)}
+              className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-3 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+            />
+            <span className="mt-1 block text-xs font-normal text-slate-500">Gunakan nama seperti dalam Kad Pengenalan.</span>
+          </label>
+
+          <label className="block text-sm font-medium text-slate-700">
+            <span>No. Kad Pengenalan<span className="ml-0.5 text-rose-600">*</span></span>
+            <input
+              type="text"
+              inputMode="numeric"
+              required
+              placeholder="cth. 900101-14-5678"
+              value={formatIcNumber(icDigits)}
+              onChange={event => setIcDigits(normalizeIcDigits(event.target.value))}
+              className="mt-1.5 w-full rounded-xl border border-slate-300 px-3.5 py-3 font-mono text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+            />
+            <span className="mt-1 block text-xs font-normal text-slate-500">{icDigits.length}/12 digit. Hanya Admin boleh mengubah nama dan IC.</span>
+          </label>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">No. Keahlian Unik</p>
+            <div className="mt-1 flex items-center gap-2">
+              <span className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-mono text-sm font-bold text-slate-900">
+                {memberNo || <span className="font-sans text-xs font-medium text-slate-400">Belum dijana</span>}
+              </span>
+              <button
+                type="button"
+                onClick={() => setMemberNo(generateMemberNumber(existingMemberNumbers))}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs font-bold text-emerald-800 transition-colors hover:bg-emerald-100"
+              >
+                <RefreshCw size={13} /> {memberNo ? 'Jana Semula' : 'Jana'}
+              </button>
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">Format: ARK-{new Date().getFullYear()}-0001. Nombor dijana automatik dan dijamin unik dalam direktori ahli.</p>
+          </div>
+
+          {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm text-rose-700">{error}</p>}
+
+          <div className="flex flex-col-reverse gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:justify-end">
+            <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-100 sm:w-auto">Batal</button>
+            <button type="submit" className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto">
+              <Check size={15} /> Simpan Maklumat Ahli
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
 
 type ProfileSectionId = 'personal' | 'heir' | 'bank' | 'security' | 'pdpa';
 

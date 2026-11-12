@@ -39,6 +39,17 @@ Sign in to the app with that account after the schema and function are deployed.
 - **Manager:** access and manage the shared organization portfolio, view the organization user list, and permanently delete non-Admin user accounts. Managers cannot invite users, change roles or access, send password-reset emails, or delete Admin accounts.
 - **Staff:** access only their personal portfolio.
 
+## Member directory (Admin only)
+
+The **Keahlian Ahli** menu is visible only to accounts with the `Admin` role. It stores the official member identity and the unique membership number for every organization member.
+
+- **Name and IC number** are editable only in this module, so customers cannot change them from the self-service profile. The profile panel shows both fields as locked and points customers to customer service instead.
+- **No. Keahlian** is generated as `ARK-<year>-<4-digit sequence>` (for example `ARK-2026-0001`). The generator reads every number already in use, so generated numbers never collide; the module also rejects a manually entered number that another member already owns and rejects a duplicated 12-digit IC.
+- Data is stored in the organization portfolio row (`ar_rahnu_user_data.data.memberRegistry`) as `{ userId, fullName, icNumber, memberNo, updatedAt }`. Because it lives in the shared organization record, every Admin and Manager sees the same directory after a reload or realtime update, and it is covered by the existing organization-scoped row-level security.
+- Use **Jana Semua No. Keahlian** to assign numbers to every member that does not have one yet. Members without a name or IC are listed as "Belum diisi"/"-" so they can be completed one by one.
+- The IC is masked in the table (`900101-**-5678`) and only shown in full inside the edit dialog.
+
+
 Deleting a user permanently deletes their Supabase Auth account. Related organization membership and user portfolio data are removed through the database foreign-key cascades. The action cannot be undone. Users cannot delete their own account or the last active Admin. An Admin deleting the organization creator takes over organization ownership first; Managers cannot delete Admin accounts. Deploy the updated `user-admin` Edge Function for account creation and the latest deletion behavior to take effect.
 
 When [`audit-trail.sql`](./audit-trail.sql) is installed and the updated `user-admin` Edge Function is deployed, membership/organization changes and user account actions are captured in the audit chain. Password values are never logged. Login/logout events are not yet ingested into this chain; consult Supabase Auth Audit Logs for authentication evidence.
