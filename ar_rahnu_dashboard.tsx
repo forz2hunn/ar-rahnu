@@ -3778,15 +3778,6 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         </nav>
 
         <div className="space-y-3 p-3 sm:p-4">
-          {!isSidebarCompact && (
-            <div className={`rounded-xl border p-4 ${theme === 'dark' ? 'bg-corporate-teal-900/50 border-corporate-teal-800/50' : 'bg-slate-50 border-slate-200'}`}>
-              <div className={`mb-2 flex items-center space-x-2 ${theme === 'dark' ? 'text-corporate-magenta-300' : 'text-corporate-magenta-600'}`}>
-                <Sparkles size={16} />
-                <span className="text-sm font-semibold">EGM Engine Active</span>
-              </div>
-              <p className={`text-xs ${theme === 'dark' ? 'text-slate-300' : 'text-slate-600'}`}>System is monitoring market prices to find optimal refinancing windows.</p>
-            </div>
-          )}
           {isSidebarCompact ? (
             <button
               type="button"
