@@ -1419,6 +1419,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [viewingAssetImage, setViewingAssetImage] = useState<{ path: string; label: string } | null>(null);
   const [viewingAssetRecord, setViewingAssetRecord] = useState(null);
   const [viewingSagRecord, setViewingSagRecord] = useState(null);
+  const [viewingSupplierRecord, setViewingSupplierRecord] = useState(null);
+  const [viewingInstitutionRecord, setViewingInstitutionRecord] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
@@ -7428,7 +7430,19 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {filteredSuppliers.map(supplier => (
-                        <tr key={supplier.id} className="hover:bg-slate-50/50 transition-colors group">
+                        <tr
+                          key={supplier.id}
+                          onClick={() => setViewingSupplierRecord(supplier)}
+                          onKeyDown={event => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault();
+                              setViewingSupplierRecord(supplier);
+                            }
+                          }}
+                          tabIndex={0}
+                          aria-label={`Lihat maklumat pembekal ${supplier.name}`}
+                          className="cursor-pointer hover:bg-slate-50/50 focus:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 transition-colors group"
+                        >
                           <td className="p-4"><span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200 px-2.5 py-1 rounded-md"><span className="code-badge-label">{supplier.code}</span></span></td>
                           <td className="p-4 font-bold text-slate-800">{supplier.name}</td>
                           <td className="p-4"><span className={`px-2.5 py-1 text-xs font-semibold rounded-full border ${supplierCategoryColor(supplier.category)}`}>{supplier.category || '-'}</span></td>
@@ -7437,7 +7451,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             {supplier.website && isValidSupplierWebsite(supplier.website) ? <a href={supplier.website} target="_blank" rel="noreferrer" className="text-emerald-700 hover:text-emerald-900 text-sm inline-flex items-center gap-1">{supplier.website.replace(/^https?:\/\//, '')}<ExternalLink size={13} /></a> : <span className="text-slate-600">{supplier.website || '-'}</span>}
                           </td>
                           <td className="p-4 text-xs text-slate-500 max-w-xs truncate" title={supplier.remarks}>{supplier.remarks || '-'}</td>
-                          <td className="p-4 text-center whitespace-nowrap">
+                          <td className="p-4 text-center whitespace-nowrap" onClick={event => event.stopPropagation()}>
                             <button onClick={() => handleEditSupplier(supplier)} className="text-slate-600 hover:text-emerald-700 transition-colors p-2 rounded-lg hover:bg-emerald-50" aria-label={`Kemaskini ${supplier.name}`}><Pencil size={18} /></button>
                             <button onClick={() => handleDeleteSupplier(supplier.id)} className="text-slate-600 hover:text-red-700 transition-colors p-2 rounded-lg hover:bg-red-50" aria-label={`Padam ${supplier.name}`}><Trash2 size={18} /></button>
                           </td>
@@ -7450,6 +7464,23 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </table>
                 </div>
               </div>
+
+              {viewingSupplierRecord && (
+                <SupplierDetailModal
+                  supplier={viewingSupplierRecord}
+                  currentGoldPrice={currentGoldPrice}
+                  relatedAssets={visibleAssets.filter(asset =>
+                    String(asset.supplier || '').split(',').map(name => name.trim()).includes(viewingSupplierRecord.name) ||
+                    (Array.isArray(asset.supplierCodes) && asset.supplierCodes.includes(viewingSupplierRecord.code))
+                  )}
+                  onClose={() => setViewingSupplierRecord(null)}
+                  onEdit={() => {
+                    const record = viewingSupplierRecord;
+                    setViewingSupplierRecord(null);
+                    handleEditSupplier(record);
+                  }}
+                />
+              )}
             </div>
           )}
 
@@ -7586,7 +7617,19 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         const is80 = inst.maxMargin >= 80;
                         const is70 = inst.maxMargin === 70;
                         return (
-                          <tr key={inst.id} className="hover:bg-slate-50/50 transition-colors group">
+                          <tr
+                            key={inst.id}
+                            onClick={() => setViewingInstitutionRecord(inst)}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter' || event.key === ' ') {
+                                event.preventDefault();
+                                setViewingInstitutionRecord(inst);
+                              }
+                            }}
+                            tabIndex={0}
+                            aria-label={`Lihat maklumat institusi ${inst.name}`}
+                            className="cursor-pointer hover:bg-slate-50/50 focus:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 transition-colors group"
+                          >
                             <td className="p-4">
                               <div className="flex items-center space-x-3">
                                 <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${is80 ? 'bg-emerald-100 text-emerald-700' : is70 ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
@@ -7648,7 +7691,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             <td className="p-4 text-xs text-slate-500 max-w-xs truncate" title={inst.remarks}>
                               {inst.remarks || '-'}
                             </td>
-                            <td className="p-4 text-center space-x-1">
+                            <td className="p-4 text-center space-x-1" onClick={event => event.stopPropagation()}>
                               <button
                                 onClick={() => handleRefresh(inst.id)}
                                 disabled={isRefreshing}
@@ -7687,6 +7730,23 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </table>
                 </div>
               </div>
+
+              {viewingInstitutionRecord && (
+                <InstitutionDetailModal
+                  institution={viewingInstitutionRecord}
+                  currentGoldPrice={currentGoldPrice}
+                  relatedTransactions={transactions
+                    .filter(transaction => transaction.institution === viewingInstitutionRecord.name)
+                    .slice()
+                    .sort((a, b) => getTransactionTimestamp(b.date) - getTransactionTimestamp(a.date))}
+                  onClose={() => setViewingInstitutionRecord(null)}
+                  onEdit={() => {
+                    const record = viewingInstitutionRecord;
+                    setViewingInstitutionRecord(null);
+                    handleEditInstitution(record);
+                  }}
+                />
+              )}
             </div>
           )}
 
@@ -10471,6 +10531,261 @@ function AssetImageViewer({ path, label, supabaseClient, onClose }: { path: stri
   );
 }
 
+
+function DetailRow({ label, value, children }: { label: string; value?: React.ReactNode; children?: React.ReactNode }) {
+  return (
+    <div>
+      <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</dt>
+      <dd className="text-sm font-semibold text-slate-800">{children ?? (value === '' || value === undefined || value === null ? '-' : value)}</dd>
+    </div>
+  );
+}
+
+function DetailModalShell({ ariaLabel, eyebrow, title, badge, children, footer, onClose }: { ariaLabel: string; eyebrow: React.ReactNode; title: string; badge?: React.ReactNode; children: React.ReactNode; footer: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={ariaLabel} className="fixed inset-0 z-[58] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm animate-in fade-in duration-200 sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">{eyebrow}{badge}</div>
+            <h2 className="text-lg font-bold text-slate-800">{title}</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label={`Tutup ${ariaLabel}`} className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 custom-scrollbar sm:p-6">{children}</div>
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:justify-end sm:px-6">{footer}</div>
+      </div>
+    </div>
+  );
+}
+
+function SupplierDetailModal({ supplier, relatedAssets = [], currentGoldPrice, onClose, onEdit }) {
+  const assetWeight = relatedAssets.reduce((sum, asset) => sum + (parseFloat(asset.weight) || 0), 0);
+  const assetCost = relatedAssets.reduce((sum, asset) => sum + (parseFloat(asset.price) || 0), 0);
+  const assetMarket = assetWeight * (currentGoldPrice || 0);
+
+  return (
+    <DetailModalShell
+      ariaLabel={`Maklumat pembekal ${supplier.name}`}
+      eyebrow={<span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 font-mono text-xs font-black text-amber-900"><Tag size={13} className="shrink-0 text-amber-600" />{supplier.code || '-'}</span>}
+      title="Maklumat Pembekal Emas"
+      badge={<span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${supplierCategoryColor(supplier.category || '')}`}>{supplier.category || 'Tiada kategori'}</span>}
+      onClose={onClose}
+      footer={<>
+        <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto">Tutup</button>
+        <button type="button" onClick={onEdit} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto"><Pencil size={15} /> Kemaskini Pembekal</button>
+      </>}
+    >
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+        <DetailRow label="Nama Pembekal" value={supplier.name} />
+        <DetailRow label="Kategori" value={supplier.category} />
+        <DetailRow label="Jenis Produk Emas" value={supplier.products} />
+        <DetailRow label="Laman Web">
+          {supplier.website && isValidSupplierWebsite(supplier.website) ? (
+            <a href={supplier.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-emerald-700 underline underline-offset-2 hover:text-emerald-900">
+              {supplier.website.replace(/^https?:\/\//, '')}<ExternalLink size={13} />
+            </a>
+          ) : supplier.website || '-'}
+        </DetailRow>
+        <DetailRow label="Jumlah Aset Didaftar" value={`${relatedAssets.length} aset`} />
+        <DetailRow label="Jumlah Berat Aset" value={`${Number(assetWeight.toFixed(2))}g`} />
+      </dl>
+
+      {supplier.remarks && (
+        <div className="mt-5">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Catatan</p>
+          <p className="mt-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs font-medium text-slate-700">{supplier.remarks}</p>
+        </div>
+      )}
+
+      <div className="mt-5 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/60 p-4">
+        <p className="text-[11px] font-bold uppercase tracking-wider text-corporate-teal-900">Ringkasan Aset Pembekal</p>
+        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Kos Belian</p>
+            <p className="font-mono text-sm font-bold text-slate-700">{formatRM(assetCost)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Nilai Pasaran</p>
+            <p className="font-mono text-sm font-extrabold text-corporate-teal-800">{formatRM(assetMarket)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Perbezaan</p>
+            <p className={`font-mono text-sm font-extrabold ${assetMarket - assetCost >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+              {assetMarket - assetCost >= 0 ? `+${formatRM(assetMarket - assetCost)}` : formatRM(assetMarket - assetCost)}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Aset Emas Berkaitan</h3>
+          <span className="text-[11px] font-semibold text-slate-400">{relatedAssets.length} aset</span>
+        </div>
+        {relatedAssets.length === 0 ? (
+          <p className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-xs font-semibold text-slate-500">Tiada aset didaftarkan di bawah pembekal ini.</p>
+        ) : (
+          <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full min-w-max border-collapse text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 font-bold">Kod Aset</th>
+                  <th className="px-3 py-2 font-bold">Jenis</th>
+                  <th className="px-3 py-2 font-bold">Mutu</th>
+                  <th className="px-3 py-2 text-right font-bold">Berat (g)</th>
+                  <th className="px-3 py-2 text-right font-bold">Kos Belian</th>
+                  <th className="px-3 py-2 font-bold">Status</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                {relatedAssets.map(asset => {
+                  const assetStatus = getAssetStatusBadge(asset);
+                  return (
+                    <tr key={asset.id} className="transition-colors hover:bg-slate-50/70">
+                      <td className="px-3 py-2 font-mono font-bold text-slate-900">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</td>
+                      <td className="px-3 py-2 text-slate-600">{asset.type}</td>
+                      <td className="px-3 py-2 text-slate-600">{asset.purity || 'N/A'}</td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{parseFloat(asset.weight) || 0}g</td>
+                      <td className="px-3 py-2 text-right font-mono text-slate-600">{formatRM(parseFloat(asset.price) || 0)}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] ${assetStatus.badgeClass}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${assetStatus.dotClass}`} />
+                          <span>{assetStatus.label}</span>
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </DetailModalShell>
+  );
+}
+
+function InstitutionDetailModal({ institution, relatedTransactions = [], currentGoldPrice, onClose, onEdit }) {
+  const spot = Number(institution.marhunSpotPrice ?? currentGoldPrice ?? 0);
+  const spread = Number(institution.marhunSpread || 0);
+  const rate = Number(institution.marhunRate || 0);
+  const activeTransactions = relatedTransactions.filter(tx => !['Selesai', 'Ditebus', 'Dilelong'].includes(tx.status));
+  const totalPrincipal = activeTransactions.reduce((sum, tx) => sum + getCurrentPrincipal(tx), 0);
+  const totalMarhun = activeTransactions.reduce((sum, tx) => sum + getTransactionMarhunValue(tx), 0);
+
+  return (
+    <DetailModalShell
+      ariaLabel={`Maklumat institusi ${institution.name}`}
+      eyebrow={<span className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700"><Building2 size={13} className="shrink-0 text-corporate-teal-700" />{institution.name || '-'}</span>}
+      title="Maklumat Institusi & Koperasi"
+      badge={<span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold ${supplierCategoryColor(institution.category || 'Koperasi')}`}>{institution.category || 'Koperasi'}</span>}
+      onClose={onClose}
+      footer={<>
+        <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto">Tutup</button>
+        <button type="button" onClick={onEdit} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto"><Pencil size={15} /> Kemaskini Institusi</button>
+      </>}
+    >
+      <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+        <DetailRow label="Nama Institusi" value={institution.name} />
+        <DetailRow label="Kategori" value={institution.category} />
+        <DetailRow label="Cawangan / Lokasi" value={institution.branch || 'Bangi'} />
+        <DetailRow label="Margin Maksimum" value={`${Number(institution.maxMargin || 0)}%`} />
+        <DetailRow label="Kadar Marhun" value={`${formatRM(rate)}/g`} />
+        <DetailRow label="Spread" value={formatRM(spread)} />
+        <DetailRow label="Spot Rujukan" value={`${formatRM(spot)}/g`} />
+        <DetailRow label="Rekod SAG" value={`${relatedTransactions.length} surat (${activeTransactions.length} aktif)`} />
+      </dl>
+
+      {institution.remarks && (
+        <div className="mt-5">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Catatan</p>
+          <p className="mt-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs font-medium text-slate-700">{institution.remarks}</p>
+        </div>
+      )}
+
+      <div className="mt-5 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/60 p-4">
+        <p className="text-[11px] font-bold uppercase tracking-wider text-corporate-teal-900">Ringkasan Pembiayaan Aktif</p>
+        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Surat Aktif</p>
+            <p className="font-mono text-sm font-extrabold text-slate-900">{activeTransactions.length}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Nilai Marhun</p>
+            <p className="font-mono text-sm font-bold text-corporate-teal-800">{formatRM(totalMarhun)}</p>
+          </div>
+          <div>
+            <p className="text-[10px] font-bold uppercase text-slate-500">Baki Pinjaman</p>
+            <p className="font-mono text-sm font-extrabold text-slate-900">{formatRM(totalPrincipal)}</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-5">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Surat Gadaian Berkaitan</h3>
+          <span className="text-[11px] font-semibold text-slate-400">{relatedTransactions.length} rekod</span>
+        </div>
+        {relatedTransactions.length === 0 ? (
+          <p className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-xs font-semibold text-slate-500">Tiada surat gadaian dengan institusi ini.</p>
+        ) : (
+          <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+            <table className="w-full min-w-max border-collapse text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                <tr>
+                  <th className="px-3 py-2 font-bold">No. Siri SAG</th>
+                  <th className="px-3 py-2 font-bold">Jenis</th>
+                  <th className="px-3 py-2 font-bold">Status</th>
+                  <th className="px-3 py-2 text-right font-bold">Berat (g)</th>
+                  <th className="px-3 py-2 text-right font-bold">Nilai Marhun</th>
+                  <th className="px-3 py-2 text-right font-bold">Baki Pinjaman</th>
+                  <th className="px-3 py-2 font-bold">Tarikh Matang</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                {relatedTransactions.map(transaction => {
+                  const sagStatus = getSagStatusBadge(transaction);
+                  return (
+                    <tr key={transaction.id} className="transition-colors hover:bg-slate-50/70">
+                      <td className="px-3 py-2">
+                        <span className="font-mono font-bold text-slate-900">#{transaction.refNo || '-'}</span>
+                        <span className="mt-0.5 block text-[10px] text-slate-400">{formatTransactionDateTime(transaction.date)}</span>
+                      </td>
+                      <td className="px-3 py-2 text-slate-600">{getTransactionStatus(transaction)}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] ${sagStatus.badgeClass}`}>
+                          <span className={`h-1.5 w-1.5 rounded-full ${sagStatus.dotClass}`} />
+                          <span>{sagStatus.label}</span>
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{getCurrentPledgedWeight(transaction)}g</td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-corporate-teal-800">{formatRM(getTransactionMarhunValue(transaction))}</td>
+                      <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">{formatRM(getCurrentPrincipal(transaction))}</td>
+                      <td className="px-3 py-2 text-slate-600">{transaction.redemptionDate || '-'}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </DetailModalShell>
+  );
+}
 
 function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGoldPrice, onClose, onEdit, onOpenCorrection }) {
   useEffect(() => {
