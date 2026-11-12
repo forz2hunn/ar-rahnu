@@ -616,6 +616,34 @@ const getSagStatusBadge = (tx: any) => {
     dotClass: 'bg-emerald-500'
   };
 };
+const getAssetStatusBadge = (asset: any) => {
+  if (asset.status === 'Dilelong') {
+    return {
+      label: 'Dilelong · Keluar',
+      badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold animate-pulse',
+      dotClass: 'bg-rose-500'
+    };
+  }
+  if (asset.status === 'Dalam Ar-Rahnu') {
+    return {
+      label: 'EDR · Dalam Ar-Rahnu',
+      badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-extrabold',
+      dotClass: 'bg-amber-500'
+    };
+  }
+  if (asset.status === 'Ditebus') {
+    return {
+      label: 'Ditebus · Arkib',
+      badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
+      dotClass: 'bg-slate-400'
+    };
+  }
+  return {
+    label: 'EDT · Tersedia Di Tangan',
+    badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold',
+    dotClass: 'bg-emerald-500'
+  };
+};
 const isMissingSupabaseTableError = (error) =>
   error?.code === 'PGRST205' ||
   error?.code === '42P01' ||
@@ -1390,6 +1418,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [editingAsset, setEditingAsset] = useState(null);
   const [viewingAssetImage, setViewingAssetImage] = useState<{ path: string; label: string } | null>(null);
   const [viewingAssetRecord, setViewingAssetRecord] = useState(null);
+  const [viewingSagRecord, setViewingSagRecord] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
@@ -6276,7 +6305,19 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             const statusInfo = getSagStatusBadge(tx);
 
                             return (
-                              <tr key={tx.id} className="hover:bg-slate-50/70 transition-colors group">
+                              <tr
+                                key={tx.id}
+                                onClick={() => setViewingSagRecord(tx)}
+                                onKeyDown={event => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault();
+                                    setViewingSagRecord(tx);
+                                  }
+                                }}
+                                tabIndex={0}
+                                aria-label={`Lihat maklumat surat gadaian ${tx.refNo || ''}`}
+                                className="cursor-pointer hover:bg-slate-50/70 focus:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 transition-colors group"
+                              >
                                 {/* No. Siri SAG */}
                                 <td className="p-4 sm:px-6">
                                   <div className="flex items-center gap-2">
@@ -6309,7 +6350,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 </td>
 
                                 {/* Status & Tempoh (Consistent Status Badge) */}
-                                <td className="p-4">
+                                <td className="p-4" onClick={event => event.stopPropagation()}>
                                   <button
                                     type="button"
                                     onClick={() => handleToggleStatus(tx.id)}
@@ -6350,7 +6391,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 </td>
 
                                 {/* Tarikh Matang Direct Input */}
-                                <td className="p-4">
+                                <td className="p-4" onClick={event => event.stopPropagation()}>
                                   {!tx.type.includes('Tebus') ? (
                                     <input
                                       type="date"
@@ -6394,7 +6435,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 </td>
 
                                 {/* Action Buttons */}
-                                <td className="p-4 text-center">
+                                <td className="p-4 text-center" onClick={event => event.stopPropagation()}>
                                   <div className="flex items-center justify-center gap-1">
                                     <button
                                       type="button"
@@ -6487,7 +6528,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         return (
                           <div
                             key={tx.id}
-                            className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
+                            onClick={() => setViewingSagRecord(tx)}
+                            className="cursor-pointer rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
                           >
                             <div>
                               <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
@@ -6536,7 +6578,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <span className="text-[11px] text-slate-400 font-mono">
                                 {formatTransactionDateTime(tx.date)}
                               </span>
-                              <div className="flex items-center gap-1">
+                              <div className="flex items-center gap-1" onClick={event => event.stopPropagation()}>
                                 <button
                                   type="button"
                                   onClick={() => handleEditTransaction(tx)}
@@ -6612,6 +6654,28 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     Borang menyokong [ Esc ] untuk batal dan [ Ctrl + Enter ] untuk simpan segera.
                   </span>
                 </div>
+
+                {viewingSagRecord && (
+                  <SagDetailModal
+                    transaction={viewingSagRecord}
+                    statusInfo={getSagStatusBadge(viewingSagRecord)}
+                    currentGoldPrice={currentGoldPrice}
+                    linkedAssets={getTransactionAssetIds(viewingSagRecord)
+                      .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
+                      .filter(Boolean)}
+                    onClose={() => setViewingSagRecord(null)}
+                    onEdit={() => {
+                      const record = viewingSagRecord;
+                      setViewingSagRecord(null);
+                      handleEditTransaction(record);
+                    }}
+                    onOpenCorrection={() => {
+                      const record = viewingSagRecord;
+                      setViewingSagRecord(null);
+                      handleOpenCorrection(record);
+                    }}
+                  />
+                )}
               </div>
             );
           })()}
@@ -6628,35 +6692,6 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             const totalPurchaseCost = visibleAssets.reduce((sum, a) => sum + (parseFloat(a.price) || 0), 0);
             const totalEstimatedMarketValue = totalGoldGrams * currentGoldPrice;
             const paperGainLoss = totalEstimatedMarketValue - totalPurchaseCost;
-
-            const getAssetStatusBadge = (asset: any) => {
-              if (asset.status === 'Dilelong') {
-                return {
-                  label: 'Dilelong · Keluar',
-                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold animate-pulse',
-                  dotClass: 'bg-rose-500'
-                };
-              }
-              if (asset.status === 'Dalam Ar-Rahnu') {
-                return {
-                  label: 'EDR · Dalam Ar-Rahnu',
-                  badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-extrabold',
-                  dotClass: 'bg-amber-500'
-                };
-              }
-              if (asset.status === 'Ditebus') {
-                return {
-                  label: 'Ditebus · Arkib',
-                  badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
-                  dotClass: 'bg-slate-400'
-                };
-              }
-              return {
-                label: 'EDT · Tersedia Di Tangan',
-                badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold',
-                dotClass: 'bg-emerald-500'
-              };
-            };
 
             const filteredAssetList = visibleAssets.filter(asset => {
               if (assetSearchQuery.trim()) {
@@ -10436,6 +10471,158 @@ function AssetImageViewer({ path, label, supabaseClient, onClose }: { path: stri
   );
 }
 
+
+function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGoldPrice, onClose, onEdit, onOpenCorrection }) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const jenis = getTransactionStatus(transaction);
+  const details = [
+    { label: 'Institusi / Cawangan', value: transaction.institution || '-' },
+    { label: 'Jenis Pajakan', value: jenis },
+    { label: 'Tarikh Transaksi', value: formatTransactionDateTime(transaction.date) },
+    { label: 'Tarikh Matang', value: transaction.redemptionDate || 'Belum diisi' },
+    { label: 'Mutu Ketulenan', value: transaction.purity || 'N/A' },
+    { label: 'Berat Diikat', value: `${getCurrentPledgedWeight(transaction)}g` },
+    { label: 'Bil. Rekod Pembetulan', value: String(getCorrectionEvents(transaction).length) },
+    { label: 'Status Rekod', value: transaction.status || 'Aktif' }
+  ];
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`Maklumat surat gadaian ${transaction.refNo || ''}`} className="fixed inset-0 z-[58] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm animate-in fade-in duration-200 sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-mono text-base font-black tracking-tight text-slate-900">#{transaction.refNo || '-'}</span>
+              <span className="rounded-lg border border-slate-200 bg-white px-2 py-0.5 text-[11px] font-bold text-slate-700">{jenis}</span>
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs ${statusInfo.badgeClass}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${statusInfo.dotClass}`} />
+                <span>{statusInfo.label}</span>
+              </span>
+            </div>
+            <h2 className="text-lg font-bold text-slate-800">Maklumat Surat Gadaian</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Tutup maklumat surat gadaian" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+            {details.map(item => (
+              <div key={item.label}>
+                <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</dt>
+                <dd className="text-sm font-semibold text-slate-800">{item.value}</dd>
+              </div>
+            ))}
+          </dl>
+
+          <div className="mt-5 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/60 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-corporate-teal-900">Kedudukan Kewangan</p>
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Nilai Marhun</p>
+                <p className="font-mono text-sm font-extrabold text-corporate-teal-800">{formatRM(getTransactionMarhunValue(transaction))}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Baki Pinjaman</p>
+                <p className="font-mono text-sm font-extrabold text-slate-900">{formatRM(getCurrentPrincipal(transaction))}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Jumlah Tebus</p>
+                <p className="font-mono text-sm font-bold text-slate-700">{formatRM(getCurrentRedemption(transaction))}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Lebihan Tunai</p>
+                <p className={`font-mono text-sm font-extrabold ${transaction.profit > 0 ? 'text-emerald-700' : 'text-slate-400'}`}>
+                  {transaction.profit > 0 ? `+${formatRM(transaction.profit)}` : '-'}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {transaction.remarks && (
+            <div className="mt-5">
+              <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Catatan</p>
+              <p className="mt-1 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs font-medium text-slate-700">{transaction.remarks}</p>
+            </div>
+          )}
+
+          <div className="mt-5">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Aset Emas Dipautkan</h3>
+              <span className="text-[11px] font-semibold text-slate-400">{linkedAssets.length} aset</span>
+            </div>
+            {linkedAssets.length === 0 ? (
+              <p className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-xs font-semibold text-slate-500">
+                Tiada aset emas dipautkan pada surat ini.
+              </p>
+            ) : (
+              <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full min-w-max border-collapse text-left text-xs">
+                  <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2 font-bold">Kod Aset</th>
+                      <th className="px-3 py-2 font-bold">Jenis</th>
+                      <th className="px-3 py-2 font-bold">Mutu</th>
+                      <th className="px-3 py-2 text-right font-bold">Berat (g)</th>
+                      <th className="px-3 py-2 text-right font-bold">Kos Belian</th>
+                      <th className="px-3 py-2 text-right font-bold">Nilai Pasaran</th>
+                      <th className="px-3 py-2 font-bold">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {linkedAssets.map(asset => {
+                      const assetStatus = getAssetStatusBadge(asset);
+                      return (
+                        <tr key={asset.id} className="transition-colors hover:bg-slate-50/70">
+                          <td className="px-3 py-2 font-mono font-bold text-slate-900">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</td>
+                          <td className="px-3 py-2 text-slate-600">{asset.type}</td>
+                          <td className="px-3 py-2 text-slate-600">{asset.purity || 'N/A'}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{parseFloat(asset.weight) || 0}g</td>
+                          <td className="px-3 py-2 text-right font-mono text-slate-600">{formatRM(parseFloat(asset.price) || 0)}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-corporate-teal-800">{formatRM((parseFloat(asset.weight) || 0) * (currentGoldPrice || 0))}</td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] ${assetStatus.badgeClass}`}>
+                              <span className={`h-1.5 w-1.5 rounded-full ${assetStatus.dotClass}`} />
+                              <span>{assetStatus.label}</span>
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:justify-between sm:px-6">
+          <button type="button" onClick={onOpenCorrection} className="flex w-full items-center justify-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 font-semibold text-amber-800 transition-colors hover:bg-amber-100 sm:w-auto">
+            <Settings2 size={15} /> Rekod Pembetulan
+          </button>
+          <div className="flex flex-col-reverse gap-2 sm:flex-row">
+            <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto">
+              Tutup
+            </button>
+            <button type="button" onClick={onEdit} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto">
+              <Pencil size={15} /> Kemaskini SAG
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AssetDetailModal({ asset, statusInfo, currentGoldPrice, relatedTransactions = [], isLocked, supabaseClient, onClose, onEdit, onOpenImage }) {
   const marketValue = (parseFloat(asset.weight) || 0) * (currentGoldPrice || 0);
