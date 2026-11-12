@@ -13,6 +13,10 @@ Each authenticated user can only read or modify their own row. App changes are s
 
 SAG attachments are stored in the private `ar-rahnu-transaction-attachments` bucket; the portfolio JSON stores only their metadata and storage paths. Storage policies restrict access to the portfolio owner or an active organization Admin/Manager. The app creates short-lived signed URLs when a user opens an attachment.
 
+Asset images use the same private bucket and access policies. Each asset can reference one JPEG, PNG or WebP image up to 5 MB; only metadata and the storage path are saved in the portfolio JSON. Replacing an image retains the previous file so audit snapshots and other references do not point to a deleted object. Duplicating an asset does not copy its image.
+
+If an asset image upload reports **Bucket not found**, sign in to the correct Supabase project as its administrator, open SQL Editor and run the complete [`supabase/transaction-attachments.sql`](./supabase/transaction-attachments.sql) script. This creates the private bucket and its access policies together; creating a public bucket or a bucket without these policies is not sufficient. Then retry the upload. Running `schema.sql` alone does not create this bucket.
+
 ## Portfolio relationships and analytics
 
 The app continues to save its portfolio JSON in `ar_rahnu_user_data` for compatibility. The portfolio-relations migration backfills that data into separate institution, supplier, asset and transaction tables. Foreign keys connect transactions to institutions and assets, and assets to suppliers. A database trigger keeps those related tables in sync whenever the portfolio JSON changes. The related tables are read-only to authenticated clients and use the same personal-portfolio or organization-manager access rules.

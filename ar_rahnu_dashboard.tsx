@@ -111,6 +111,8 @@ const transactionStatusOptions = [
   'TS', 'TKS', 'US', 'Pusing', 'Lelong'
 ];
 const transactionAttachmentsBucket = 'ar-rahnu-transaction-attachments';
+const maximumAssetImageSize = 5 * 1024 * 1024;
+const allowedAssetImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
 const maximumTransactionAttachments = 7;
 const maximumTransactionAttachmentSize = 50 * 1024 * 1024;
 type OrganizationRole = 'Admin' | 'Manager' | 'Staff';
@@ -1118,12 +1120,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         suppliers: incoming.suppliers,
         goldPriceHistory: Array.isArray(incoming.goldPriceHistory) ? incoming.goldPriceHistory : []
       };
-      const serializedData = JSON.stringify(nextData);
-      cloudSnapshotRef.current = JSON.stringify({
-        ...nextData,
-        transactions: incoming.transactions,
-        assets: incoming.assets
-      });
+      const nextRolePermissions = incoming.rolePermissions && typeof incoming.rolePermissions === 'object'
+        ? incoming.rolePermissions
+        : localSnapshotRef.current.rolePermissions;
+      // Serialize exactly like appData so the persistence effect can compare snapshots reliably.
+      const serializedData = JSON.stringify({ ...nextData, rolePermissions: nextRolePermissions });
+      cloudSnapshotRef.current = serializedData;
       if (JSON.stringify(localSnapshotRef.current) === serializedData) return;
 
       setTransactions(nextData.transactions);
@@ -1131,8 +1133,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setAssets(nextData.assets);
       setSuppliers(nextData.suppliers);
       setGoldPriceHistory(nextData.goldPriceHistory);
-      if (incoming.rolePermissions && typeof incoming.rolePermissions === 'object') {
-        setRolePermissions(incoming.rolePermissions);
+      if (nextRolePermissions !== localSnapshotRef.current.rolePermissions) {
+        setRolePermissions(nextRolePermissions);
       }
     };
 
@@ -1544,10 +1546,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     if (!auditChainScope) return;
     let active = true;
     setTrafficSchemaReady(null);
-    supabaseClient
+    Promise.resolve(supabaseClient
       .from('ar_rahnu_traffic_events')
       .select('event_id')
-      .limit(1)
+      .limit(1))
       .then(({ error }) => {
         if (!active) return;
         if (error) {
@@ -3019,6 +3021,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const reader = new FileReader();
     reader.onload = (event) => {
       const text = event.target.result;
+      if (typeof text !== 'string') {
+        setToastMessage('Fail CSV tidak dapat dibaca sebagai teks.');
+        setTimeout(() => setToastMessage(null), 4000);
+        return;
+      }
       const lines = text.split('\n').filter(line => line.trim() !== '');
 
       if (lines.length <= 1) return; // Ignore if empty or only headers
@@ -3325,6 +3332,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const duplicated = {
       ...asset,
       id: newId,
+      image: null,
       code: newCode,
       supplier: `${asset.supplier} (Salinan)`,
       date: createdAt,
@@ -7002,6 +7010,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 {/* No. Siri & Kod Aset */}
                                 <td className="p-4 sm:px-6">
                                   <div className="flex items-center gap-2">
+                                    {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} />}
                                     <span className="font-mono font-black text-xs bg-amber-50 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-lg shadow-xs inline-flex items-center gap-1.5">
                                       <Tag size={13} className="text-amber-600 shrink-0" />
                                       <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
@@ -7157,11 +7166,14 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           >
                             <div>
                               <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
-                                <div>
+                                <div className="flex items-start gap-3">
+                                  {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} />}
+                                  <div>
                                   <span className="font-mono text-xs font-black bg-amber-50 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md inline-block">
                                     {asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}
                                   </span>
                                   <p className="text-xs font-bold text-slate-800 mt-1">{asset.type} · Mutu {asset.purity}</p>
+                                  </div>
                                 </div>
                                 <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full ${assetStatusInfo.badgeClass}`}>
                                   <span className={`h-1.5 w-1.5 rounded-full ${assetStatusInfo.dotClass}`} />
@@ -7362,7 +7374,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         </tr>
                       ))}
                       {filteredSuppliers.length === 0 && (
-                        <tr><td colSpan="7" className="p-8 text-center text-slate-400">Tiada pembekal ditemui. Tambah pembekal baharu atau ubah carian.</td></tr>
+                        <tr><td colSpan={7} className="p-8 text-center text-slate-400">Tiada pembekal ditemui. Tambah pembekal baharu atau ubah carian.</td></tr>
                       )}
                     </tbody>
                   </table>
@@ -7598,7 +7610,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       })}
                       {filteredInstitutions.length === 0 && (
                         <tr>
-                          <td colSpan="8" className="p-8 text-center text-slate-600">Tiada institusi ditemui. Ubah penapis atau tambah institusi baharu.</td>
+                          <td colSpan={8} className="p-8 text-center text-slate-600">Tiada institusi ditemui. Ubah penapis atau tambah institusi baharu.</td>
                         </tr>
                       )}
                     </tbody>
@@ -8671,6 +8683,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           }}
           onSave={handleSaveAsset}
           suppliers={suppliers}
+          supabaseClient={supabaseClient}
+          storageOwnerId={dataOwnerUserIdRef.current}
         />
       )}
 
@@ -9589,9 +9603,9 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
       profit: roundMoney(calculateProjectedProfit(data.type, loan, data.redemption, data.fee))
     };
   };
-  const calculatedMarhunValue = parseFloat(formData.marhunValue) || 0;
-  const loanForSave = parseFloat(formData.loan) || 0;
-  const profitForSave = parseFloat(formData.profit) || 0;
+  const calculatedMarhunValue = parseFloat(String(formData.marhunValue)) || 0;
+  const loanForSave = parseFloat(String(formData.loan)) || 0;
+  const profitForSave = parseFloat(String(formData.profit)) || 0;
   const feeBasisAmount = formData.feeBasis === 'nilaiMarhun'
     ? calculatedMarhunValue
     : formData.feeBasis === 'jumlahPembiayaan'
@@ -10276,13 +10290,49 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   );
 }
 
-function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers }) {
+function AssetThumbnail({ path, label, supabaseClient, large = false }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean }) {
+  const size = large ? 'h-40 w-40' : 'h-12 w-12';
+  const fit = large ? 'object-contain' : 'object-cover';
+  const [image, setImage] = useState<{ path: string; url: string; error: boolean }>({ path: '', url: '', error: false });
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const loadImage = async () => {
+      try {
+        const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(path, 3600);
+        if (error) throw error;
+        if (active) setImage({ path, url: data.signedUrl, error: false });
+      } catch (error) {
+        console.error('Thumbnail aset tidak dapat dimuatkan:', error);
+        if (active) setImage({ path, url: '', error: true });
+      }
+      if (active) timer = setTimeout(loadImage, 50 * 60 * 1000);
+    };
+    void loadImage();
+    return () => { active = false; clearTimeout(timer); };
+  }, [path, supabaseClient]);
+
+  if (image.path === path && image.error) {
+    return <span role="img" aria-label={`Gambar ${label} tidak dapat dimuatkan`} title="Gambar tidak dapat dimuatkan" className={`flex ${size} shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-xs text-rose-700`}>Ralat</span>;
+  }
+  if (image.path !== path || !image.url) {
+    return <span aria-label={`Memuatkan gambar ${label}`} className={`${size} shrink-0 animate-pulse rounded-lg bg-slate-100`} />;
+  }
+  return <img src={image.url} alt={`Gambar ${label}`} onError={() => setImage({ path, url: '', error: true })} className={`${size} shrink-0 rounded-lg border border-slate-200 bg-white ${fit}`} />;
+}
+
+function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers, supabaseClient, storageOwnerId }) {
   const initialSupplierCodes = initialData?.supplierCodes || suppliers
     .filter(item => initialData?.supplier?.split(',').map(name => name.trim()).includes(item.name))
     .map(item => item.code);
   const [selectedSupplierCodes, setSelectedSupplierCodes] = useState(initialSupplierCodes);
   const [isSupplierListOpen, setIsSupplierListOpen] = useState(false);
   const [supplierError, setSupplierError] = useState('');
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState('');
+  const [imageError, setImageError] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
   const selectableSuppliers = suppliers.filter(item =>
     isRecordVisible(item) || selectedSupplierCodes.includes(item.code)
   );
@@ -10299,10 +10349,20 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
   const selectedSuppliers = suppliers.filter(item => selectedSupplierCodes.includes(item.code));
 
   useEffect(() => {
+    if (!imageFile) {
+      setImagePreview('');
+      return;
+    }
+    const url = URL.createObjectURL(imageFile);
+    setImagePreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [imageFile]);
+
+  useEffect(() => {
     const handleAssetModalKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
-        onClose();
+        if (!isSaving) onClose();
       } else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
         event.preventDefault();
         const submitBtn = document.getElementById('asset-modal-submit-btn');
@@ -10311,7 +10371,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
     };
     window.addEventListener('keydown', handleAssetModalKeyDown);
     return () => window.removeEventListener('keydown', handleAssetModalKeyDown);
-  }, [onClose]);
+  }, [onClose, isSaving]);
 
   const liveMarketValuation = (parseFloat(formData.weight) || 0) * (currentGoldPrice || 0);
   const costPrice = parseFloat(formData.price) || 0;
@@ -10371,23 +10431,75 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
     });
   };
 
-  const handleSubmit = (e) => {
+  const handleImageSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!allowedAssetImageTypes.includes(file.type) || file.size === 0 || file.size > maximumAssetImageSize) {
+      setImageFile(null);
+      setImageError('Pilih gambar JPEG, PNG atau WebP yang tidak kosong dan tidak melebihi 5 MB.');
+      return;
+    }
+    setImageError('');
+    setImageFile(file);
+  };
+
+  const handleViewImage = async () => {
+    setImageError('');
+    try {
+      const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(initialData.image.path, 60);
+      if (error) throw error;
+      const link = document.createElement('a');
+      link.href = data.signedUrl;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    } catch (error) {
+      setImageError(`Gambar tidak dapat dibuka: ${error instanceof Error ? error.message : 'Ralat storan.'}`);
+    }
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSaving) return;
     if (selectedSupplierCodes.length === 0) {
       setSupplierError('Pilih sekurang-kurangnya satu pembekal.');
       return;
     }
+    setIsSaving(true);
+    setImageError('');
     const supplierNames = selectedSuppliers.map(item => item.name);
     const finalCode = formData.code?.trim() || generateAssetCode(formData.type, selectedSupplierCodes, formData.purity, formData.weight, initialData?.id || Date.now(), suppliers);
-    onSave({
-      ...formData,
-      date: parseTransactionDateTime(formData.date).toISOString(),
-      supplier: supplierNames.join(', '),
-      supplierCodes: selectedSupplierCodes,
-      code: finalCode,
-      weight: parseFloat(formData.weight) || 0,
-      price: parseFloat(formData.price) || 0
-    });
+    try {
+      let image = initialData?.image || null;
+      if (imageFile) {
+        const path = `${storageOwnerId}/asset-images/${crypto.randomUUID()}`;
+        const { error } = await supabaseClient.storage.from(transactionAttachmentsBucket).upload(path, imageFile, { contentType: imageFile.type, upsert: false });
+        if (error) {
+          if (/bucket not found/i.test(error.message)) {
+            throw new Error('Storan gambar belum disediakan. Pentadbir perlu menjalankan supabase/transaction-attachments.sql dalam Supabase SQL Editor, kemudian cuba lagi.');
+          }
+          throw error;
+        }
+        image = { path, name: imageFile.name, type: imageFile.type, size: imageFile.size };
+      }
+      onSave({
+        ...formData,
+        image,
+        date: parseTransactionDateTime(formData.date).toISOString(),
+        supplier: supplierNames.join(', '),
+        supplierCodes: selectedSupplierCodes,
+        code: finalCode,
+        weight: parseFloat(formData.weight) || 0,
+        price: parseFloat(formData.price) || 0
+      });
+    } catch (error) {
+      setImageError(`Gambar tidak dapat disimpan: ${error instanceof Error ? error.message : 'Ralat storan.'}`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -10399,7 +10511,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
             {initialData ? <Pencil className="mr-2 text-emerald-600" size={20} /> : <Plus className="mr-2 text-emerald-600" size={20} />}
             {initialData ? 'Kemaskini Maklumat Aset' : 'Register New Asset'}
           </h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200">
+          <button type="button" onClick={onClose} disabled={isSaving} aria-label="Tutup borang aset" className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200 disabled:opacity-50">
             <X size={20} />
           </button>
         </div>
@@ -10519,6 +10631,33 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
               </select>
             </div>
 
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:col-span-2">
+              <div>
+                <label htmlFor="asset-image" className="text-sm font-semibold text-slate-700">Gambar aset <span className="font-normal text-slate-500">(pilihan)</span></label>
+                <p id="asset-image-help" className="mt-1 text-xs text-slate-600">JPEG, PNG atau WebP, maksimum 5 MB. Gambar baharu menggantikan gambar sedia ada selepas disimpan.</p>
+              </div>
+              {(initialData?.image?.path || imagePreview) && (
+                <div className="flex flex-wrap items-start gap-4">
+                  {initialData?.image?.path && (
+                    <figure className="space-y-1">
+                      <figcaption className="text-xs font-semibold text-slate-600">Gambar tersimpan</figcaption>
+                      <AssetThumbnail large path={initialData.image.path} label={initialData.code || 'aset'} supabaseClient={supabaseClient} />
+                    </figure>
+                  )}
+                  {imagePreview && (
+                    <figure className="space-y-1">
+                      <figcaption className="text-xs font-semibold text-emerald-700">Gambar baharu</figcaption>
+                      <img src={imagePreview} alt="Pratonton gambar aset baharu" className="h-40 w-40 rounded-lg border border-emerald-300 bg-white object-contain" />
+                    </figure>
+                  )}
+                </div>
+              )}
+              {initialData?.image?.path && <button type="button" onClick={() => void handleViewImage()} disabled={isSaving} className="text-sm font-semibold text-corporate-teal-700 underline underline-offset-2 disabled:opacity-50">Lihat gambar tersimpan</button>}
+              <input id="asset-image" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="asset-image-help" onChange={handleImageSelection} disabled={isSaving} className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-2 file:font-semibold file:text-emerald-800" />
+              {imageFile && <button type="button" onClick={() => { setImageFile(null); setImageError(''); }} disabled={isSaving} className="text-sm font-semibold text-slate-600 underline">Batal pilihan gambar baharu</button>}
+              {imageError && <p role="alert" className="text-sm text-rose-700">{imageError}</p>}
+            </div>
+
           </div>
 
           {/* Anti-Human-Error Live Valuation Card */}
@@ -10556,11 +10695,11 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
               <span className="font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-slate-600">[ Ctrl + Enter ] Simpan</span>
             </div>
             <div className="flex flex-col-reverse sm:flex-row sm:space-x-3 gap-3 w-full sm:w-auto">
-              <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition-colors">
+              <button type="button" onClick={onClose} disabled={isSaving} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition-colors disabled:opacity-50">
                 Batal
               </button>
-              <button id="asset-modal-submit-btn" type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-sm transition-colors flex items-center">
-                {initialData ? 'Kemaskini Aset' : 'Simpan Aset'}
+              <button id="asset-modal-submit-btn" type="submit" disabled={isSaving} className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-sm transition-colors flex items-center disabled:opacity-50">
+                {isSaving ? 'Menyimpan gambar...' : initialData ? 'Kemaskini Aset' : 'Simpan Aset'}
               </button>
             </div>
           </div>
