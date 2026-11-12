@@ -1344,6 +1344,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [correctionTransaction, setCorrectionTransaction] = useState(null);
   const [initialCorrectionAction, setInitialCorrectionAction] = useState('TS');
   const [editingAsset, setEditingAsset] = useState(null);
+  const [viewingAssetImage, setViewingAssetImage] = useState<{ path: string; label: string } | null>(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
@@ -7010,7 +7011,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 {/* No. Siri & Kod Aset */}
                                 <td className="p-4 sm:px-6">
                                   <div className="flex items-center gap-2">
-                                    {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} />}
+                                    {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} onView={() => setViewingAssetImage({ path: asset.image.path, label: asset.code || 'aset' })} />}
                                     <span className="font-mono font-black text-xs bg-amber-50 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-lg shadow-xs inline-flex items-center gap-1.5">
                                       <Tag size={13} className="text-amber-600 shrink-0" />
                                       <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
@@ -7167,7 +7168,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             <div>
                               <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
                                 <div className="flex items-start gap-3">
-                                  {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} />}
+                                  {asset.image?.path && <AssetThumbnail path={asset.image.path} label={asset.code || 'aset'} supabaseClient={supabaseClient} onView={() => setViewingAssetImage({ path: asset.image.path, label: asset.code || 'aset' })} />}
                                   <div>
                                   <span className="font-mono text-xs font-black bg-amber-50 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md inline-block">
                                     {asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}
@@ -8685,6 +8686,15 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           suppliers={suppliers}
           supabaseClient={supabaseClient}
           storageOwnerId={dataOwnerUserIdRef.current}
+        />
+      )}
+
+      {viewingAssetImage && (
+        <AssetImageViewer
+          path={viewingAssetImage.path}
+          label={viewingAssetImage.label}
+          supabaseClient={supabaseClient}
+          onClose={() => setViewingAssetImage(null)}
         />
       )}
 
@@ -10290,9 +10300,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   );
 }
 
-function AssetThumbnail({ path, label, supabaseClient, large = false }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean }) {
-  const size = large ? 'h-40 w-40' : 'h-12 w-12';
-  const fit = large ? 'object-contain' : 'object-cover';
+function useSignedAssetUrl(supabaseClient: SupabaseClient, path: string, expiresIn = 3600) {
   const [image, setImage] = useState<{ path: string; url: string; error: boolean }>({ path: '', url: '', error: false });
 
   useEffect(() => {
@@ -10300,27 +10308,97 @@ function AssetThumbnail({ path, label, supabaseClient, large = false }: { path: 
     let timer: ReturnType<typeof setTimeout>;
     const loadImage = async () => {
       try {
-        const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(path, 3600);
+        const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(path, expiresIn);
         if (error) throw error;
         if (active) setImage({ path, url: data.signedUrl, error: false });
       } catch (error) {
-        console.error('Thumbnail aset tidak dapat dimuatkan:', error);
+        console.error('Gambar aset tidak dapat dimuatkan:', error);
         if (active) setImage({ path, url: '', error: true });
       }
-      if (active) timer = setTimeout(loadImage, 50 * 60 * 1000);
+      if (active) timer = setTimeout(loadImage, Math.max(expiresIn - 600, 60) * 1000);
     };
     void loadImage();
     return () => { active = false; clearTimeout(timer); };
-  }, [path, supabaseClient]);
+  }, [path, supabaseClient, expiresIn]);
 
-  if (image.path === path && image.error) {
-    return <span role="img" aria-label={`Gambar ${label} tidak dapat dimuatkan`} title="Gambar tidak dapat dimuatkan" className={`flex ${size} shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-xs text-rose-700`}>Ralat</span>;
-  }
-  if (image.path !== path || !image.url) {
-    return <span aria-label={`Memuatkan gambar ${label}`} className={`${size} shrink-0 animate-pulse rounded-lg bg-slate-100`} />;
-  }
-  return <img src={image.url} alt={`Gambar ${label}`} onError={() => setImage({ path, url: '', error: true })} className={`${size} shrink-0 rounded-lg border border-slate-200 bg-white ${fit}`} />;
+  return image;
 }
+
+function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean; onView?: () => void }) {
+  const size = large ? 'h-40 w-40' : 'h-12 w-12';
+  const fit = large ? 'object-contain' : 'object-cover';
+  const image = useSignedAssetUrl(supabaseClient, path);
+
+  let content: React.ReactElement;
+  if (image.path === path && image.error) {
+    content = <span role="img" aria-label={`Gambar ${label} tidak dapat dimuatkan`} title="Gambar tidak dapat dimuatkan" className={`flex ${size} shrink-0 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-xs text-rose-700`}>Ralat</span>;
+  } else if (image.path !== path || !image.url) {
+    content = <span aria-label={`Memuatkan gambar ${label}`} className={`${size} shrink-0 animate-pulse rounded-lg bg-slate-100`} />;
+  } else {
+    content = <img src={image.url} alt={`Gambar ${label}`} className={`${size} shrink-0 rounded-lg border border-slate-200 bg-white ${fit}`} />;
+  }
+
+  if (!onView) return content;
+
+  return (
+    <button
+      type="button"
+      onClick={onView}
+      title={`Lihat gambar ${label}`}
+      aria-label={`Lihat gambar ${label}`}
+      className="shrink-0 cursor-zoom-in rounded-lg transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
+    >
+      {content}
+    </button>
+  );
+}
+
+function AssetImageViewer({ path, label, supabaseClient, onClose }: { path: string; label: string; supabaseClient: SupabaseClient; onClose: () => void }) {
+  const image = useSignedAssetUrl(supabaseClient, path);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`Gambar aset ${label}`} className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/80 p-4 backdrop-blur-sm animate-in fade-in duration-200" onClick={onClose}>
+      <div className="relative flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-3">
+          <div className="min-w-0">
+            <p className="truncate font-mono text-sm font-bold text-slate-800">{label}</p>
+            <p className="text-xs text-slate-500">Gambar aset tersimpan</p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Tutup paparan gambar" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center bg-slate-100 p-4">
+          {image.path === path && image.error && <p className="text-sm font-semibold text-rose-700">Gambar tidak dapat dimuatkan.</p>}
+          {!(image.path === path && image.error) && !(image.path === path && image.url) && <span aria-label={`Memuatkan gambar ${label}`} className="h-72 w-72 animate-pulse rounded-xl bg-slate-200" />}
+          {image.path === path && image.url && (
+            <>
+              {!isLoaded && <span aria-label={`Memuatkan gambar ${label}`} className="h-72 w-72 animate-pulse rounded-xl bg-slate-200" />}
+              <img
+                src={image.url}
+                alt={`Gambar ${label}`}
+                onLoad={() => setIsLoaded(true)}
+                className={`max-h-[72dvh] w-auto max-w-full rounded-xl object-contain ${isLoaded ? 'block' : 'hidden'}`}
+              />
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers, supabaseClient, storageOwnerId }) {
   const initialSupplierCodes = initialData?.supplierCodes || suppliers
@@ -10332,6 +10410,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
   const [imageFile, setImageFile] = useState<File | null>(null);
   const [imagePreview, setImagePreview] = useState('');
   const [imageError, setImageError] = useState('');
+  const [isImageViewerOpen, setIsImageViewerOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const selectableSuppliers = suppliers.filter(item =>
     isRecordVisible(item) || selectedSupplierCodes.includes(item.code)
@@ -10360,6 +10439,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
 
   useEffect(() => {
     const handleAssetModalKeyDown = (event: KeyboardEvent) => {
+      if (isImageViewerOpen) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         if (!isSaving) onClose();
@@ -10371,7 +10451,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     };
     window.addEventListener('keydown', handleAssetModalKeyDown);
     return () => window.removeEventListener('keydown', handleAssetModalKeyDown);
-  }, [onClose, isSaving]);
+  }, [onClose, isSaving, isImageViewerOpen]);
 
   const liveMarketValuation = (parseFloat(formData.weight) || 0) * (currentGoldPrice || 0);
   const costPrice = parseFloat(formData.price) || 0;
@@ -10444,21 +10524,9 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     setImageFile(file);
   };
 
-  const handleViewImage = async () => {
+  const handleViewImage = () => {
     setImageError('');
-    try {
-      const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(initialData.image.path, 60);
-      if (error) throw error;
-      const link = document.createElement('a');
-      link.href = data.signedUrl;
-      link.target = '_blank';
-      link.rel = 'noopener noreferrer';
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-    } catch (error) {
-      setImageError(`Gambar tidak dapat dibuka: ${error instanceof Error ? error.message : 'Ralat storan.'}`);
-    }
+    setIsImageViewerOpen(true);
   };
 
   const handleSubmit = async (e) => {
@@ -10641,7 +10709,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                   {initialData?.image?.path && (
                     <figure className="space-y-1">
                       <figcaption className="text-xs font-semibold text-slate-600">Gambar tersimpan</figcaption>
-                      <AssetThumbnail large path={initialData.image.path} label={initialData.code || 'aset'} supabaseClient={supabaseClient} />
+                      <AssetThumbnail large path={initialData.image.path} label={initialData.code || 'aset'} supabaseClient={supabaseClient} onView={handleViewImage} />
                     </figure>
                   )}
                   {imagePreview && (
@@ -10652,7 +10720,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                   )}
                 </div>
               )}
-              {initialData?.image?.path && <button type="button" onClick={() => void handleViewImage()} disabled={isSaving} className="text-sm font-semibold text-corporate-teal-700 underline underline-offset-2 disabled:opacity-50">Lihat gambar tersimpan</button>}
+              {initialData?.image?.path && <button type="button" onClick={handleViewImage} disabled={isSaving} className="text-sm font-semibold text-corporate-teal-700 underline underline-offset-2 disabled:opacity-50">Lihat gambar tersimpan</button>}
               <input id="asset-image" type="file" accept="image/jpeg,image/png,image/webp" aria-describedby="asset-image-help" onChange={handleImageSelection} disabled={isSaving} className="block w-full text-sm text-slate-700 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-100 file:px-3 file:py-2 file:font-semibold file:text-emerald-800" />
               {imageFile && <button type="button" onClick={() => { setImageFile(null); setImageError(''); }} disabled={isSaving} className="text-sm font-semibold text-slate-600 underline">Batal pilihan gambar baharu</button>}
               {imageError && <p role="alert" className="text-sm text-rose-700">{imageError}</p>}
@@ -10705,6 +10773,15 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
           </div>
         </form>
       </div>
+
+      {isImageViewerOpen && initialData?.image?.path && (
+        <AssetImageViewer
+          path={initialData.image.path}
+          label={initialData.code || 'aset'}
+          supabaseClient={supabaseClient}
+          onClose={() => setIsImageViewerOpen(false)}
+        />
+      )}
     </div>
   );
 }
