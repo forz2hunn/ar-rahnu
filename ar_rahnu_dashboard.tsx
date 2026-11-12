@@ -3918,7 +3918,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {/* MAIN CONTENT */}
       <main className="flex-1 min-w-0 min-h-0 flex flex-col h-full w-full lg:w-auto overflow-hidden">
         {/* HEADER */}
-        <header className="h-16 sm:h-20 bg-white/80 backdrop-blur-md border-b-2 border-corporate-teal-500 flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0">
+        <header className={`h-16 sm:h-20 ${theme === 'dark' ? 'bg-white/80' : 'bg-[#F8F3EA]'} backdrop-blur-md border-b-2 border-corporate-teal-500 flex items-center justify-between gap-2 px-3 sm:px-4 md:px-8 z-10 shrink-0`}>
           <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
             <button
               className="lg:hidden p-2 rounded-lg bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors"
