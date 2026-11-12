@@ -89,6 +89,22 @@ const initialSuppliers = [
   { id: 10, code: 'MG', name: 'Makmur Gold', category: 'Bumiputera & Pelaburan', products: 'Gold Bar 999.9, Dinar Makmur, Barang Kemas 916', website: 'https://makmurgold.com', remarks: 'Syarikat emas pelaburan bumiputera berkembang pesat' }
 ];
 
+const isValidSupplierWebsite = (value: string) => {
+  if (!value.trim()) return true;
+  try {
+    const url = new URL(value.trim());
+    return ['http:', 'https:'].includes(url.protocol) && !!url.hostname && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+};
+
+const supplierCategoryColor = (category: string) => {
+  const colors = ['bg-teal-50 text-teal-800 border-teal-200', 'bg-violet-50 text-violet-800 border-violet-200', 'bg-amber-50 text-amber-900 border-amber-200', 'bg-blue-50 text-blue-800 border-blue-200', 'bg-rose-50 text-rose-800 border-rose-200'];
+  const hash = Array.from(category || '').reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 0);
+  return colors[hash % colors.length];
+};
+
 // --- UTILS & HELPERS ---
 const transactionStatusOptions = [
   'Pajakan Asal', 'Salin', 'OL', 'Tebus Cash', 'Tebus EDT',
@@ -1329,6 +1345,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
+  const [institutionSearch, setInstitutionSearch] = useState('');
+  const [institutionCategoryFilter, setInstitutionCategoryFilter] = useState('Semua');
+  const [institutionBranchFilter, setInstitutionBranchFilter] = useState('Semua');
+  const [supplierCategoryFilter, setSupplierCategoryFilter] = useState('Semua');
+  const [supplierProductFilter, setSupplierProductFilter] = useState('Semua');
   const [toastMessage, setToastMessage] = useState(null);
   const [organizationUsers, setOrganizationUsers] = useState([]);
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -1453,6 +1474,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const isOrganizationAdmin = organizationMembership?.role === 'Admin';
   const [auditView, setAuditView] = useState<'trail' | 'traffic'>('trail');
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [auditSearch, setAuditSearch] = useState('');
+  const [auditModuleFilter, setAuditModuleFilter] = useState('');
+  const [auditActionFilter, setAuditActionFilter] = useState('');
+  const [auditDateFrom, setAuditDateFrom] = useState('');
+  const [auditDateTo, setAuditDateTo] = useState('');
+  const [auditPage, setAuditPage] = useState(0);
+  const [auditPageSize, setAuditPageSize] = useState(20);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState('');
   const [auditVerification, setAuditVerification] = useState('');
@@ -1477,6 +1505,31 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const auditChainScope = organizationMembership?.organization_id
     ? `organization:${organizationMembership.organization_id}`
     : null;
+  const auditModules = [...new Set(auditEvents.map(event => event.event_payload.source_module))].sort();
+  const auditActions = [...new Set(auditEvents.map(event => event.event_payload.action))].sort();
+  const filteredAuditEvents = auditEvents.filter(event => {
+    const payload = event.event_payload;
+    const actor = organizationUsers.find(member => member.id === payload.actor_user_id);
+    const timestamp = new Date(payload.occurred_at_utc);
+    const date = Number.isNaN(timestamp.getTime()) ? '' : getMalaysiaDateKey(timestamp);
+    const query = auditSearch.trim().toLowerCase();
+    return (!query || [event.sequence_no, event.event_id, payload.actor_user_id, actor?.email, payload.action, auditActionLabels[payload.action.toUpperCase()], payload.source_module, auditModuleLabels[payload.source_module], payload.resource_id, payload.source_ip].some(value => String(value || '').toLowerCase().includes(query))) &&
+      (!auditModuleFilter || payload.source_module === auditModuleFilter) &&
+      (!auditActionFilter || payload.action === auditActionFilter) &&
+      (!(auditDateFrom || auditDateTo) || !!date) &&
+      (!auditDateFrom || date >= auditDateFrom) && (!auditDateTo || date <= auditDateTo);
+  });
+  const auditPageCount = Math.max(1, Math.ceil(filteredAuditEvents.length / auditPageSize));
+  const currentAuditPage = Math.min(auditPage, auditPageCount - 1);
+  const visibleAuditEvents = filteredAuditEvents.slice(currentAuditPage * auditPageSize, (currentAuditPage + 1) * auditPageSize);
+
+  useEffect(() => {
+    setAuditPage(0);
+  }, [auditSearch, auditModuleFilter, auditActionFilter, auditDateFrom, auditDateTo, auditPageSize]);
+
+  useEffect(() => {
+    setAuditPage(page => Math.min(page, auditPageCount - 1));
+  }, [auditPageCount]);
 
   useEffect(() => {
     try {
@@ -2004,8 +2057,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const handleGlobalShortcuts = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const isInput = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+      if (isSupplierModalOpen || isInstitutionModalOpen) return;
 
-      if ((event.altKey && event.key.toLowerCase() === 'n') || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'n')) {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k' && activeTab === 'audit' && auditView === 'trail' && !selectedAuditEvent) {
+        event.preventDefault();
+        document.getElementById('audit-search-input')?.focus();
+        return;
+      }
+      if (((event.altKey && event.key.toLowerCase() === 'n') || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'n')) && activeTab !== 'suppliers' && activeTab !== 'institutions') {
         event.preventDefault();
         setEditingTransaction(null);
         setIsModalOpen(true);
@@ -2019,6 +2078,30 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         return;
       }
 
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k' && activeTab === 'suppliers' && !isSupplierModalOpen) {
+        event.preventDefault();
+        document.getElementById('supplier-search-input')?.focus();
+        return;
+      }
+
+      if (event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'n' && activeTab === 'suppliers' && !isSupplierModalOpen) {
+        event.preventDefault();
+        setEditingSupplier(null);
+        setIsSupplierModalOpen(true);
+        return;
+      }
+
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k' && activeTab === 'institutions') {
+        event.preventDefault();
+        document.getElementById('institution-search-input')?.focus();
+        return;
+      }
+      if (event.altKey && !event.ctrlKey && event.key.toLowerCase() === 'n' && activeTab === 'institutions') {
+        event.preventDefault();
+        setEditingInstitution(null);
+        setIsInstitutionModalOpen(true);
+        return;
+      }
       if (!isInput && event.key === '/') {
         event.preventDefault();
         if (activeTab === 'assets') {
@@ -2037,7 +2120,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
-  }, [activeTab]);
+  }, [activeTab, isSupplierModalOpen, isInstitutionModalOpen, auditView, selectedAuditEvent]);
 
   const handleNotificationToggle = async () => {
     if (notificationsEnabled) {
@@ -3310,9 +3393,20 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveInstitution = (instData) => {
-    const savedInstitution = { ...instData, marhunSpreadCustomized: true };
+    const savedInstitution = { ...instData, name: instData.name.trim(), branch: instData.branch.trim(), marhunSpreadCustomized: true };
+    const duplicate = institutions.find(item => item.id !== editingInstitution?.id && String(item.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === savedInstitution.name.replace(/\s+/g, ' ').toLowerCase());
+    if (duplicate || !savedInstitution.name || !savedInstitution.branch || !savedInstitution.category || !Number.isFinite(savedInstitution.maxMargin) || savedInstitution.maxMargin < 50 || savedInstitution.maxMargin > 90 || !Number.isFinite(savedInstitution.marhunRate) || savedInstitution.marhunRate < 0 || !Number.isFinite(savedInstitution.marhunSpread)) {
+      setToastMessage(duplicate ? 'Nama institusi sudah digunakan.' : 'Sila semak maklumat dan kadar institusi.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
     if (editingInstitution) {
-      setInstitutions(prev => prev.map(i => i.id === editingInstitution.id ? { ...savedInstitution, id: editingInstitution.id } : i));
+      if (savedInstitution.name !== editingInstitution.name && transactions.some(tx => tx.institution === editingInstitution.name)) {
+        setToastMessage('Nama tidak boleh diubah kerana digunakan dalam rekod SAG.');
+        setTimeout(() => setToastMessage(null), 4000);
+        return;
+      }
+      setInstitutions(prev => prev.map(i => i.id === editingInstitution.id ? { ...i, ...savedInstitution, id: editingInstitution.id } : i));
       setToastMessage(`Institusi "${savedInstitution.name}" berjaya dikemaskini!`);
     } else {
       setInstitutions(prev => [...prev, { ...savedInstitution, id: Date.now() }]);
@@ -3346,10 +3440,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleSaveSupplier = (supplierData) => {
     const normalizedCode = supplierData.code.trim().toUpperCase();
-    const normalizedName = supplierData.name.trim().toLowerCase();
+    const normalizedName = supplierData.name.trim().replace(/\s+/g, ' ').toLowerCase();
     const duplicate = suppliers.find(item =>
       item.id !== editingSupplier?.id &&
-      (item.code.trim().toUpperCase() === normalizedCode || item.name.trim().toLowerCase() === normalizedName)
+      (String(item.code || '').trim().toUpperCase() === normalizedCode || String(item.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === normalizedName)
     );
     if (duplicate) {
       setToastMessage(`Kod atau nama pembekal telah digunakan oleh "${duplicate.name}".`);
@@ -3357,21 +3451,22 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return;
     }
 
-    const updatedSupplier = { ...supplierData, code: normalizedCode, name: supplierData.name.trim() };
+    const updatedSupplier = { ...supplierData, code: normalizedCode, name: supplierData.name.trim(), category: supplierData.category.trim(), website: supplierData.website.trim() };
+    if (!/^[A-Z0-9]{1,8}$/.test(updatedSupplier.code) || !updatedSupplier.name || !updatedSupplier.category || !isValidSupplierWebsite(updatedSupplier.website)) {
+      setToastMessage('Sila semak kod, nama, kategori dan pautan laman web pembekal.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
     if (editingSupplier) {
       const assetUpdatedAt = new Date().toISOString();
-      setSuppliers(prev => prev.map(item => item.id === editingSupplier.id ? { ...updatedSupplier, id: editingSupplier.id } : item));
+      setSuppliers(prev => prev.map(item => item.id === editingSupplier.id ? { ...item, ...updatedSupplier, id: editingSupplier.id } : item));
       setAssets(prev => prev.map(asset => {
         const codes = asset.supplierCodes || suppliers
           .filter(item => item.name === asset.supplier || asset.supplier?.split(',').map(name => name.trim()).includes(item.name))
           .map(item => item.code);
         if (!codes.includes(editingSupplier.code) && asset.supplier !== editingSupplier.name) return asset;
         const updatedCodes = codes.map(code => code === editingSupplier.code ? updatedSupplier.code : code);
-        const updatedNames = updatedCodes.map(code =>
-          code === updatedSupplier.code
-            ? updatedSupplier.name
-            : suppliers.find(item => item.code === code)?.name
-        ).filter(Boolean);
+        const updatedNames = String(asset.supplier || '').split(',').map(name => name.trim() === editingSupplier.name ? updatedSupplier.name : name.trim()).filter(Boolean);
         return {
           ...asset,
           supplierCodes: updatedCodes,
@@ -3390,15 +3485,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleResetSuppliers = () => {
-    setSuppliers(prev => resetRecordsPreservingDeleted(initialSuppliers, prev));
     setSupplierSearch('');
-    setToastMessage('Senarai 10 pembekal asal telah dimuat semula!');
-    setTimeout(() => setToastMessage(null), 3000);
+    setSupplierCategoryFilter('Semua');
+    setSupplierProductFilter('Semua');
   };
 
+  const supplierCategories = [...new Set(visibleSuppliers.map(supplier => supplier.category).filter(Boolean))];
+  const supplierProducts = [...new Set(visibleSuppliers.flatMap(supplier => String(supplier.products || '').split(',').map(product => product.trim())).filter(Boolean))];
   const filteredSuppliers = visibleSuppliers.filter(supplier =>
     [supplier.code, supplier.name, supplier.category, supplier.products]
-      .some(value => String(value || '').toLowerCase().includes(supplierSearch.trim().toLowerCase()))
+      .some(value => String(value || '').toLowerCase().includes(supplierSearch.trim().toLowerCase())) &&
+    (supplierCategoryFilter === 'Semua' || supplier.category === supplierCategoryFilter) &&
+    (supplierProductFilter === 'Semua' || String(supplier.products || '').split(',').some(product => product.trim() === supplierProductFilter))
+  );
+  const institutionCategories = [...new Set(visibleInstitutions.map(item => item.category).filter(Boolean))].sort();
+  const institutionBranches = [...new Set(visibleInstitutions.map(item => item.branch).filter(Boolean))].sort();
+  const filteredInstitutions = visibleInstitutions.filter(item =>
+    [item.name, item.category, item.branch].some(value => String(value || '').toLowerCase().includes(institutionSearch.trim().toLowerCase())) &&
+    (institutionCategoryFilter === 'Semua' || item.category === institutionCategoryFilter) &&
+    (institutionBranchFilter === 'Semua' || item.branch === institutionBranchFilter)
   );
   const checkedInAssetIds = useMemo(() => getCheckedInAssetIds(transactions), [transactions]);
   const availableAssetsForTransaction = useMemo(
@@ -3809,68 +3914,57 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 md:p-8 relative custom-scrollbar">
 
           {activeTab === 'audit' && canManageOrganizationUsers && (
-            <section className="mx-auto max-w-7xl space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+            <section className="mx-auto max-w-7xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+              <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-800/40 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 text-white shadow-xl sm:p-8">
+                <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/10 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
+                <div className="relative z-10 flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+                  <div>
+                    <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/30 bg-corporate-teal-950/80 px-3.5 py-1 text-xs font-bold text-corporate-teal-200">
+                      <ShieldCheck size={14} className="text-emerald-400" /> PEMATUHAN · JEJAK AUDIT
+                    </div>
+                    <h2 className="flex items-center gap-2.5 text-2xl font-black tracking-tight sm:text-3xl">
+                      <FileSearch size={28} className="text-corporate-teal-300" /> Audit Trail
+                    </h2>
+                    <p className="mt-1 max-w-xl text-xs leading-relaxed text-slate-300 sm:text-sm">
+                      {organizationMembership.organization?.name || 'Organisasi'} · Pantau perubahan portfolio dan organisasi, termasuk metadata serta snapshot sebelum dan selepas.
+                    </p>
+                    {auditView === 'trail' && <p className="mt-2 text-xs text-slate-300">Pintasan: Ctrl + K untuk carian peristiwa</p>}
+                  </div>
+                  {auditView === 'trail' && <div className="flex flex-wrap items-center gap-2.5">
+                    <button type="button" onClick={() => void verifyAuditChain()} disabled={auditLoading} className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 px-4 py-2 text-sm font-bold text-white shadow-lg transition-all hover:bg-corporate-teal-500 disabled:opacity-50">
+                      <ShieldCheck size={16} /> Sahkan rantaian
+                    </button>
+                    <button type="button" onClick={() => void exportAuditChain()} disabled={auditLoading} className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-white/20 disabled:opacity-50">
+                      <DownloadCloud size={16} /> Eksport JSON
+                    </button>
+                    <button type="button" onClick={() => void refreshAuditEvents()} disabled={auditLoading} aria-label="Muat semula peristiwa audit" title="Muat semula peristiwa audit" className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2.5 text-slate-200 transition-all hover:bg-white/15 disabled:opacity-50">
+                      <RefreshCw size={16} className={auditLoading ? 'animate-spin' : ''} />
+                    </button>
+                  </div>}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3">
                 <button
                   type="button"
                   aria-pressed={auditView === 'trail'}
                   onClick={() => setAuditView('trail')}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold ${auditView === 'trail' ? 'bg-corporate-teal-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-extrabold transition-all ${auditView === 'trail' ? 'bg-corporate-teal-600 text-white shadow-md' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'}`}
                 >
-                  Audit Trail
+                  <FileSearch size={16} /> Audit Trail
                 </button>
                 <button
                   type="button"
                   aria-pressed={auditView === 'traffic'}
                   onClick={() => setAuditView('traffic')}
-                  className={`rounded-lg px-4 py-2 text-sm font-semibold ${auditView === 'traffic' ? 'bg-corporate-teal-700 text-white' : 'text-slate-600 hover:bg-slate-50'}`}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-extrabold transition-all ${auditView === 'traffic' ? 'bg-corporate-teal-600 text-white shadow-md' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'}`}
                 >
-                  Traffic Inspector
+                  <Activity size={16} /> Traffic Inspector
                 </button>
               </div>
               {auditView === 'trail' && <>
-              <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
-                <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <h3 className="flex items-center gap-2 text-lg font-bold text-slate-800">
-                      <FileSearch size={20} className="text-corporate-teal-600" />
-                      Audit Trail · {organizationMembership.organization?.name || 'Organisasi'}
-                    </h3>
-                    <p className="mt-1 text-sm text-slate-500">
-                      Rekod kronologi perubahan portfolio dan pengurusan organisasi, termasuk metadata permintaan serta snapshot sebelum/selepas.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void refreshAuditEvents()}
-                      disabled={auditLoading}
-                      className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      {auditLoading ? 'Memproses...' : 'Muat semula'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void verifyAuditChain()}
-                      disabled={auditLoading}
-                      className="inline-flex items-center gap-2 rounded-lg bg-corporate-teal-700 px-3 py-2 text-sm font-semibold text-white hover:bg-corporate-teal-800 disabled:opacity-50"
-                    >
-                      <ShieldCheck size={16} /> Sahkan rantaian
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void exportAuditChain()}
-                      disabled={auditLoading}
-                      className="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                    >
-                      <DownloadCloud size={16} /> Eksport JSON
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
-                <p className="font-bold">Hash chain aktif; WORM dan RFC 3161 belum dikonfigurasi.</p>
+              <details className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+                <summary className="cursor-pointer font-bold">Hash chain aktif; WORM dan RFC 3161 belum dikonfigurasi. Lihat batasan pematuhan</summary>
                 <p className="mt-1">
                   Peristiwa menggunakan jam UTC pangkalan data Supabase dan SHA-256 berantai. Pemilik projek pangkalan data masih boleh memadam atau membina semula rekod; pengesahan ini mengesan kerosakan rantai tetapi bukan bukti WORM atau cap masa bebas. Eksport perlu disimpan di arkib Object Lock yang dikawal berasingan untuk perlindungan tersebut.
                 </p>
@@ -3878,20 +3972,35 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   Peristiwa log masuk/log keluar berautoriti kekal dalam Auth Audit Logs Supabase dan belum digabungkan ke rantaian ini. Alamat IP dan User-Agent bergantung pada header proksi; Device ID mungkin tiada.
                 </p>
                 <p className="mt-1">Sejarah tidak diisi semula: rantaian bermula apabila migrasi dipasang dan hanya merekod perubahan selepas itu.</p>
-              </div>
+              </details>
 
               {auditError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{auditError}</p>}
               {auditVerification && <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">{auditVerification}</p>}
 
-              <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">
-                <div className="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Peristiwa dimuatkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700"><FileSearch size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Maksimum 100 terkini</p></div>
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Hasil penapisan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Search size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-emerald-700">{auditError || auditLoading ? '—' : filteredAuditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Modul direkodkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700"><Activity size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditModules.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
+              </div>
+
+              <div className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-5">
                   <div>
-                    <h4 className="font-bold text-slate-800">Peristiwa terkini</h4>
-                    <p className="text-xs text-slate-500">Paparan terhad kepada 100 peristiwa terakhir. Pengesahan dan eksport merangkumi seluruh rantaian.</p>
+                    <h4 className="flex items-center gap-2 text-lg font-extrabold text-slate-800"><Activity size={19} className="text-corporate-teal-700" /> Peristiwa terkini</h4>
+                    <p className="mt-1 text-xs text-slate-600">Paparan terhad kepada 100 peristiwa terakhir. Pengesahan dan eksport merangkumi seluruh rantaian.</p>
                   </div>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{auditEvents.length} peristiwa</span>
+                  <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700" aria-live="polite">{filteredAuditEvents.length} / {auditEvents.length} peristiwa</span>
                 </div>
-                <div className="overflow-x-auto">
+                <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2 xl:grid-cols-6">
+                  <label className="relative xl:col-span-2"><span className="sr-only">Cari peristiwa audit</span><Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input id="audit-search-input" type="search" value={auditSearch} onChange={event => setAuditSearch(event.target.value)} placeholder="Cari pengguna, tindakan, ID atau IP" className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm focus:ring-2 focus:ring-teal-600 outline-none" /></label>
+                  <select aria-label="Tapis modul audit" value={auditModuleFilter} onChange={event => setAuditModuleFilter(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700"><option value="">Semua modul</option>{auditModules.map(module => <option key={module} value={module}>{auditModuleLabels[module] || module}</option>)}</select>
+                  <select aria-label="Tapis tindakan audit" value={auditActionFilter} onChange={event => setAuditActionFilter(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700"><option value="">Semua tindakan</option>{auditActions.map(action => <option key={action} value={action}>{auditActionLabels[action.toUpperCase()] || action}</option>)}</select>
+                  <label className="text-xs font-semibold text-slate-700">Dari (MYT)<input aria-label="Tarikh audit dari" type="date" value={auditDateFrom} onChange={event => setAuditDateFrom(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /></label>
+                  <label className="text-xs font-semibold text-slate-700">Hingga (MYT)<input aria-label="Tarikh audit hingga" type="date" value={auditDateTo} onChange={event => setAuditDateTo(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /></label>
+                  <button type="button" onClick={() => { setAuditSearch(''); setAuditModuleFilter(''); setAuditActionFilter(''); setAuditDateFrom(''); setAuditDateTo(''); }} className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-100"><RotateCcw size={16} /> Reset penapis</button>
+                </div>
+                {auditDateFrom && auditDateTo && auditDateFrom > auditDateTo && <p role="alert" className="px-4 pt-3 text-sm text-red-700">Tarikh mula mesti sebelum atau sama dengan tarikh akhir.</p>}
+                <div className="overflow-x-auto" role="region" aria-label="Jadual audit; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
                   <table className="w-full min-w-[900px] text-left text-sm">
                     <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500">
                       <tr>
@@ -3904,15 +4013,15 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {auditEvents.map(event => {
+                      {visibleAuditEvents.map(event => {
                         const payload = event.event_payload;
                         const actor = organizationUsers.find(member => member.id === payload.actor_user_id);
                         const actorName = actor?.email ||
                           (payload.actor_user_id === user.id ? user.email : null) ||
                           (payload.actor_user_id ? 'Ahli organisasi' : 'Sistem');
-                        const actionLabel = auditActionLabels[payload.action.toUpperCase()] || 'Perubahan direkodkan';
-                        const moduleLabel = auditModuleLabels[payload.source_module] || 'Sistem';
-                        const resourceLabel = auditResourceLabels[payload.resource_type] || 'Rekod berkaitan';
+                        const actionLabel = auditActionLabels[payload.action.toUpperCase()] || payload.action;
+                        const moduleLabel = auditModuleLabels[payload.source_module] || payload.source_module;
+                        const resourceLabel = auditResourceLabels[payload.resource_type] || payload.resource_type;
                         return (
                           <tr key={event.event_id} className="align-top hover:bg-slate-50">
                             <td className="whitespace-nowrap px-4 py-3">
@@ -3928,7 +4037,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               {actor?.role && <p className="text-xs text-slate-500">{({ Admin: 'Pentadbir', Manager: 'Pengurus', Staff: 'Kakitangan' })[actor.role] || actor.role}</p>}
                             </td>
                             <td className="px-4 py-3" title={`ID rekod berkaitan: ${payload.resource_id}`}>
-                              <p className="font-bold text-slate-800">{actionLabel}</p>
+                              <p className={`inline-block rounded-full border px-2.5 py-1 text-xs font-bold ${supplierCategoryColor(payload.action)}`}>{actionLabel}</p>
                               <p className="text-xs text-slate-500">{moduleLabel} · {resourceLabel}</p>
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-600">{String(payload.source_ip || '—')}</td>
@@ -3945,12 +4054,24 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           </tr>
                         );
                       })}
-                      {!auditLoading && auditEvents.length === 0 && (
-                        <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-500">Belum ada peristiwa audit. Perubahan berikutnya pada pangkalan data akan direkodkan.</td></tr>
+                      {!auditLoading && filteredAuditEvents.length === 0 && (
+                        <tr><td colSpan={6} className="px-4 py-10 text-center text-slate-600">{auditError ? 'Peristiwa audit tidak dapat dimuatkan.' : auditEvents.length ? 'Tiada peristiwa sepadan. Ubah atau reset penapis.' : 'Belum ada peristiwa audit. Perubahan berikutnya pada pangkalan data akan direkodkan.'}</td></tr>
                       )}
                     </tbody>
                   </table>
                 </div>
+                <nav aria-label="Pagination peristiwa audit" className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-5 py-4">
+                  <label className="flex items-center gap-2 text-sm text-slate-700">Rekod setiap halaman
+                    <select aria-label="Rekod audit setiap halaman" value={auditPageSize} onChange={event => setAuditPageSize(Number(event.target.value))} className="rounded-lg border border-slate-300 bg-white px-2 py-1.5">
+                      {[10, 20, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
+                    </select>
+                  </label>
+                  <span aria-live="polite" className="text-sm text-slate-600">{filteredAuditEvents.length ? currentAuditPage * auditPageSize + 1 : 0}–{Math.min((currentAuditPage + 1) * auditPageSize, filteredAuditEvents.length)} daripada {filteredAuditEvents.length} · Halaman {currentAuditPage + 1} / {auditPageCount}</span>
+                  <div className="flex items-center gap-2">
+                    <button type="button" disabled={currentAuditPage === 0} onClick={() => setAuditPage(page => Math.max(0, page - 1))} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40"><ChevronLeft size={16} /> Sebelumnya</button>
+                    <button type="button" disabled={currentAuditPage >= auditPageCount - 1} onClick={() => setAuditPage(page => Math.min(auditPageCount - 1, page + 1))} className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-40">Seterusnya <ChevronRight size={16} /></button>
+                  </div>
+                </nav>
               </div>
 
               {selectedAuditEvent && (
@@ -7163,41 +7284,21 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {/* TAB: SUPPLIER MAINTENANCE */}
           {activeTab === 'suppliers' && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
-                <div>
-                  <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                    <Store className="mr-2 text-emerald-600" size={20} /> Penyelenggaraan Pembekal Emas
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Urus kod, kategori, produk dan maklumat pembekal untuk rekod aset.</p>
-                </div>
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 w-full lg:w-auto">
-                  <label className="relative w-full sm:w-64">
-                    <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                    <input
-                      type="search"
-                      value={supplierSearch}
-                      onChange={event => setSupplierSearch(event.target.value)}
-                      placeholder="Cari kod atau pembekal..."
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-200 rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500"
-                    />
-                  </label>
-                  <button
-                    onClick={handleResetSuppliers}
-                    className="justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2.5 rounded-lg font-semibold flex items-center transition-colors text-xs border border-slate-200"
-                    title="Muat semula senarai 10 pembekal asal"
-                  >
-                    <RotateCcw size={15} className="mr-1.5" /> Reset
-                  </button>
-                  <button
-                    onClick={() => { setEditingSupplier(null); setIsSupplierModalOpen(true); }}
-                    className="justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm text-sm"
-                  >
-                    <Plus size={18} className="mr-1.5" /> Tambah Pembekal
+              <div className="rounded-2xl bg-gradient-to-br from-teal-950 via-teal-900 to-emerald-800 p-6 sm:p-8 text-white shadow-lg">
+                <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-5">
+                  <div>
+                    <p className="text-xs font-bold tracking-widest uppercase text-teal-200">Direktori aset / Pembekal</p>
+                    <h3 className="mt-2 text-2xl sm:text-3xl font-bold tracking-tight">Penyelenggaraan Pembekal Emas</h3>
+                    <p className="mt-2 text-sm text-teal-100 max-w-2xl">Urus maklumat rujukan pembekal dengan tepat untuk rekod aset yang lebih diyakini.</p>
+                  </div>
+                  <button type="button" onClick={() => { setEditingSupplier(null); setIsSupplierModalOpen(true); }} className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm hover:bg-teal-50 focus-visible:ring-2 focus-visible:ring-white">
+                    <Plus size={18} className="mr-2" /> Tambah Pembekal
                   </button>
                 </div>
+                <p className="mt-5 text-xs text-teal-100">Pintasan: Ctrl + K untuk carian · Alt + N untuk pembekal baharu</p>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Jumlah Pembekal</p>
@@ -7212,9 +7313,24 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </div>
                   <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-600 flex items-center justify-center"><Search size={20} /></div>
                 </div>
+                <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
+                  <div><p className="text-xs font-semibold text-slate-500 uppercase">Kategori Pembekal</p><p className="text-2xl font-bold text-slate-800 mt-1">{supplierCategories.length}</p></div>
+                  <div className="w-10 h-10 rounded-lg bg-violet-50 text-violet-700 flex items-center justify-center"><Store size={20} /></div>
+                </div>
               </div>
 
               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden w-full">
+                <div className="p-5 border-b border-slate-200">
+                  <div className="flex flex-wrap items-end justify-between gap-3 mb-4">
+                    <div><h4 className="font-bold text-slate-800">Direktori pembekal</h4><p className="text-sm text-slate-600 mt-1" aria-live="polite">{filteredSuppliers.length} daripada {visibleSuppliers.length} rekod dipaparkan</p></div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[minmax(220px,2fr)_1fr_1fr_auto] gap-3">
+                    <label className="relative"><span className="sr-only">Cari kod atau nama pembekal</span><Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input id="supplier-search-input" type="search" value={supplierSearch} onChange={event => setSupplierSearch(event.target.value)} placeholder="Cari kod atau nama pembekal" className="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-teal-600 outline-none" /></label>
+                    <select value={supplierCategoryFilter} onChange={event => setSupplierCategoryFilter(event.target.value)} aria-label="Tapis kategori pembekal" className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-700 bg-white focus:ring-2 focus:ring-teal-600"><option value="Semua">Semua kategori</option>{supplierCategories.map(category => <option key={category} value={category}>{category}</option>)}</select>
+                    <select value={supplierProductFilter} onChange={event => setSupplierProductFilter(event.target.value)} aria-label="Tapis produk pembekal" className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-700 bg-white focus:ring-2 focus:ring-teal-600"><option value="Semua">Semua produk</option>{supplierProducts.map(product => <option key={product} value={product}>{product}</option>)}</select>
+                    <button type="button" onClick={handleResetSuppliers} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-slate-100"><RotateCcw size={16} /> Reset</button>
+                  </div>
+                </div>
                 <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Jadual pembekal; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
                   <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
                     <thead>
@@ -7233,15 +7349,15 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <tr key={supplier.id} className="hover:bg-slate-50/50 transition-colors group">
                           <td className="p-4"><span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200 px-2.5 py-1 rounded-md"><span className="code-badge-label">{supplier.code}</span></span></td>
                           <td className="p-4 font-bold text-slate-800">{supplier.name}</td>
-                          <td className="p-4"><span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-slate-100 text-slate-700 border border-slate-200">{supplier.category || '-'}</span></td>
+                          <td className="p-4"><span className={`px-2.5 py-1 text-xs font-semibold rounded-full border ${supplierCategoryColor(supplier.category)}`}>{supplier.category || '-'}</span></td>
                           <td className="p-4 text-sm text-slate-600 max-w-xs truncate" title={supplier.products}>{supplier.products || '-'}</td>
                           <td className="p-4">
-                            {supplier.website ? <a href={supplier.website} target="_blank" rel="noreferrer" className="text-emerald-700 hover:text-emerald-900 text-sm inline-flex items-center gap-1">{supplier.website.replace(/^https?:\/\//, '')}<ExternalLink size={13} /></a> : <span className="text-slate-400">-</span>}
+                            {supplier.website && isValidSupplierWebsite(supplier.website) ? <a href={supplier.website} target="_blank" rel="noreferrer" className="text-emerald-700 hover:text-emerald-900 text-sm inline-flex items-center gap-1">{supplier.website.replace(/^https?:\/\//, '')}<ExternalLink size={13} /></a> : <span className="text-slate-600">{supplier.website || '-'}</span>}
                           </td>
                           <td className="p-4 text-xs text-slate-500 max-w-xs truncate" title={supplier.remarks}>{supplier.remarks || '-'}</td>
                           <td className="p-4 text-center whitespace-nowrap">
-                            <button onClick={() => handleEditSupplier(supplier)} className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50" title="Kemaskini pembekal"><Pencil size={18} /></button>
-                            <button onClick={() => handleDeleteSupplier(supplier.id)} className="text-slate-400 hover:text-red-500 transition-colors p-2 rounded-lg hover:bg-red-50" title="Padam pembekal"><Trash2 size={18} /></button>
+                            <button onClick={() => handleEditSupplier(supplier)} className="text-slate-600 hover:text-emerald-700 transition-colors p-2 rounded-lg hover:bg-emerald-50" aria-label={`Kemaskini ${supplier.name}`}><Pencil size={18} /></button>
+                            <button onClick={() => handleDeleteSupplier(supplier.id)} className="text-slate-600 hover:text-red-700 transition-colors p-2 rounded-lg hover:bg-red-50" aria-label={`Padam ${supplier.name}`}><Trash2 size={18} /></button>
                           </td>
                         </tr>
                       ))}
@@ -7259,13 +7375,13 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {activeTab === 'institutions' && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
               {/* Header & Controls */}
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
+              <div className="rounded-2xl bg-gradient-to-br from-teal-950 via-teal-900 to-emerald-800 p-6 sm:p-8 text-white shadow-lg">
+                <div className="flex flex-col lg:flex-row justify-between lg:items-end gap-5">
                 <div>
-                  <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                    <Building2 className="mr-2 text-emerald-600" size={20} /> Senarai Institusi & Koperasi (Bangi)
-                  </h3>
-                  <p className="text-xs text-slate-500 mt-0.5">Penyelenggaraan kadar marhun (RM/g), margin pinjaman (%) dan maklumat cawangan koperasi/pajak gadai.</p>
-                  <p className="text-xs text-amber-700 mt-1">
+                  <p className="text-xs font-bold tracking-widest uppercase text-teal-200">Direktori / Institusi & Koperasi</p>
+                  <h3 className="mt-2 text-2xl sm:text-3xl font-bold tracking-tight">Institusi & Koperasi</h3>
+                  <p className="text-sm text-teal-100 mt-2">Urus cawangan, margin dan kadar marhun untuk rujukan operasi.</p>
+                  <p className="text-xs text-teal-100 mt-3 max-w-3xl">
                     Anggaran = harga spot emas live + spread setiap institusi; bukan kadar rasmi. Sumber:{' '}
                     <a href="https://api.gold-api.com/price/XAU" target="_blank" rel="noreferrer" className="underline">Gold API</a>
                     {' '}dan{' '}
@@ -7273,19 +7389,19 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     {' '}Sila sahkan spread dengan institusi.
                   </p>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                <div className="flex flex-wrap items-center gap-2">
                   <button
                     onClick={() => handleRefresh()}
                     disabled={isRefreshing || visibleInstitutions.length === 0}
-                    className="flex-1 sm:flex-none justify-center bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white px-3.5 py-2.5 rounded-lg font-semibold flex items-center transition-colors text-xs shadow-sm"
+                    className="justify-center bg-teal-700 hover:bg-teal-600 disabled:opacity-50 text-white px-4 py-3 rounded-xl font-semibold flex items-center text-sm border border-teal-500"
                     title="Segar semula anggaran kadar untuk semua institusi"
                   >
                     <RefreshCw size={15} className={`mr-1.5 ${isRefreshing ? 'animate-spin' : ''}`} />
                     {isRefreshing ? 'Mengambil harga...' : 'Segar Semula Semua'}
                   </button>
                   <button
-                    onClick={handleResetInstitutions}
-                    className="flex-1 sm:flex-none justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 px-3.5 py-2.5 rounded-lg font-semibold flex items-center transition-colors text-xs shadow-sm border border-slate-200"
+                    onClick={() => { if (window.confirm('Muat semula senarai asal Bangi? Rekod institusi semasa mungkin digantikan.')) handleResetInstitutions(); }}
+                    className="justify-center bg-teal-900 hover:bg-teal-800 text-white px-4 py-3 rounded-xl font-semibold flex items-center text-sm border border-teal-500"
                     title="Muat semula senarai 5 institusi asal Bangi"
                   >
                     <RotateCcw size={15} className="mr-1.5" /> Reset Bangi
@@ -7295,15 +7411,17 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       setEditingInstitution(null);
                       setIsInstitutionModalOpen(true);
                     }}
-                    className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-4 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm text-sm"
+                    className="justify-center bg-white hover:bg-teal-50 text-teal-900 px-4 py-3 rounded-xl font-bold flex items-center shadow-sm text-sm"
                   >
                     <Plus size={18} className="mr-1.5" /> Tambah Institusi
                   </button>
                 </div>
+                </div>
+                <p className="mt-5 text-xs text-teal-100">Pintasan: Ctrl + K untuk carian · Alt + N untuk institusi baharu</p>
               </div>
 
               {/* Summary Metric Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-5 gap-4">
                 <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
                   <div>
                     <p className="text-xs font-semibold text-slate-500 uppercase">Institusi Berdaftar</p>
@@ -7312,6 +7430,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div className="w-10 h-10 rounded-lg bg-emerald-50 text-emerald-600 flex items-center justify-center">
                     <Building2 size={20} />
                   </div>
+                </div>
+                <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
+                  <div><p className="text-xs font-semibold text-slate-500 uppercase">Hasil Carian</p><p className="text-2xl font-bold text-slate-800 mt-1">{filteredInstitutions.length}</p><p className="text-xs text-slate-500">Rekod sepadan</p></div>
+                  <div className="w-10 h-10 rounded-lg bg-blue-50 text-blue-700 flex items-center justify-center"><Search size={20} /></div>
                 </div>
                 <div className="bg-white p-4 rounded-xl border border-slate-100 shadow-sm flex items-center justify-between">
                   <div>
@@ -7353,6 +7475,16 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
               {/* Institutions Table */}
               <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden w-full">
+                <div className="p-5 border-b border-slate-200">
+                  <h4 className="font-bold text-slate-800">Direktori institusi</h4>
+                  <p className="text-sm text-slate-600 mt-1 mb-4" aria-live="polite">{filteredInstitutions.length} daripada {visibleInstitutions.length} rekod dipaparkan</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-[minmax(220px,2fr)_1fr_1fr_auto] gap-3">
+                    <label className="relative"><span className="sr-only">Cari institusi atau cawangan</span><Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input id="institution-search-input" type="search" value={institutionSearch} onChange={event => setInstitutionSearch(event.target.value)} placeholder="Cari nama, kategori atau cawangan" className="w-full pl-10 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:ring-2 focus:ring-teal-600 outline-none" /></label>
+                    <select aria-label="Tapis kategori institusi" value={institutionCategoryFilter} onChange={event => setInstitutionCategoryFilter(event.target.value)} className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-700 bg-white focus:ring-2 focus:ring-teal-600"><option value="Semua">Semua kategori</option>{institutionCategories.map(category => <option key={category} value={category}>{category}</option>)}</select>
+                    <select aria-label="Tapis cawangan institusi" value={institutionBranchFilter} onChange={event => setInstitutionBranchFilter(event.target.value)} className="w-full px-3 py-2.5 border border-slate-300 rounded-xl text-sm text-slate-700 bg-white focus:ring-2 focus:ring-teal-600"><option value="Semua">Semua cawangan</option>{institutionBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}</select>
+                    <button type="button" onClick={() => { setInstitutionSearch(''); setInstitutionCategoryFilter('Semua'); setInstitutionBranchFilter('Semua'); }} className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold text-slate-700 hover:bg-slate-100"><RotateCcw size={16} /> Reset</button>
+                  </div>
+                </div>
                 <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Jadual institusi; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
                   <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
                     <thead>
@@ -7368,7 +7500,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
-                      {visibleInstitutions.map((inst) => {
+                      {filteredInstitutions.map((inst) => {
                         const is80 = inst.maxMargin >= 80;
                         const is70 = inst.maxMargin === 70;
                         return (
@@ -7385,7 +7517,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               </div>
                             </td>
                             <td className="p-4">
-                              <span className="px-2.5 py-1 text-xs font-semibold rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                              <span className={`px-2.5 py-1 text-xs font-semibold rounded-full border ${supplierCategoryColor(inst.category || 'Koperasi')}`}>
                                 {inst.category || 'Koperasi'}
                               </span>
                             </td>
@@ -7440,6 +7572,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 disabled={isRefreshing}
                                 className="text-slate-400 hover:text-blue-600 disabled:opacity-50 transition-colors p-2 rounded-lg hover:bg-blue-50"
                                 title={`Refresh anggaran kadar ${inst.name}`}
+                                aria-label={`Segar semula ${inst.name}`}
                               >
                                 <RefreshCw size={18} className={isRefreshing ? 'animate-spin' : ''} />
                               </button>
@@ -7447,6 +7580,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 onClick={() => handleEditInstitution(inst)}
                                 className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50"
                                 title="Edit Maklumat Institusi"
+                                aria-label={`Kemaskini ${inst.name}`}
                               >
                                 <Pencil size={18} />
                               </button>
@@ -7454,6 +7588,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 onClick={() => handleDeleteInstitution(inst.id)}
                                 className="text-slate-400 hover:text-red-500 transition-colors p-2 rounded-lg hover:bg-red-50"
                                 title="Padam Institusi"
+                                aria-label={`Padam ${inst.name}`}
                               >
                                 <Trash2 size={18} />
                               </button>
@@ -7461,9 +7596,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           </tr>
                         );
                       })}
-                      {visibleInstitutions.length === 0 && (
+                      {filteredInstitutions.length === 0 && (
                         <tr>
-                          <td colSpan="8" className="p-8 text-center text-slate-400">Tiada institusi didaftarkan. Sila klik "Reset Bangi" atau "Tambah Institusi".</td>
+                          <td colSpan="8" className="p-8 text-center text-slate-600">Tiada institusi ditemui. Ubah penapis atau tambah institusi baharu.</td>
                         </tr>
                       )}
                     </tbody>
@@ -8543,6 +8678,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {isInstitutionModalOpen && (
         <InstitutionModal
           initialData={editingInstitution}
+          institutions={institutions}
+          nameInUse={Boolean(editingInstitution && transactions.some(tx => tx.institution === editingInstitution.name))}
           currentGoldPrice={currentGoldPrice}
           onClose={() => {
             setIsInstitutionModalOpen(false);
@@ -8556,6 +8693,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {isSupplierModalOpen && (
         <SupplierModal
           initialData={editingSupplier}
+          suppliers={suppliers}
           onClose={() => {
             setIsSupplierModalOpen(false);
             setEditingSupplier(null);
@@ -10432,7 +10570,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers 
   );
 }
 
-function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
+function InstitutionModal({ initialData, institutions, nameInUse, currentGoldPrice, onClose, onSave }) {
   const [formData, setFormData] = useState({
     name: initialData?.name || '',
     category: initialData?.category || 'Koperasi',
@@ -10444,6 +10582,18 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
       : Number(((initialData?.marhunRate ?? 590.00) - currentGoldPrice).toFixed(2)),
     remarks: initialData?.remarks || ''
   });
+  const [submitted, setSubmitted] = useState(false);
+  const normalizedName = formData.name.trim().replace(/\s+/g, ' ').toLowerCase();
+  const duplicate = institutions.find(item => item.id !== initialData?.id && normalizedName && String(item.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === normalizedName);
+  const nameError = !normalizedName ? 'Nama institusi diperlukan.' : duplicate ? 'Nama institusi sudah digunakan, termasuk rekod yang dipadam.' : '';
+  const branchError = !formData.branch.trim() ? 'Cawangan diperlukan.' : '';
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.getElementById('institution-name')?.focus();
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKeyDown);
+    return () => { window.removeEventListener('keydown', onKeyDown); previousFocus?.focus(); };
+  }, []);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -10452,45 +10602,54 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
 
   const handleSubmit = (e) => {
     e.preventDefault();
+    setSubmitted(true);
+    if (nameError || branchError) return;
     onSave({
       ...formData,
-      maxMargin: parseFloat(formData.maxMargin) || 70,
-      marhunRate: parseFloat(formData.marhunRate) || 0,
+      maxMargin: Number(formData.maxMargin),
+      marhunRate: Number(formData.marhunRate),
       marhunSpread: Number(formData.marhunSpread)
     });
   };
 
   return (
     <div className="fixed inset-0 z-[55] flex items-center justify-center p-2 sm:p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="min-w-0 bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90dvh] sm:max-h-[95dvh] overflow-y-auto custom-scrollbar animate-in zoom-in-95 duration-200">
+      <div role="dialog" aria-modal="true" aria-labelledby="institution-modal-title" className="min-w-0 bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90dvh] sm:max-h-[95dvh] overflow-y-auto custom-scrollbar animate-in zoom-in-95 duration-200">
         <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
-          <h2 className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
+          <h2 id="institution-modal-title" className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
             <Building2 className="mr-2 text-emerald-600" size={20} />
             {initialData ? 'Kemaskini Institusi / Koperasi' : 'Daftar Institusi / Koperasi Baharu'}
           </h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200">
+          <button type="button" onClick={onClose} aria-label="Tutup" className="text-slate-400 hover:text-slate-700 transition-colors p-2 rounded-full hover:bg-slate-200">
             <X size={20} />
           </button>
         </div>
 
         <form onSubmit={handleSubmit} className="p-4 sm:p-6">
+          <div className="mb-4"><h3 className="font-bold text-slate-800">Maklumat utama</h3><p className="text-sm text-slate-600">Medan bertanda * wajib diisi.</p></div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6">
             <div className="space-y-1 md:col-span-2">
-              <label className="text-sm font-semibold text-slate-700">Nama Institusi / Koperasi</label>
+              <label htmlFor="institution-name" className="text-sm font-semibold text-slate-700">Nama Institusi / Koperasi *</label>
               <input
+                id="institution-name"
                 type="text"
                 name="name"
                 value={formData.name}
                 onChange={handleChange}
                 placeholder="Cth: Koputra - Bank Muamalat / KPDRM - PDRM"
                 required
+                readOnly={nameInUse}
+                aria-invalid={Boolean((submitted || normalizedName) && nameError)}
+                aria-describedby="institution-name-help"
                 className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
               />
+              <p id="institution-name-help" className={`text-xs ${nameError && (submitted || normalizedName) ? 'text-red-700' : 'text-slate-600'}`}>{(submitted || normalizedName) && nameError ? nameError : nameInUse ? 'Nama dikunci kerana digunakan dalam rekod SAG.' : ''}</p>
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Kategori</label>
+              <label htmlFor="institution-category" className="text-sm font-semibold text-slate-700">Kategori *</label>
               <select
+                id="institution-category"
                 name="category"
                 value={formData.category}
                 onChange={handleChange}
@@ -10504,21 +10663,27 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Cawangan / Lokasi di Bangi</label>
+              <label htmlFor="institution-branch" className="text-sm font-semibold text-slate-700">Cawangan / Lokasi *</label>
               <input
+                id="institution-branch"
                 type="text"
                 name="branch"
                 value={formData.branch}
                 onChange={handleChange}
                 placeholder="Cth: Seksyen 9, Bandar Baru Bangi"
                 required
+                aria-invalid={Boolean(submitted && branchError)}
+                aria-describedby="institution-branch-help"
                 className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
               />
+              <p id="institution-branch-help" className="text-xs text-red-700">{submitted && branchError}</p>
             </div>
 
+            <div className="md:col-span-2 pt-4 border-t border-slate-200"><h3 className="font-bold text-slate-800">Kadar & syarat</h3><p className="text-sm text-slate-600">Sahkan angka dengan institusi sebelum digunakan.</p></div>
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Margin Maksimum (%)</label>
+              <label htmlFor="institution-margin" className="text-sm font-semibold text-slate-700">Margin Maksimum (%) *</label>
               <input
+                id="institution-margin"
                 type="number"
                 step="1"
                 min="50"
@@ -10533,10 +10698,12 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Kadar Marhun Semasa (RM/g)</label>
+              <label htmlFor="institution-rate" className="text-sm font-semibold text-slate-700">Kadar Marhun Semasa (RM/g) *</label>
               <input
+                id="institution-rate"
                 type="number"
                 step="0.01"
+                min="0"
                 name="marhunRate"
                 value={formData.marhunRate}
                 onChange={handleChange}
@@ -10547,8 +10714,9 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Spread Anggaran (RM/g)</label>
+              <label htmlFor="institution-spread" className="text-sm font-semibold text-slate-700">Spread Anggaran (RM/g) *</label>
               <input
+                id="institution-spread"
                 type="number"
                 step="0.01"
                 name="marhunSpread"
@@ -10561,8 +10729,9 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
             </div>
 
             <div className="space-y-1 md:col-span-2">
-              <label className="text-sm font-semibold text-slate-700">Catatan / Syarat Khusus (Opsional)</label>
+              <label htmlFor="institution-remarks" className="text-sm font-semibold text-slate-700">Catatan / Syarat Khusus (Pilihan)</label>
               <input
+                id="institution-remarks"
                 type="text"
                 name="remarks"
                 value={formData.remarks}
@@ -10594,7 +10763,7 @@ function InstitutionModal({ initialData, currentGoldPrice, onClose, onSave }) {
   );
 }
 
-function SupplierModal({ initialData, onClose, onSave }) {
+function SupplierModal({ initialData, suppliers, onClose, onSave }) {
   const [formData, setFormData] = useState({
     code: initialData?.code || '',
     name: initialData?.name || '',
@@ -10603,6 +10772,27 @@ function SupplierModal({ initialData, onClose, onSave }) {
     website: initialData?.website || '',
     remarks: initialData?.remarks || ''
   });
+  const [submitted, setSubmitted] = useState(false);
+  const normalizedName = formData.name.trim().replace(/\s+/g, ' ').toLowerCase();
+  const normalizedCode = formData.code.trim().toUpperCase();
+  const duplicateCode = suppliers.find(item => item.id !== initialData?.id && String(item.code || '').trim().toUpperCase() === normalizedCode && normalizedCode);
+  const duplicateName = suppliers.find(item => item.id !== initialData?.id && String(item.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === normalizedName && normalizedName);
+  const codeError = !/^[A-Z0-9]{1,8}$/.test(normalizedCode) ? 'Gunakan 1 hingga 8 huruf atau nombor tanpa ruang.' : duplicateCode ? `Kod telah digunakan oleh ${duplicateCode.name}.` : '';
+  const nameError = !normalizedName ? 'Nama pembekal diperlukan.' : duplicateName ? `Nama telah digunakan oleh kod ${duplicateName.code}.` : '';
+  const categoryError = !formData.category.trim() ? 'Kategori diperlukan.' : '';
+  const websiteError = !isValidSupplierWebsite(formData.website) ? 'Masukkan URL http:// atau https:// yang sah.' : '';
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    document.getElementById('supplier-code')?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      previousFocus?.focus();
+    };
+  }, []);
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -10611,6 +10801,8 @@ function SupplierModal({ initialData, onClose, onSave }) {
 
   const handleSubmit = (event) => {
     event.preventDefault();
+    setSubmitted(true);
+    if (codeError || nameError || categoryError || websiteError) return;
     onSave({
       ...formData,
       code: formData.code.trim().toUpperCase(),
@@ -10629,9 +10821,9 @@ function SupplierModal({ initialData, onClose, onSave }) {
 
   return (
     <div className="fixed inset-0 z-[55] flex items-center justify-center p-2 sm:p-4 bg-slate-900/70 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="min-w-0 bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90dvh] sm:max-h-[95dvh] overflow-y-auto custom-scrollbar animate-in zoom-in-95 duration-200">
+      <div role="dialog" aria-modal="true" aria-labelledby="supplier-modal-title" className="min-w-0 bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90dvh] sm:max-h-[95dvh] overflow-y-auto custom-scrollbar animate-in zoom-in-95 duration-200">
         <div className="flex justify-between items-center p-4 sm:p-6 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
-          <h2 className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
+          <h2 id="supplier-modal-title" className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
             <Store className="mr-2 text-emerald-600" size={20} />
             {initialData ? 'Kemaskini Pembekal' : 'Daftar Pembekal Baharu'}
           </h2>
@@ -10640,32 +10832,39 @@ function SupplierModal({ initialData, onClose, onSave }) {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="p-4 sm:p-6">
+        <form onSubmit={handleSubmit} noValidate className="p-4 sm:p-6">
+          <div className="mb-4"><h3 className="font-bold text-slate-800">Maklumat utama</h3><p className="text-sm text-slate-600">Medan bertanda * wajib diisi. Kod digunakan sebagai rujukan aset.</p></div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-5 mb-6">
             <div className="space-y-1">
               <div className="flex justify-between items-center">
-                <label htmlFor="supplier-code" className="text-sm font-semibold text-slate-700">Kod Pembekal</label>
+                <label htmlFor="supplier-code" className="text-sm font-semibold text-slate-700">Kod Pembekal *</label>
                 <button type="button" onClick={generateCode} className="text-xs text-emerald-700 hover:text-emerald-800 font-bold flex items-center bg-emerald-50 hover:bg-emerald-100 px-2 py-1 rounded-md border border-emerald-200">
                   <RefreshCw size={12} className="mr-1" /> Jana Kod
                 </button>
               </div>
-              <input id="supplier-code" name="code" value={formData.code} onChange={handleChange} required maxLength={8} placeholder="Cth: PG" className="w-full p-2.5 border border-slate-300 rounded-lg font-mono font-bold uppercase focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <input id="supplier-code" name="code" value={formData.code} onChange={handleChange} required aria-invalid={Boolean((submitted || normalizedCode) && codeError)} aria-describedby="supplier-code-help" maxLength={8} placeholder="Cth: PG" className="w-full p-2.5 border border-slate-300 rounded-lg font-mono font-bold uppercase focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <p id="supplier-code-help" className="text-xs text-red-700">{(submitted || normalizedCode) && codeError}</p>
             </div>
             <div className="space-y-1">
-              <label htmlFor="supplier-name" className="text-sm font-semibold text-slate-700">Nama Pembekal</label>
-              <input id="supplier-name" name="name" value={formData.name} onChange={handleChange} required placeholder="Cth: Public Gold" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <label htmlFor="supplier-name" className="text-sm font-semibold text-slate-700">Nama Pembekal *</label>
+              <input id="supplier-name" name="name" value={formData.name} onChange={handleChange} required aria-invalid={Boolean((submitted || normalizedName) && nameError)} aria-describedby="supplier-name-help" placeholder="Cth: Public Gold" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <p id="supplier-name-help" className="text-xs text-red-700">{(submitted || normalizedName) && nameError}</p>
             </div>
             <div className="space-y-1 md:col-span-2">
-              <label htmlFor="supplier-category" className="text-sm font-semibold text-slate-700">Kategori</label>
-              <input id="supplier-category" name="category" value={formData.category} onChange={handleChange} placeholder="Cth: Bullion & Pelaburan" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <label htmlFor="supplier-category" className="text-sm font-semibold text-slate-700">Kategori *</label>
+              <input id="supplier-category" name="category" value={formData.category} onChange={handleChange} required aria-invalid={Boolean(submitted && categoryError)} aria-describedby="supplier-category-help" list="supplier-category-options" placeholder="Cth: Bullion & Pelaburan" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <datalist id="supplier-category-options">{[...new Set(suppliers.map(item => item.category).filter(Boolean))].map(category => <option key={String(category)} value={String(category)} />)}</datalist>
+              <p id="supplier-category-help" className="text-xs text-red-700">{submitted && categoryError}</p>
             </div>
+            <div className="md:col-span-2 pt-4 border-t border-slate-200"><h3 className="font-bold text-slate-800">Maklumat sokongan</h3><p className="text-sm text-slate-600">Pilihan, untuk memudahkan semakan dan rujukan.</p></div>
             <div className="space-y-1 md:col-span-2">
               <label htmlFor="supplier-products" className="text-sm font-semibold text-slate-700">Produk / Perkhidmatan</label>
               <textarea id="supplier-products" name="products" value={formData.products} onChange={handleChange} rows={2} placeholder="Senaraikan produk utama" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none resize-y" />
             </div>
             <div className="space-y-1 md:col-span-2">
               <label htmlFor="supplier-website" className="text-sm font-semibold text-slate-700">Laman Web</label>
-              <input id="supplier-website" type="url" name="website" value={formData.website} onChange={handleChange} placeholder="https://contoh.com" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <input id="supplier-website" type="url" name="website" value={formData.website} onChange={handleChange} aria-invalid={Boolean(websiteError)} aria-describedby="supplier-website-help" placeholder="https://contoh.com" className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none" />
+              <p id="supplier-website-help" className="text-xs text-red-700">{websiteError}</p>
             </div>
             <div className="space-y-1 md:col-span-2">
               <label htmlFor="supplier-remarks" className="text-sm font-semibold text-slate-700">Catatan</label>
