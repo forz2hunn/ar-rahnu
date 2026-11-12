@@ -11326,7 +11326,7 @@ function useSignedAssetUrl(supabaseClient: SupabaseClient, path: string, expires
 
 function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean; onView?: () => void }) {
   const size = large ? 'h-40 w-40' : 'h-12 w-12';
-  const fit = large ? 'object-contain' : 'object-cover';
+  const fit = 'object-contain';
   const image = useSignedAssetUrl(supabaseClient, path);
 
   let content: React.ReactElement;
@@ -11335,7 +11335,7 @@ function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: 
   } else if (image.path !== path || !image.url) {
     content = <span aria-label={`Memuatkan gambar ${label}`} className={`${size} shrink-0 animate-pulse rounded-lg bg-slate-100`} />;
   } else {
-    content = <img src={image.url} alt={`Gambar ${label}`} className={`${size} shrink-0 rounded-lg border border-slate-200 bg-white ${fit}`} />;
+    content = <img src={image.url} alt={`Gambar ${label}`} className={`${size} shrink-0 rounded-lg border border-slate-200 bg-transparent ${fit}`} />;
   }
 
   if (!onView) return content;
@@ -12336,7 +12336,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                   {imagePreview && (
                     <figure className="space-y-1">
                       <figcaption className="text-xs font-semibold text-emerald-700">Gambar baharu</figcaption>
-                      <img src={imagePreview} alt="Pratonton gambar aset baharu" className="h-40 w-40 rounded-lg border border-emerald-300 bg-white object-contain" />
+                      <img src={imagePreview} alt="Pratonton gambar aset baharu" className="h-40 w-40 rounded-lg border border-emerald-300 bg-transparent object-contain" />
                     </figure>
                   )}
                 </div>
