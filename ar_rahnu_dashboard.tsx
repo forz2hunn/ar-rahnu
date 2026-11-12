@@ -66,7 +66,9 @@ import {
   AlertTriangle,
   UserCheck,
   UserX,
-  Lock
+  Lock,
+  Landmark,
+  Smartphone
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
@@ -8851,6 +8853,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           user={user}
           supabaseClient={supabaseClient}
           theme={theme}
+          eligibility={{
+            portfolioValue: visibleAssets.reduce((sum, asset) => sum + (parseFloat(asset.weight) || 0), 0) * (currentGoldPrice || 0),
+            maxMargin: visibleInstitutions.length ? Math.max(...visibleInstitutions.map(institution => Number(institution.maxMargin) || 0)) : 0,
+            activeLetters: transactions.filter(transaction => !['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status)).length
+          }}
           onClose={() => setIsProfileModalOpen(false)}
         />
       )}
@@ -8915,14 +8922,41 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
 // --- SUB-COMPONENTS ---
 
-function ProfileModal({ user, supabaseClient, theme, onClose }: {
+type ProfileSectionId = 'personal' | 'heir' | 'bank' | 'security' | 'pdpa';
+
+function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
   user: User;
   supabaseClient: SupabaseClient;
   theme: 'light' | 'dark';
+  eligibility?: { portfolioValue: number; maxMargin: number; activeLetters: number };
   onClose: () => void;
 }) {
-  const [fullName, setFullName] = useState(String(user.user_metadata?.full_name || user.user_metadata?.name || ''));
+  const metadata = (user.user_metadata || {}) as Record<string, string>;
+  const [fullName, setFullName] = useState(String(metadata.full_name || metadata.name || ''));
   const [email, setEmail] = useState(user.email || '');
+  const [icNumber] = useState(String(metadata.ic_number || ''));
+  const [profileForm, setProfileForm] = useState({
+    phone: String(metadata.phone || ''),
+    addressLine: String(metadata.address_line || ''),
+    city: String(metadata.city || ''),
+    postcode: String(metadata.postcode || ''),
+    state: String(metadata.state || '')
+  });
+  const [heirForm, setHeirForm] = useState({
+    name: String(metadata.heir_name || ''),
+    relationship: String(metadata.heir_relationship || ''),
+    phone: String(metadata.heir_phone || '')
+  });
+  const [bankForm, setBankForm] = useState({
+    bankName: String(metadata.bank_name || ''),
+    accountName: String(metadata.bank_account_name || ''),
+    accountNumber: String(metadata.bank_account_number || '')
+  });
+  const [pdpaConsent, setPdpaConsent] = useState(Boolean(metadata.pdpa_consent_at));
+  const [pdpaConsentAt, setPdpaConsentAt] = useState(String(metadata.pdpa_consent_at || ''));
+  const [activeSection, setActiveSection] = useState<ProfileSectionId>('personal');
+  const [mobileView, setMobileView] = useState<'menu' | 'section'>('menu');
+  const [showIcHelp, setShowIcHelp] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -8933,17 +8967,6 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
   const [passwordError, setPasswordError] = useState('');
   const [passwordNotice, setPasswordNotice] = useState('');
   const isDark = theme === 'dark';
-  const cardClass = isDark ? 'border-corporate-teal-800 bg-corporate-teal-950 text-slate-100' : 'border-slate-200 bg-white text-slate-800';
-  const headingClass = isDark ? 'text-white' : 'text-slate-800';
-  const secondaryTextClass = isDark ? 'text-slate-300' : 'text-slate-500';
-  const labelClass = isDark ? 'text-slate-200' : 'text-slate-700';
-  const inputClass = `mt-1.5 w-full rounded-lg border px-3 py-2.5 outline-none focus:ring-2 ${
-    isDark
-      ? 'border-corporate-teal-700 bg-corporate-teal-900 text-white focus:border-corporate-teal-400 focus:ring-corporate-teal-800'
-      : 'border-slate-300 text-slate-800 focus:border-corporate-teal-500 focus:ring-corporate-teal-100'
-  }`;
-  const errorClass = isDark ? 'bg-red-950 text-red-200' : 'bg-red-50 text-red-700';
-  const noticeClass = isDark ? 'bg-corporate-teal-900 text-corporate-teal-100' : 'bg-emerald-50 text-emerald-800';
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -8958,6 +8981,19 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
     };
   }, [onClose, profileBusy, passwordBusy]);
 
+  const requiredProfileFields = [fullName, icNumber, profileForm.phone, profileForm.addressLine, profileForm.postcode, heirForm.name, heirForm.relationship, bankForm.accountNumber];
+  const completedProfileFields = requiredProfileFields.filter(value => String(value || '').trim().length > 0).length;
+  const isProfileComplete = completedProfileFields === requiredProfileFields.length;
+  const portfolioValue = Math.max(0, Number(eligibility?.portfolioValue) || 0);
+  const maxMargin = Math.max(0, Number(eligibility?.maxMargin) || 0);
+  const maxFinancing = portfolioValue * (maxMargin / 100);
+
+  const saveMetadata = async (patch: Record<string, unknown>, successMessage: string) => {
+    const { error } = await supabaseClient.auth.updateUser({ data: { ...user.user_metadata, ...patch } });
+    if (error) throw error;
+    setProfileNotice(successMessage);
+  };
+
   const handleProfileSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setProfileBusy(true);
@@ -8971,10 +9007,23 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
       setProfileBusy(false);
       return;
     }
+    if (profileForm.postcode && !/^\d{5}$/.test(profileForm.postcode.trim())) {
+      setProfileError('Poskod hendaklah 5 digit angka.');
+      setProfileBusy(false);
+      return;
+    }
 
     try {
       const updates: { data: Record<string, unknown>; email?: string } = {
-        data: { ...user.user_metadata, full_name: normalizedName }
+        data: {
+          ...user.user_metadata,
+          full_name: normalizedName,
+          phone: profileForm.phone.trim(),
+          address_line: profileForm.addressLine.trim(),
+          city: profileForm.city.trim(),
+          postcode: profileForm.postcode.trim(),
+          state: profileForm.state
+        }
       };
       const emailChanged = normalizedEmail !== (user.email || '').toLowerCase();
       if (emailChanged) updates.email = normalizedEmail;
@@ -8983,10 +9032,77 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
       if (error) throw error;
 
       setProfileNotice(emailChanged
-        ? 'Nama profil disimpan. Pautan pengesahan e-mel dihantar ke alamat baharu; alamat akaun akan berubah selepas pengesahan.'
-        : 'Profil berjaya dikemas kini.');
+        ? 'Maklumat peribadi disimpan. Pautan pengesahan e-mel dihantar ke alamat baharu; alamat akaun akan berubah selepas pengesahan.'
+        : 'Maklumat peribadi & alamat berjaya disimpan.');
     } catch (error) {
       setProfileError(error.message || 'Profil tidak dapat dikemas kini.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const handleHeirSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+    if (!heirForm.name.trim() || !heirForm.relationship) {
+      setProfileError('Nama waris dan hubungan waris diperlukan.');
+      setProfileBusy(false);
+      return;
+    }
+    try {
+      await saveMetadata({
+        heir_name: heirForm.name.trim(),
+        heir_relationship: heirForm.relationship,
+        heir_phone: heirForm.phone.trim()
+      }, 'Maklumat waris (penama) berjaya disimpan.');
+    } catch (error) {
+      setProfileError(error.message || 'Maklumat waris tidak dapat disimpan.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const handleBankSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+    if (!bankForm.bankName.trim() || !bankForm.accountName.trim() || !/^\d{6,20}$/.test(bankForm.accountNumber.trim())) {
+      setProfileError('Lengkapkan nama bank, nama pemilik akaun dan nombor akaun (6–20 digit).');
+      setProfileBusy(false);
+      return;
+    }
+    try {
+      await saveMetadata({
+        bank_name: bankForm.bankName.trim(),
+        bank_account_name: bankForm.accountName.trim(),
+        bank_account_number: bankForm.accountNumber.trim()
+      }, 'Akaun bank untuk pengkreditan berjaya disimpan.');
+    } catch (error) {
+      setProfileError(error.message || 'Akaun bank tidak dapat disimpan.');
+    } finally {
+      setProfileBusy(false);
+    }
+  };
+
+  const handlePdpaSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+    if (!pdpaConsent) {
+      setProfileError('Sila tandakan persetujuan PDPA sebelum menyimpan.');
+      setProfileBusy(false);
+      return;
+    }
+    try {
+      const consentAt = pdpaConsentAt || new Date().toISOString();
+      await saveMetadata({ pdpa_consent_at: consentAt }, 'Persetujuan PDPA direkodkan.');
+      setPdpaConsentAt(consentAt);
+    } catch (error) {
+      setProfileError(error.message || 'Persetujuan tidak dapat disimpan.');
     } finally {
       setProfileBusy(false);
     }
@@ -9035,9 +9151,45 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
     }
   };
 
+  const sections: { id: ProfileSectionId; label: string; description: string; icon: React.ReactElement; complete: boolean }[] = [
+    { id: 'personal', label: 'Butiran Peribadi & Alamat', description: 'Nama, IC, telefon dan alamat surat-menyurat', icon: <UserRound size={18} />, complete: Boolean(fullName && icNumber && profileForm.phone && profileForm.addressLine && profileForm.postcode) },
+    { id: 'heir', label: 'Maklumat Waris (Penama)', description: 'Penama untuk urusan tuntutan harta pusaka', icon: <Users size={18} />, complete: Boolean(heirForm.name && heirForm.relationship) },
+    { id: 'bank', label: 'Akaun Bank untuk Pengkreditan', description: 'Akaun penerima lebihan tunai atau tebus', icon: <Landmark size={18} />, complete: Boolean(bankForm.bankName && bankForm.accountNumber) },
+    { id: 'security', label: 'Keselamatan & Kata Laluan', description: 'Tukar kata laluan akaun anda', icon: <KeyRound size={18} />, complete: true },
+    { id: 'pdpa', label: 'Notis Privasi & Persetujuan PDPA', description: 'Persetujuan penggunaan data peribadi', icon: <ShieldCheck size={18} />, complete: Boolean(pdpaConsentAt) }
+  ];
+
+  const stateOptions = ['Johor', 'Kedah', 'Kelantan', 'Melaka', 'Negeri Sembilan', 'Pahang', 'Perak', 'Perlis', 'Pulau Pinang', 'Sabah', 'Sarawak', 'Selangor', 'Terengganu', 'W.P. Kuala Lumpur', 'W.P. Labuan', 'W.P. Putrajaya'];
+  const bankOptions = ['Maybank', 'Bank Islam', 'Bank Rakyat', 'CIMB Bank', 'Public Bank', 'RHB Bank', 'Hong Leong Bank', 'AmBank', 'Bank Muamalat', 'BSN', 'Affin Bank', 'Alliance Bank', 'OCBC Bank', 'HSBC Bank', 'Standard Chartered', 'Lain-lain'];
+  const heirRelationships = ['Suami / Isteri', 'Ibu / Bapa', 'Anak', 'Adik-beradik', 'Lain-lain'];
+
+  const inputClass = `mt-1.5 w-full rounded-xl border px-3.5 py-3 text-base outline-none transition focus:ring-2 sm:text-sm ${
+    isDark
+      ? 'border-corporate-teal-700 bg-corporate-teal-900 text-white focus:border-corporate-teal-400 focus:ring-corporate-teal-800'
+      : 'border-slate-300 text-slate-800 focus:border-corporate-teal-500 focus:ring-corporate-teal-100'
+  }`;
+  const readOnlyClass = `mt-1.5 flex w-full items-center justify-between gap-2 rounded-xl border px-3.5 py-3 text-sm font-semibold ${
+    isDark ? 'border-corporate-teal-800 bg-corporate-teal-900/60 text-slate-200' : 'border-slate-200 bg-slate-100 text-slate-700'
+  }`;
+  const cardClass = isDark ? 'border-corporate-teal-800 bg-corporate-teal-950 text-slate-100' : 'border-slate-200 bg-white text-slate-800';
+  const headingClass = isDark ? 'text-white' : 'text-slate-800';
+  const secondaryTextClass = isDark ? 'text-slate-300' : 'text-slate-500';
+  const labelClass = isDark ? 'text-slate-200' : 'text-slate-700';
+  const errorClass = isDark ? 'bg-red-950 text-red-200' : 'bg-red-50 text-red-700';
+  const noticeClass = isDark ? 'bg-corporate-teal-900 text-corporate-teal-100' : 'bg-emerald-50 text-emerald-800';
+  const saveButtonClass = 'inline-flex w-full items-center justify-center gap-2 rounded-xl bg-corporate-teal-600 px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto';
+
+  const renderField = (label: string, node: React.ReactNode, hint?: string, required = false) => (
+    <label className={`block text-sm font-medium ${labelClass}`}>
+      <span>{label}{required && <span className="ml-0.5 text-rose-600">*</span>}</span>
+      {node}
+      {hint && <span className={`mt-1 block text-xs font-normal leading-relaxed ${secondaryTextClass}`}>{hint}</span>}
+    </label>
+  );
+
   return (
     <div
-      className="fixed inset-0 z-[65] flex items-center justify-center bg-slate-950/60 p-3 backdrop-blur-sm sm:p-6"
+      className="fixed inset-0 z-[65] flex items-end justify-center bg-slate-950/60 backdrop-blur-sm sm:items-center sm:p-6"
       onMouseDown={event => {
         if (event.target === event.currentTarget && !profileBusy && !passwordBusy) onClose();
       }}
@@ -9046,120 +9198,432 @@ function ProfileModal({ user, supabaseClient, theme, onClose }: {
         role="dialog"
         aria-modal="true"
         aria-labelledby="profile-modal-title"
-        className={`relative max-h-[92dvh] w-full max-w-2xl overflow-y-auto rounded-2xl border p-5 shadow-2xl sm:p-7 ${cardClass}`}
+        className={`relative flex max-h-[94dvh] w-full max-w-4xl flex-col overflow-hidden rounded-t-2xl border shadow-2xl sm:max-h-[92dvh] sm:rounded-2xl ${cardClass}`}
       >
-        <button
-          type="button"
-          onClick={onClose}
-          disabled={profileBusy || passwordBusy}
-          aria-label="Tutup pengurusan profil"
-          className={`absolute right-4 top-4 rounded-lg p-2 disabled:opacity-50 ${isDark ? 'text-slate-300 hover:bg-corporate-teal-800 hover:text-white' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}
-        >
-          <X size={20} />
-        </button>
-
-        <div className="mb-6 flex items-center gap-3 pr-10">
-          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-corporate-teal-100 text-corporate-teal-700">
-            <UserRound size={22} />
+        <div className="shrink-0 border-b border-slate-200/70 bg-gradient-to-br from-corporate-teal-700 via-corporate-teal-800 to-corporate-green-900 px-4 pb-4 pt-4 text-white sm:px-6 sm:pb-5 sm:pt-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15 text-white">
+                <UserRound size={22} />
+              </div>
+              <div>
+                <h2 id="profile-modal-title" className="text-lg font-bold sm:text-xl">Profil Saya</h2>
+                <p className="text-xs text-teal-100 sm:text-sm">{user.email || 'Akaun pelanggan'}</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={profileBusy || passwordBusy}
+              aria-label="Tutup pengurusan profil"
+              className="rounded-lg p-2 text-white/80 transition-colors hover:bg-white/15 hover:text-white disabled:opacity-50"
+            >
+              <X size={20} />
+            </button>
           </div>
-          <div>
-            <h2 id="profile-modal-title" className={`text-xl font-bold ${headingClass}`}>Pengurusan Profil</h2>
-            <p className={`text-sm ${secondaryTextClass}`}>Kemas kini maklumat akaun dan keselamatan anda.</p>
+
+          <div className="mt-4 rounded-xl bg-white/10 p-3 backdrop-blur-sm sm:p-4">
+            <div className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-bold ${isProfileComplete ? 'bg-[#34d399] text-[#052e16]' : 'bg-[#fcd34d] text-[#78350f]'}`}>
+              <ShieldCheck size={13} />
+              <span>{isProfileComplete ? 'Akaun Disahkan · Sedia untuk Transaksi' : 'Lengkapan Profil Diperlukan'}</span>
+            </div>
+            <p className="mt-2 text-xs leading-relaxed text-teal-50">
+              {isProfileComplete
+                ? 'Maklumat anda lengkap. Anda boleh menebus atau menyambung gadaian tanpa halangan.'
+                : 'Lengkapkan profil untuk menebus atau menyambung gadai. Maklumat yang tidak lengkap boleh melambatkan proses pengesahan.'}
+            </p>
+
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:gap-3">
+              <div className="rounded-lg bg-white/10 p-2.5 sm:p-3">
+                <p className="text-[9px] font-bold uppercase tracking-wider text-teal-100 sm:text-[10px]">Nilai Marhun</p>
+                <p className="mt-0.5 font-mono text-sm font-black sm:text-lg">{formatRM(portfolioValue)}</p>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/20 sm:mt-2">
+                  <div className="h-full rounded-full bg-emerald-300" style={{ width: `${Math.min(100, maxMargin)}%` }} />
+                </div>
+                <p className="mt-1 text-[9px] text-teal-100 sm:text-[10px]">{eligibility?.activeLetters || 0} surat aktif</p>
+              </div>
+              <div className="rounded-lg bg-white/10 p-2.5 sm:p-3">
+                <p className="text-[9px] font-bold uppercase tracking-wider text-teal-100 sm:text-[10px]">Had Pembiayaan</p>
+                <p className="mt-0.5 font-mono text-sm font-black sm:text-lg">{formatRM(maxFinancing)}</p>
+                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-white/20 sm:mt-2">
+                  <div className="h-full rounded-full bg-amber-300" style={{ width: `${Math.min(100, maxMargin)}%` }} />
+                </div>
+                <p className="mt-1 text-[9px] text-teal-100 sm:text-[10px]">Margin {maxMargin}%</p>
+              </div>
+            </div>
+
+            <p className="mt-3 text-[11px] font-semibold text-teal-100">
+              Kelengkapan profil: {completedProfileFields}/{requiredProfileFields.length} maklumat
+            </p>
           </div>
         </div>
 
-        <form onSubmit={handleProfileSubmit} className={`rounded-xl border p-4 sm:p-5 ${isDark ? 'border-corporate-teal-800' : 'border-slate-200'}`}>
-          <h3 className={`font-semibold ${headingClass}`}>Maklumat profil</h3>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <label className={`block text-sm font-medium ${labelClass}`}>
-              Nama paparan
-              <input
-                type="text"
-                autoComplete="name"
-                autoFocus
-                required
-                minLength={2}
-                maxLength={80}
-                value={fullName}
-                onChange={event => setFullName(event.target.value)}
-                className={inputClass}
-              />
-            </label>
-            <label className={`block text-sm font-medium ${labelClass}`}>
-              Alamat e-mel
-              <input
-                type="email"
-                autoComplete="email"
-                required
-                value={email}
-                onChange={event => setEmail(event.target.value)}
-                className={inputClass}
-              />
-            </label>
-          </div>
-          <p className={`mt-3 text-xs leading-relaxed ${secondaryTextClass}`}>
-            Jika alamat e-mel ditukar, Supabase akan meminta pengesahan e-mel sebelum perubahan digunakan.
-          </p>
-          {profileError && <p role="alert" className={`mt-3 rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
-          {profileNotice && <p role="status" className={`mt-3 rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
-          <div className="mt-4 flex justify-end">
-            <button type="submit" disabled={profileBusy} className="rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60">
-              {profileBusy ? 'Menyimpan...' : 'Simpan profil'}
-            </button>
-          </div>
-        </form>
+        <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">
+          <div className="lg:grid lg:grid-cols-[16rem_1fr]">
+            <nav aria-label="Menu profil" className={`border-b p-3 lg:border-b-0 lg:border-r lg:p-3 ${isDark ? 'border-corporate-teal-800' : 'border-slate-200'} ${mobileView === 'menu' ? 'block' : 'hidden lg:block'}`}>
+              <ul className="space-y-1.5">
+                {sections.map(section => {
+                  const isActive = activeSection === section.id;
+                  return (
+                    <li key={section.id}>
+                      <button
+                        type="button"
+                        onClick={() => { setActiveSection(section.id); setMobileView('section'); setProfileError(''); setProfileNotice(''); }}
+                        aria-current={isActive ? 'true' : undefined}
+                        className={`flex w-full items-center gap-3 rounded-xl border px-3 py-3 text-left transition-colors ${
+                          isActive
+                            ? isDark ? 'border-corporate-teal-600 bg-corporate-teal-800 text-white' : 'border-corporate-teal-200 bg-corporate-teal-50 text-corporate-teal-900'
+                            : isDark ? 'border-transparent text-slate-200 hover:bg-corporate-teal-900' : 'border-transparent text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${isActive ? 'bg-corporate-teal-600 text-white' : isDark ? 'bg-corporate-teal-900 text-corporate-teal-300' : 'bg-slate-100 text-corporate-teal-700'}`}>
+                          {section.icon}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-semibold leading-snug">{section.label}</span>
+                          <span className={`mt-0.5 flex items-center gap-1 text-[11px] ${section.complete ? 'text-emerald-600' : isDark ? 'text-[#fcd34d]' : 'text-[#b45309]'}`}>
+                            {section.complete ? <><CheckCircle2 size={11} /> Lengkap</> : <><AlertCircle size={11} /> Belum lengkap</>}
+                          </span>
+                        </span>
+                        <ChevronRight size={16} className="shrink-0 opacity-50" />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </nav>
 
-        <form onSubmit={handlePasswordSubmit} className={`mt-5 rounded-xl border p-4 sm:p-5 ${isDark ? 'border-corporate-teal-800' : 'border-slate-200'}`}>
-          <div className="flex items-center gap-2">
-            <KeyRound size={18} className="text-corporate-teal-700" />
-            <h3 className={`font-semibold ${headingClass}`}>Tukar kata laluan</h3>
+            <div className={`p-4 sm:p-6 ${mobileView === 'section' ? 'block' : 'hidden lg:block'}`}>
+              <button
+                type="button"
+                onClick={() => setMobileView('menu')}
+                className={`mb-4 inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm font-semibold lg:hidden ${isDark ? 'text-corporate-teal-300 hover:bg-corporate-teal-900' : 'text-corporate-teal-700 hover:bg-slate-100'}`}
+              >
+                <ChevronLeft size={16} /> Kembali ke menu
+              </button>
+
+              {activeSection === 'personal' && (
+                <form onSubmit={handleProfileSubmit} className="space-y-4">
+                  <div>
+                    <h3 className={`text-base font-bold ${headingClass}`}>Butiran Peribadi & Alamat</h3>
+                    <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Maklumat ini digunakan untuk pengesahan identiti dan surat-menyurat rasmi.</p>
+                  </div>
+
+                  <div className={`rounded-xl border p-3.5 ${isDark ? 'border-[#78350f] bg-[#3b1d05]' : 'border-[#fcd34d] bg-[#fffbeb]'}`}>
+                    <div className="flex items-center gap-1.5 text-xs font-bold text-[#92400e]">
+                      <Lock size={13} /> Dikunci untuk keselamatan
+                    </div>
+                    <div className="mt-2 space-y-2">
+                      <div>
+                        <p className={`text-[10px] font-bold uppercase tracking-wide ${secondaryTextClass}`}>Nama Penuh (seperti dalam IC)</p>
+                        <p className="text-sm font-semibold">{fullName || 'Belum didaftarkan'}</p>
+                      </div>
+                      <div>
+                        <p className={`text-[10px] font-bold uppercase tracking-wide ${secondaryTextClass}`}>Nombor Kad Pengenalan</p>
+                        <p className="font-mono text-sm font-semibold">{icNumber || 'Belum didaftarkan'}</p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowIcHelp(value => !value)}
+                      aria-expanded={showIcHelp}
+                      className="mt-2 !h-auto !min-h-0 !border-0 !bg-transparent !p-0 text-left text-xs font-semibold text-[#92400e] underline underline-offset-2"
+                    >
+                      Perlu tukar nama/IC? Hubungi Khidmat Pelanggan
+                    </button>
+                    {showIcHelp && (
+                      <div className="mt-2 space-y-1 rounded-lg bg-white/80 p-2.5 text-[11px] leading-relaxed text-[#78350f]">
+                        <p>1. E-mel sokongan@arrahnu.example dengan subjek &quot;Pembetulan Nama/IC&quot;.</p>
+                        <p>2. Muat naik salinan Kad Pengenalan dan dokumen sokongan (sijil lahir / surat pengesahan).</p>
+                        <p>3. Permohonan disemak dalam 1–3 hari bekerja. Nama dan IC tidak boleh diubah sendiri bagi mengelakkan penipuan.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {renderField('Alamat E-mel', (
+                    <input
+                      type="email"
+                      inputMode="email"
+                      autoComplete="email"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      required
+                      value={email}
+                      onChange={event => setEmail(event.target.value)}
+                      className={inputClass}
+                    />
+                  ), 'Jika e-mel ditukar, pengesahan e-mel diperlukan sebelum perubahan digunakan.')}
+
+                  {renderField('No. Telefon (WhatsApp)', (
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      autoComplete="tel"
+                      pattern="[0-9+ ]*"
+                      placeholder="cth. 0123456789"
+                      value={profileForm.phone}
+                      onChange={event => setProfileForm(previous => ({ ...previous, phone: event.target.value.replace(/[^0-9+ ]/g, '') }))}
+                      className={inputClass}
+                    />
+                  ), undefined, true)}
+
+                  {renderField('Alamat Surat-menyurat', (
+                    <input
+                      type="text"
+                      autoComplete="street-address"
+                      placeholder="No. rumah, jalan, taman"
+                      value={profileForm.addressLine}
+                      onChange={event => setProfileForm(previous => ({ ...previous, addressLine: event.target.value }))}
+                      className={inputClass}
+                    />
+                  ), undefined, true)}
+
+                  {renderField('Bandar', (
+                    <input
+                      type="text"
+                      autoComplete="address-level2"
+                      value={profileForm.city}
+                      onChange={event => setProfileForm(previous => ({ ...previous, city: event.target.value }))}
+                      className={inputClass}
+                    />
+                  ))}
+
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                    {renderField('Poskod', (
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="postal-code"
+                        maxLength={5}
+                        placeholder="cth. 43650"
+                        value={profileForm.postcode}
+                        onChange={event => setProfileForm(previous => ({ ...previous, postcode: event.target.value.replace(/\D/g, '').slice(0, 5) }))}
+                        className={inputClass}
+                      />
+                    ), undefined, true)}
+                    {renderField('Negeri', (
+                      <select
+                        value={profileForm.state}
+                        onChange={event => setProfileForm(previous => ({ ...previous, state: event.target.value }))}
+                        className={inputClass}
+                      >
+                        <option value="">Pilih negeri</option>
+                        {stateOptions.map(state => <option key={state} value={state}>{state}</option>)}
+                      </select>
+                    ))}
+                  </div>
+
+                  {profileError && <p role="alert" className={`rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
+                  {profileNotice && <p role="status" className={`rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
+
+                  <button type="submit" disabled={profileBusy} className={saveButtonClass}>
+                    {profileBusy ? 'Menyimpan...' : 'Simpan Maklumat'}
+                  </button>
+                </form>
+              )}
+
+              {activeSection === 'heir' && (
+                <form onSubmit={handleHeirSubmit} className="space-y-4">
+                  <div>
+                    <h3 className={`text-base font-bold ${headingClass}`}>Maklumat Waris (Penama)</h3>
+                    <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Penama membantu proses tuntutan harta sekiranya berlaku kematian.</p>
+                  </div>
+
+                  {renderField('Nama Penuh Waris', (
+                    <input
+                      type="text"
+                      autoComplete="name"
+                      placeholder="Nama seperti dalam IC waris"
+                      value={heirForm.name}
+                      onChange={event => setHeirForm(previous => ({ ...previous, name: event.target.value }))}
+                      className={inputClass}
+                    />
+                  ), undefined, true)}
+
+                  {renderField('Hubungan dengan Anda', (
+                    <select
+                      value={heirForm.relationship}
+                      onChange={event => setHeirForm(previous => ({ ...previous, relationship: event.target.value }))}
+                      className={inputClass}
+                    >
+                      <option value="">Pilih hubungan</option>
+                      {heirRelationships.map(relationship => <option key={relationship} value={relationship}>{relationship}</option>)}
+                    </select>
+                  ), undefined, true)}
+
+                  {renderField('No. Telefon Waris', (
+                    <input
+                      type="tel"
+                      inputMode="numeric"
+                      pattern="[0-9+ ]*"
+                      placeholder="cth. 0123456789"
+                      value={heirForm.phone}
+                      onChange={event => setHeirForm(previous => ({ ...previous, phone: event.target.value.replace(/[^0-9+ ]/g, '') }))}
+                      className={inputClass}
+                    />
+                  ))}
+
+                  <div className={`rounded-xl border p-3 text-xs leading-relaxed ${isDark ? 'border-corporate-teal-800 bg-corporate-teal-900 text-slate-200' : 'border-corporate-teal-200 bg-corporate-teal-50 text-corporate-teal-900'}`}>
+                    <Info size={14} className="mr-1 inline" />
+                    Maklumat ini hanya digunakan untuk urusan tuntutan harta pusaka mengikut hukum Syarak sekiranya berlaku kematian.
+                  </div>
+
+                  {profileError && <p role="alert" className={`rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
+                  {profileNotice && <p role="status" className={`rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
+
+                  <button type="submit" disabled={profileBusy} className={saveButtonClass}>
+                    {profileBusy ? 'Menyimpan...' : 'Simpan Maklumat Waris'}
+                  </button>
+                </form>
+              )}
+
+              {activeSection === 'bank' && (
+                <form onSubmit={handleBankSubmit} className="space-y-4">
+                  <div>
+                    <h3 className={`text-base font-bold ${headingClass}`}>Akaun Bank untuk Pengkreditan</h3>
+                    <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Akaun ini menerima lebihan tunai atau bayaran tebus anda.</p>
+                  </div>
+
+                  {renderField('Nama Bank', (
+                    <select
+                      value={bankForm.bankName}
+                      onChange={event => setBankForm(previous => ({ ...previous, bankName: event.target.value }))}
+                      className={inputClass}
+                    >
+                      <option value="">Pilih bank</option>
+                      {bankOptions.map(bank => <option key={bank} value={bank}>{bank}</option>)}
+                    </select>
+                  ), undefined, true)}
+
+                  {renderField('Nama Pemilik Akaun', (
+                    <input
+                      type="text"
+                      autoComplete="name"
+                      placeholder="Nama seperti dalam buku akaun"
+                      value={bankForm.accountName}
+                      onChange={event => setBankForm(previous => ({ ...previous, accountName: event.target.value }))}
+                      className={inputClass}
+                    />
+                  ), 'Nama pemilik akaun mesti sepadan dengan nama pendaftaran.', true)}
+
+                  {renderField('Nombor Akaun Bank', (
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      placeholder="cth. 1234567890"
+                      value={bankForm.accountNumber}
+                      onChange={event => setBankForm(previous => ({ ...previous, accountNumber: event.target.value.replace(/\D/g, '').slice(0, 20) }))}
+                      className={inputClass}
+                    />
+                  ), 'Hanya angka, 6–20 digit. Sila semak sebelum menyimpan.', true)}
+
+                  {profileError && <p role="alert" className={`rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
+                  {profileNotice && <p role="status" className={`rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
+
+                  <button type="submit" disabled={profileBusy} className={saveButtonClass}>
+                    {profileBusy ? 'Menyimpan...' : 'Simpan Akaun Bank'}
+                  </button>
+                </form>
+              )}
+
+              {activeSection === 'security' && (
+                <form onSubmit={handlePasswordSubmit} className="space-y-4">
+                  <div>
+                    <h3 className={`flex items-center gap-2 text-base font-bold ${headingClass}`}><KeyRound size={18} className="text-corporate-teal-700" /> Keselamatan & Kata Laluan</h3>
+                    <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Sahkan kata laluan semasa sebelum menetapkan kata laluan baharu.</p>
+                  </div>
+
+                  <div className={`rounded-xl border p-3 text-xs leading-relaxed ${isDark ? 'border-corporate-teal-800 bg-corporate-teal-900 text-slate-200' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+                    <p className="flex items-center gap-1.5 font-semibold"><Mail size={13} /> Emel akaun: {user.email || '-'}</p>
+                    <p className="mt-1 flex items-center gap-1.5 font-semibold"><Smartphone size={13} /> Log masuk terakhir: {user.last_sign_in_at ? new Date(user.last_sign_in_at).toLocaleString('ms-MY') : '-'}</p>
+                  </div>
+
+                  {renderField('Kata Laluan Semasa', (
+                    <input
+                      type="password"
+                      autoComplete="current-password"
+                      required
+                      value={currentPassword}
+                      onChange={event => setCurrentPassword(event.target.value)}
+                      className={inputClass}
+                    />
+                  ), undefined, true)}
+
+                  {renderField('Kata Laluan Baharu', (
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={12}
+                      value={newPassword}
+                      onChange={event => setNewPassword(event.target.value)}
+                      className={inputClass}
+                    />
+                  ), 'Sekurang-kurangnya 12 aksara. Gunakan gabungan huruf, nombor dan simbol.', true)}
+
+                  {renderField('Sahkan Kata Laluan Baharu', (
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      required
+                      minLength={12}
+                      value={confirmPassword}
+                      onChange={event => setConfirmPassword(event.target.value)}
+                      className={inputClass}
+                    />
+                  ), undefined, true)}
+
+                  {passwordError && <p role="alert" className={`rounded-lg p-3 text-sm ${errorClass}`}>{passwordError}</p>}
+                  {passwordNotice && <p role="status" className={`rounded-lg p-3 text-sm ${noticeClass}`}>{passwordNotice}</p>}
+
+                  <button type="submit" disabled={passwordBusy} className={saveButtonClass}>
+                    {passwordBusy ? 'Mengemas kini...' : 'Tukar Kata Laluan'}
+                  </button>
+                </form>
+              )}
+
+              {activeSection === 'pdpa' && (
+                <form onSubmit={handlePdpaSubmit} className="space-y-4">
+                  <div>
+                    <h3 className={`flex items-center gap-2 text-base font-bold ${headingClass}`}><ShieldCheck size={18} className="text-corporate-teal-700" /> Notis Privasi & Persetujuan PDPA</h3>
+                    <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Akta Perlindungan Data Peribadi 2010 (Akta 709).</p>
+                  </div>
+
+                  <div className={`space-y-2 rounded-xl border p-4 text-xs leading-relaxed ${isDark ? 'border-corporate-teal-800 bg-corporate-teal-900 text-slate-200' : 'border-slate-200 bg-slate-50 text-slate-700'}`}>
+                    <p>Tujuan pemprosesan: pengesahan identiti, penilaian marhun, pengurusan gadaian, pematuhan audit dan keperluan undang-undang Syariah.</p>
+                    <p>Data dikongsi hanya dengan institusi pembiayaan berkaitan, pihak audit dan penguat kuasa jika diarahkan undang-undang.</p>
+                    <p>Anda berhak mengakses, membetulkan atau menarik balik persetujuan dengan menghubungi Khidmat Pelanggan. Penarikan balik boleh menjejaskan keupayaan memproses transaksi gadaian.</p>
+                    <p>Data disimpan selamat dan hanya sepanjang tempoh yang diperlukan untuk tujuan di atas.</p>
+                  </div>
+
+                  <label className={`flex items-start gap-2.5 rounded-xl border p-3.5 text-sm ${isDark ? 'border-corporate-teal-800 bg-corporate-teal-900/60' : 'border-slate-200 bg-white'}`}>
+                    <input
+                      type="checkbox"
+                      checked={pdpaConsent}
+                      onChange={event => setPdpaConsent(event.target.checked)}
+                      className="mt-0.5 h-5 w-5 shrink-0 rounded border-slate-300 text-corporate-teal-600 focus:ring-corporate-teal-500"
+                    />
+                    <span className={labelClass}>Saya telah membaca dan bersetuju dengan Notis Privasi serta pemprosesan data peribadi saya untuk tujuan di atas.</span>
+                  </label>
+
+                  {pdpaConsentAt && (
+                    <p className={`text-xs font-semibold ${secondaryTextClass}`}>
+                      Persetujuan direkodkan pada {new Date(pdpaConsentAt).toLocaleString('ms-MY')}.
+                    </p>
+                  )}
+
+                  {profileError && <p role="alert" className={`rounded-lg p-3 text-sm ${errorClass}`}>{profileError}</p>}
+                  {profileNotice && <p role="status" className={`rounded-lg p-3 text-sm ${noticeClass}`}>{profileNotice}</p>}
+
+                  <button type="submit" disabled={profileBusy} className={saveButtonClass}>
+                    {profileBusy ? 'Menyimpan...' : 'Simpan Persetujuan'}
+                  </button>
+                </form>
+              )}
+            </div>
           </div>
-          <p className={`mt-1 text-xs ${secondaryTextClass}`}>Sahkan kata laluan semasa sebelum menetapkan kata laluan baharu.</p>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <label className={`block text-sm font-medium sm:col-span-2 ${labelClass}`}>
-              Kata laluan semasa
-              <input
-                type="password"
-                autoComplete="current-password"
-                required
-                value={currentPassword}
-                onChange={event => setCurrentPassword(event.target.value)}
-                className={inputClass}
-              />
-            </label>
-            <label className={`block text-sm font-medium ${labelClass}`}>
-              Kata laluan baharu
-              <input
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={12}
-                value={newPassword}
-                onChange={event => setNewPassword(event.target.value)}
-                className={inputClass}
-              />
-            </label>
-            <label className={`block text-sm font-medium ${labelClass}`}>
-              Sahkan kata laluan baharu
-              <input
-                type="password"
-                autoComplete="new-password"
-                required
-                minLength={12}
-                value={confirmPassword}
-                onChange={event => setConfirmPassword(event.target.value)}
-                className={inputClass}
-              />
-            </label>
-          </div>
-          {passwordError && <p role="alert" className={`mt-3 rounded-lg p-3 text-sm ${errorClass}`}>{passwordError}</p>}
-          {passwordNotice && <p role="status" className={`mt-3 rounded-lg p-3 text-sm ${noticeClass}`}>{passwordNotice}</p>}
-          <div className="mt-4 flex justify-end">
-            <button type="submit" disabled={passwordBusy} className="rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60">
-              {passwordBusy ? 'Mengemas kini...' : 'Tukar kata laluan'}
-            </button>
-          </div>
-        </form>
+        </div>
       </section>
     </div>
   );
