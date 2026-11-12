@@ -9329,7 +9329,8 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
   const metadata = (user.user_metadata || {}) as Record<string, string>;
   const [fullName, setFullName] = useState(String(metadata.full_name || metadata.name || ''));
   const [email, setEmail] = useState(user.email || '');
-  const [icNumber] = useState(String(metadata.ic_number || ''));
+  const [icNumber, setIcNumber] = useState(String(metadata.ic_number || ''));
+  const [memberNo, setMemberNo] = useState(String(metadata.member_no || ''));
   const [profileForm, setProfileForm] = useState({
     phone: String(metadata.phone || ''),
     addressLine: String(metadata.address_line || ''),
@@ -9375,6 +9376,21 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
       window.removeEventListener('keydown', handleKeyDown);
     };
   }, [onClose, profileBusy, passwordBusy]);
+
+  useEffect(() => {
+    let active = true;
+    supabaseClient.auth.getUser().then(({ data }) => {
+      if (!active || !data.user) return;
+      const fresh = (data.user.user_metadata || {}) as Record<string, string>;
+      const nextName = String(fresh.full_name || fresh.name || '');
+      if (nextName) setFullName(nextName);
+      setIcNumber(String(fresh.ic_number || ''));
+      setMemberNo(String(fresh.member_no || ''));
+    }).catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [supabaseClient]);
 
   const requiredProfileFields = [fullName, icNumber, profileForm.phone, profileForm.addressLine, profileForm.postcode, heirForm.name, heirForm.relationship, bankForm.accountNumber];
   const completedProfileFields = requiredProfileFields.filter(value => String(value || '').trim().length > 0).length;
@@ -9604,9 +9620,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
               <div>
                 <h2 id="profile-modal-title" className="text-lg font-bold sm:text-xl">Profil Saya</h2>
                 <p className="text-xs text-teal-100 sm:text-sm">{user.email || 'Akaun pelanggan'}</p>
-                {metadata.member_no && (
+                {memberNo && (
                   <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-white/15 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
-                    <Tag size={11} /> {metadata.member_no}
+                    <Tag size={11} /> {memberNo}
                   </p>
                 )}
               </div>
