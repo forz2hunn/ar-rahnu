@@ -1345,6 +1345,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [initialCorrectionAction, setInitialCorrectionAction] = useState('TS');
   const [editingAsset, setEditingAsset] = useState(null);
   const [viewingAssetImage, setViewingAssetImage] = useState<{ path: string; label: string } | null>(null);
+  const [viewingAssetRecord, setViewingAssetRecord] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
   const [editingSupplier, setEditingSupplier] = useState(null);
   const [supplierSearch, setSupplierSearch] = useState('');
@@ -7007,7 +7008,19 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             const assetGain = assetMarketVal - (parseFloat(asset.price) || 0);
 
                             return (
-                              <tr key={asset.id} className="hover:bg-slate-50/70 transition-colors group">
+                              <tr
+                                key={asset.id}
+                                onClick={() => setViewingAssetRecord(asset)}
+                                onKeyDown={event => {
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault();
+                                    setViewingAssetRecord(asset);
+                                  }
+                                }}
+                                tabIndex={0}
+                                aria-label={`Lihat maklumat aset ${asset.code || asset.type}`}
+                                className="cursor-pointer hover:bg-slate-50/70 focus:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-500 transition-colors group"
+                              >
                                 {/* No. Siri & Kod Aset */}
                                 <td className="p-4 sm:px-6">
                                   <div className="flex items-center gap-2">
@@ -7076,7 +7089,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 </td>
 
                                 {/* Tindakan */}
-                                <td className="p-4 text-center">
+                                <td className="p-4 text-center" onClick={event => event.stopPropagation()}>
                                   <div className="flex items-center justify-center gap-1">
                                     <button
                                       type="button"
@@ -7163,7 +7176,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         return (
                           <div
                             key={asset.id}
-                            className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
+                            onClick={() => setViewingAssetRecord(asset)}
+                            className="cursor-pointer rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
                           >
                             <div>
                               <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
@@ -7213,7 +7227,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <span className="text-[11px] text-slate-400 font-mono">
                                 {formatTransactionDateTime(asset.date)}
                               </span>
-                              <div className="flex items-center gap-1">
+                              <div className="flex items-center gap-1" onClick={event => event.stopPropagation()}>
                                 <button
                                   type="button"
                                   onClick={() => handleEditAsset(asset)}
@@ -7290,6 +7304,23 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     Aset bertanda &quot;Terkunci SAG&quot; dilindungi daripada pemadaman tidak sengaja.
                   </span>
                 </div>
+
+                {viewingAssetRecord && (
+                  <AssetDetailModal
+                    asset={viewingAssetRecord}
+                    statusInfo={getAssetStatusBadge(viewingAssetRecord)}
+                    currentGoldPrice={currentGoldPrice}
+                    isLocked={checkedInAssetIds.has(String(viewingAssetRecord.id))}
+                    supabaseClient={supabaseClient}
+                    onClose={() => setViewingAssetRecord(null)}
+                    onEdit={() => {
+                      const record = viewingAssetRecord;
+                      setViewingAssetRecord(null);
+                      handleEditAsset(record);
+                    }}
+                    onOpenImage={() => setViewingAssetImage({ path: viewingAssetRecord.image.path, label: viewingAssetRecord.code || 'aset' })}
+                  />
+                )}
               </div>
             );
           })()}
@@ -10343,7 +10374,10 @@ function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: 
   return (
     <button
       type="button"
-      onClick={onView}
+      onClick={event => {
+        event.stopPropagation();
+        onView();
+      }}
       title={`Lihat gambar ${label}`}
       aria-label={`Lihat gambar ${label}`}
       className="shrink-0 cursor-zoom-in rounded-lg transition hover:opacity-90 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
@@ -10399,6 +10433,119 @@ function AssetImageViewer({ path, label, supabaseClient, onClose }: { path: stri
   );
 }
 
+
+function AssetDetailModal({ asset, statusInfo, currentGoldPrice, isLocked, supabaseClient, onClose, onEdit, onOpenImage }) {
+  const marketValue = (parseFloat(asset.weight) || 0) * (currentGoldPrice || 0);
+  const costPrice = parseFloat(asset.price) || 0;
+  const difference = marketValue - costPrice;
+  const code = asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.stopPropagation();
+      onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const details = [
+    { label: 'Jenis Item', value: asset.type || '-' },
+    { label: 'Mutu Ketulenan', value: asset.purity || 'N/A' },
+    { label: 'Berat', value: `${parseFloat(asset.weight) || 0}g` },
+    { label: 'Tarikh & Masa Belian (MYT)', value: formatTransactionDateTime(asset.date) },
+    { label: 'Pembekal Emas', value: asset.supplier || '-' },
+    { label: 'Kod Pembekal', value: (asset.supplierCodes || []).join(', ') || '-' },
+    { label: 'Tarikh Didaftar', value: formatTransactionDateTime(asset.createdAt || asset.date) },
+    { label: 'Kemas Kini Terakhir', value: formatTransactionDateTime(asset.updatedAt) }
+  ];
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label={`Maklumat aset ${code}`} className="fixed inset-0 z-[58] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm animate-in fade-in duration-200 sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
+          <div className="min-w-0 space-y-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 font-mono text-xs font-black text-amber-900">
+                <Tag size={13} className="shrink-0 text-amber-600" />
+                {code}
+              </span>
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs ${statusInfo.badgeClass}`}>
+                <span className={`h-1.5 w-1.5 rounded-full ${statusInfo.dotClass}`} />
+                <span>{statusInfo.label}</span>
+              </span>
+              {isLocked && (
+                <span className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-700">
+                  <Lock size={11} className="text-corporate-teal-600" />
+                  Terkunci SAG
+                </span>
+              )}
+            </div>
+            <h2 className="text-lg font-bold text-slate-800">Maklumat Aset Emas</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Tutup maklumat aset" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          <div className="flex flex-col gap-5 sm:flex-row">
+            <div className="shrink-0">
+              {asset.image?.path ? (
+                <AssetThumbnail large path={asset.image.path} label={code} supabaseClient={supabaseClient} onView={onOpenImage} />
+              ) : (
+                <div className="flex h-40 w-40 items-center justify-center rounded-lg border border-dashed border-slate-300 bg-slate-50 text-center text-xs font-semibold text-slate-400">
+                  Tiada gambar
+                </div>
+              )}
+            </div>
+            <div className="min-w-0 flex-1">
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
+                {details.map(item => (
+                  <div key={item.label}>
+                    <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</dt>
+                    <dd className="text-sm font-semibold text-slate-800">{item.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/60 p-4">
+            <p className="text-[11px] font-bold uppercase tracking-wider text-corporate-teal-900">Taksiran Nilai Semasa</p>
+            <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Nilai Pasaran</p>
+                <p className="font-mono text-sm font-extrabold text-corporate-teal-800">{formatRM(marketValue)}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Kos Belian Asal</p>
+                <p className="font-mono text-sm font-bold text-slate-700">{formatRM(costPrice)}</p>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold uppercase text-slate-500">Perbezaan</p>
+                <p className={`font-mono text-sm font-extrabold ${difference >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                  {difference >= 0 ? `+${formatRM(difference)}` : formatRM(difference)}
+                </p>
+              </div>
+            </div>
+            <p className="mt-2 text-[11px] text-slate-500">Spot emas semasa: {formatRM(currentGoldPrice || 0)}/g</p>
+          </div>
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:justify-end sm:px-6">
+          <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto">
+            Tutup
+          </button>
+          <button type="button" onClick={onEdit} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto">
+            <Pencil size={15} /> Kemaskini Aset
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers, supabaseClient, storageOwnerId }) {
   const initialSupplierCodes = initialData?.supplierCodes || suppliers
