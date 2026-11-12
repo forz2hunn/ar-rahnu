@@ -351,6 +351,59 @@ Deno.serve(async (request) => {
       return jsonResponse({ updated: true });
     }
 
+    if (action === 'update-member-profile') {
+      const userId = String(body.userId || '');
+      const fullName = String(body.fullName || '').trim().replace(/\s+/g, ' ');
+      const icNumber = String(body.icNumber || '').replace(/\D/g, '');
+      const memberNo = String(body.memberNo || '').trim().toUpperCase();
+      if (!userId) {
+        return jsonResponse({ error: 'Pengguna tidak sah.' }, 400);
+      }
+      if (fullName.length < 2 || fullName.length > 120) {
+        return jsonResponse({ error: 'Nama penuh hendaklah antara 2 hingga 120 aksara.' }, 400);
+      }
+      if (!/^\d{12}$/.test(icNumber)) {
+        return jsonResponse({ error: 'No. Kad Pengenalan mesti 12 digit.' }, 400);
+      }
+      if (memberNo && !/^ARK-\d{4}-\d{4}$/.test(memberNo)) {
+        return jsonResponse({ error: 'Format No. Keahlian hendaklah ARK-YYYY-NNNN.' }, 400);
+      }
+
+      const { data: target, error: targetError } = await adminClient
+        .from('ar_rahnu_organization_members')
+        .select('user_id')
+        .eq('organization_id', organizationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target) return jsonResponse({ error: 'Pengguna tidak ditemui dalam organisasi.' }, 404);
+
+      const { data: currentUser, error: currentUserError } = await adminClient.auth.admin.getUserById(userId);
+      if (currentUserError) throw currentUserError;
+      const previousMetadata = currentUser.user?.user_metadata || {};
+      const nextMetadata = {
+        ...previousMetadata,
+        full_name: fullName,
+        ic_number: icNumber,
+        member_no: memberNo || previousMetadata.member_no || null,
+        identity_locked: true,
+        identity_updated_at: new Date().toISOString(),
+      };
+
+      const { error } = await adminClient.auth.admin.updateUserById(userId, { user_metadata: nextMetadata });
+      if (error) throw error;
+      await recordAuthAuditEvent('UPDATE_MEMBER_PROFILE', userId, {
+        full_name: previousMetadata.full_name || null,
+        ic_number: previousMetadata.ic_number || null,
+        member_no: previousMetadata.member_no || null,
+      }, {
+        full_name: fullName,
+        ic_number: icNumber,
+        member_no: memberNo || previousMetadata.member_no || null,
+      });
+      return jsonResponse({ updated: true, memberNo: memberNo || previousMetadata.member_no || null });
+    }
+
     if (action === 'update-role') {
       const userId = String(body.userId || '');
       const role = String(body.role || '');

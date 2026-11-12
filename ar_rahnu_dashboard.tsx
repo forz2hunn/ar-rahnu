@@ -656,7 +656,7 @@ const formatIcNumber = (value: string) => {
 const maskIcNumber = (value: string) => {
   const digits = normalizeIcDigits(value);
   if (digits.length < 12) return digits ? 'Belum lengkap' : '-';
-  return `${digits.slice(0, 6)}-**-${digits.slice(8)}`;
+  return `******-**-${digits.slice(-4)}`;
 };
 const generateMemberNumber = (existing: string[], year = new Date().getFullYear()) => {
   const prefix = `ARK-${year}-`;
@@ -1588,14 +1588,26 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const canManageOrganizationUsers = ['Admin', 'Manager'].includes(organizationMembership?.role);
   const isOrganizationAdmin = organizationMembership?.role === 'Admin';
 
-  const handleSaveMemberProfile = (member, payload) => {
+  const handleSaveMemberProfile = async (member, payload) => {
     setMemberRegistry(previous => [
       ...previous.filter(entry => entry.userId !== member.id),
       { userId: member.id, ...payload, updatedAt: new Date().toISOString() }
     ]);
     setEditingMember(null);
-    setToastMessage(`Maklumat ahli ${payload.fullName} disimpan (${payload.memberNo}).`);
-    setTimeout(() => setToastMessage(null), 4000);
+    let syncWarning = '';
+    try {
+      await invokeUserAdmin({
+        action: 'update-member-profile',
+        userId: member.id,
+        fullName: payload.fullName,
+        icNumber: payload.icNumber,
+        memberNo: payload.memberNo
+      });
+    } catch (error) {
+      syncWarning = ` Akaun ahli belum disegerakkan: ${error.message}`;
+    }
+    setToastMessage(`Maklumat ahli ${payload.fullName} disimpan (${payload.memberNo}).${syncWarning}`);
+    setTimeout(() => setToastMessage(null), syncWarning ? 8000 : 4000);
   };
 
   const handleGenerateAllMemberNumbers = () => {
@@ -1625,6 +1637,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     ]);
     setToastMessage(`${additions.length} No. Keahlian baharu dijana.`);
     setTimeout(() => setToastMessage(null), 4000);
+
+    additions
+      .filter(addition => addition.fullName && /^\d{12}$/.test(addition.icNumber))
+      .forEach(addition => {
+        void invokeUserAdmin({
+          action: 'update-member-profile',
+          userId: addition.userId,
+          fullName: addition.fullName,
+          icNumber: addition.icNumber,
+          memberNo: addition.memberNo
+        }).catch(error => console.error('No. Keahlian tidak dapat disegerakkan ke akaun ahli:', error));
+      });
   };
   const [auditView, setAuditView] = useState<'trail' | 'traffic'>('trail');
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
@@ -9580,6 +9604,11 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
               <div>
                 <h2 id="profile-modal-title" className="text-lg font-bold sm:text-xl">Profil Saya</h2>
                 <p className="text-xs text-teal-100 sm:text-sm">{user.email || 'Akaun pelanggan'}</p>
+                {metadata.member_no && (
+                  <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-white/15 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
+                    <Tag size={11} /> {metadata.member_no}
+                  </p>
+                )}
               </div>
             </div>
             <button
