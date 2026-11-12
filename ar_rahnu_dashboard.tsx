@@ -48,7 +48,17 @@ import {
   FileSearch,
   Pause,
   Play,
-  Paperclip
+  Paperclip,
+  Activity,
+  BarChart3,
+  Layers,
+  Info,
+  SlidersHorizontal,
+  ArrowUpRight,
+  ArrowDownRight,
+  Percent,
+  ChevronUp,
+  Zap
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
@@ -1681,6 +1691,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [scenarioMargin, setScenarioMargin] = useState('');
   const [scenarioOldFees, setScenarioOldFees] = useState('');
   const [scenarioNewFees, setScenarioNewFees] = useState('');
+  const [sagFilter, setSagFilter] = useState<'all' | 'overlap' | 'shortfall' | 'ready'>('all');
+  const [showAiMethodology, setShowAiMethodology] = useState(false);
+  const [executiveChartTab, setExecutiveChartTab] = useState<'marhun' | 'institution' | 'types'>('marhun');
+  const [dashboardCalendarView, setDashboardCalendarView] = useState<'agenda' | 'calendar'>('agenda');
 
   const visibleTransactions = useMemo(() => transactions.filter(isRecordVisible), [transactions]);
   const visibleAssets = useMemo(() => assets
@@ -2169,6 +2183,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     twelveWeekGoldEstimate,
     riskScores
   ]);
+  const filteredSagAiIndicators = useMemo(() => {
+    if (sagFilter === 'overlap') return sagAiIndicators.filter(i => i.presumption === 'Potensi overlap');
+    if (sagFilter === 'shortfall') return sagAiIndicators.filter(i => i.presumption === 'Petunjuk shortfall');
+    if (sagFilter === 'ready') return sagAiIndicators.filter(i => (i.readinessScore ?? 0) >= 80);
+    return sagAiIndicators;
+  }, [sagAiIndicators, sagFilter]);
   const selectedScenarioTransaction = activePortfolioTransactions.find(
     transaction => String(transaction.id) === String(scenarioTransactionId)
   ) || activePortfolioTransactions[0] || null;
@@ -3477,22 +3497,6 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             </button>
           )}
         </div>
-        <div className="flex flex-col gap-2 border-b border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900 sm:flex-row sm:items-center sm:justify-between sm:px-4 md:px-8">
-          <span>
-            {trafficSchemaReady === false
-              ? 'HTTP Inspector is not installed; capture is disabled until supabase/traffic-inspector.sql is run.'
-              : trafficSchemaReady === null
-                ? 'Checking HTTP Inspector setup…'
-                : trafficPaused
-                  ? 'HTTP Inspector capture is paused on this browser.'
-                  : 'HTTP Inspector captures this browser’s Supabase HTTP calls.'}
-            {trafficSchemaReady && <> JSON bodies are stored for up to 7 days; credentials, email and phone fields are redacted, but portfolio data may remain. TCP and incoming website traffic are not captured. Client IP is best-effort proxy metadata.</>}
-          </span>
-          <button type="button" disabled={!trafficSchemaReady} onClick={handleToggleTrafficCapture} className="inline-flex shrink-0 items-center gap-1 font-bold underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50">
-            {trafficPaused ? <Play size={14} /> : <Pause size={14} />}
-            {trafficPaused ? 'Resume on this browser' : 'Pause on this browser'}
-          </button>
-        </div>
         {canInstall && !isAppInstalled && (
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-emerald-800 px-4 py-3 text-white">
             <div className="min-w-0">
@@ -4021,323 +4025,661 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           )}
 
           {/* TAB: DASHBOARD */}
-          {activeTab === 'dashboard' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                <div>
-                  <h2 className="text-xl font-bold text-slate-800">Ringkasan portfolio</h2>
-                  <p className="text-sm text-slate-500">Angka dan carta dikira daripada rekod portfolio semasa.</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleExportAnalyticsCSV}
-                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-emerald-800"
-                >
-                  <DownloadCloud size={18} /> Muat turun laporan CSV
-                </button>
-              </div>
+          {activeTab === 'dashboard' && (() => {
+            const totalGoldGrams = edrBalance + edtBalance;
+            const edtPercentage = totalGoldGrams > 0 ? Math.round((edtBalance / totalGoldGrams) * 100) : 50;
+            const edrPercentage = 100 - edtPercentage;
+            const topInstitution = institutionAnalysis.length
+              ? [...institutionAnalysis].sort((a, b) => b.loan - a.loan)[0]
+              : null;
+            const monthTotalRedemption = maturityCalendar.entries.reduce((sum, tx) => sum + getCurrentRedemption(tx), 0);
+            const latestCumulativeMarhun = cumulativeMarhunData.length
+              ? cumulativeMarhunData[cumulativeMarhunData.length - 1].accumulatedValue
+              : 0;
 
-              {/* KPI Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                <StatCard title="Total Capital (Loan)" value={formatRM(totalCapital)} icon={<Wallet size={24} />} trend="Aktif" color="emerald" />
-                <StatCard title="Lebihan Tunai Direkod (bukan untung)" value={formatRM(totalProfit)} icon={<TrendingUp size={24} />} trend="Pembiayaan tetap perlu dibayar" color="amber" />
-                <StatCard title="Emas Ar-Rahnu (EDR)" value={`${edrBalance}g`} icon={<Clock size={24} />} trend={`${activeTickets} Surat Aktif`} color="blue" />
-                <StatCard
-                  title="Emas Di Tangan (EDT)"
-                  value={`${edtBalance}g`}
-                  icon={<Scale size={24} />}
-                  trend={edtBalance < edrBalance ? "Kritikal (Beli GB)" : "Ratio Selamat"}
-                  color={edtBalance < edrBalance ? "rose" : "emerald"}
-                />
-              </div>
+            return (
+              <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {/* Executive Command Header */}
+                <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-800/40 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 sm:p-8 text-white shadow-xl">
+                  <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/10 blur-3xl" />
+                  <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
 
-              <section className={`rounded-2xl border p-5 shadow-sm ${redemptionNotifications.length ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-100'}`} aria-live="polite">
-                <div className="flex items-start gap-3">
-                  <div className={`w-10 h-10 shrink-0 rounded-xl flex items-center justify-center ${redemptionNotifications.length ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-600'}`}>
-                    <Bell size={20} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-bold text-slate-800">
-                      Notifikasi tarikh tebus
-                      {redemptionNotifications.length > 0 && (
-                        <span className="ml-2 inline-flex items-center justify-center min-w-6 h-6 px-2 rounded-full bg-amber-600 text-white text-xs">
-                          {redemptionNotifications.length}
+                  <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                    <div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/30 bg-corporate-teal-950/80 px-3.5 py-1 text-xs font-bold text-corporate-teal-200 backdrop-blur-md mb-2">
+                        <span className="relative flex h-2 w-2">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
                         </span>
-                      )}
-                    </h3>
-                    {redemptionNotifications.length === 0 ? (
-                      <p className="text-sm text-slate-500 mt-1">Tiada transaksi aktif yang tarikh matangnya dalam 3 hari atau sudah lewat. Pastikan tarikh matang diisi pada lejar.</p>
-                    ) : (
-                      <div className="mt-3 space-y-2">
-                        {redemptionNotifications.map(tx => (
-                          <div key={tx.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl bg-white/80 border border-amber-200 px-3 py-2.5">
-                            <div>
-                              <p className="text-sm font-bold text-slate-800">Surat #{tx.refNo} · {tx.institution}</p>
-                              <p className="text-xs text-slate-600">
-                                Tarikh tebus {tx.redemptionDate} · {tx.daysRemaining < 0
-                                  ? `Lewat ${Math.abs(tx.daysRemaining)} hari`
-                                  : tx.daysRemaining === 0 ? 'Tebus hari ini' : `Baki ${tx.daysRemaining} hari`}
-                              </p>
-                            </div>
-                            <button
-                              onClick={() => setActiveTab('transactions')}
-                              className="text-xs font-bold text-amber-800 hover:text-amber-950 underline self-start sm:self-auto"
-                            >
-                              Buka lejar
-                            </button>
-                          </div>
-                        ))}
+                        <span>EXECUTIVE OVERVIEW · AR-RAHNU GAMEPLAY BI</span>
                       </div>
-                    )}
-                  </div>
-                </div>
-              </section>
-
-              <section className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100" aria-label="Kalendar tarikh matang transaksi">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-5">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                      <CalendarDays className="mr-2 text-emerald-600" size={20} /> Kalendar Tarikh Matang
-                    </h3>
-                    <p className="text-sm text-slate-500 mt-1">Tarikh tebus daripada rekod transaksi anda.</p>
-                  </div>
-                  <div className="flex items-center justify-between sm:justify-end gap-2">
-                    <button
-                      type="button"
-                      aria-label="Bulan sebelumnya"
-                      onClick={() => setCalendarMonth(month => new Date(month.getFullYear(), month.getMonth() - 1, 1))}
-                      className="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-                    >
-                      <ChevronLeft size={18} />
-                    </button>
-                    <p className="min-w-36 text-center font-bold text-slate-800 capitalize">
-                      {calendarMonth.toLocaleDateString('ms-MY', { month: 'long', year: 'numeric' })}
-                    </p>
-                    <button
-                      type="button"
-                      aria-label="Bulan seterusnya"
-                      onClick={() => setCalendarMonth(month => new Date(month.getFullYear(), month.getMonth() + 1, 1))}
-                      className="p-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
-                    >
-                      <ChevronRight size={18} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCalendarMonth(new Date(currentDate.getFullYear(), currentDate.getMonth(), 1))}
-                      className="px-3 py-2 rounded-lg border border-slate-200 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-                    >
-                      Hari ini
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-7 border-t border-l border-slate-200">
-                  {['Ahd', 'Isn', 'Sel', 'Rab', 'Kha', 'Jum', 'Sab'].map(day => (
-                    <div key={day} className="p-1.5 sm:p-2 text-center text-[11px] sm:text-xs font-semibold text-slate-500 border-r border-b border-slate-200">
-                      {day}
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+                        Papan Pemuka Eksekutif
+                      </h2>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                        Pusat kawalan kecairan modal, rizab emas fizikal (EDT vs EDR), dan jadual matang surat gadaian dalam satu paparan berpusat.
+                      </p>
                     </div>
-                  ))}
-                  {maturityCalendar.days.map(({ date, dateKey, isCurrentMonth, entries }) => {
-                    const isToday = dateKey === `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
-                    return (
-                      <div
-                        key={dateKey}
-                        className={`min-h-16 sm:min-h-20 p-1 sm:p-2 border-r border-b border-slate-200 ${isCurrentMonth ? 'bg-white' : 'bg-slate-50/70'} ${entries.length ? 'bg-amber-50/70' : ''}`}
-                        aria-label={`${dateKey}${entries.length ? `, ${entries.length} transaksi matang` : ''}`}
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2.5 text-xs font-bold text-slate-200 backdrop-blur-md">
+                        <TrendingUp size={15} className="text-emerald-400" />
+                        <span>Spot Emas:</span>
+                        <span className="text-white font-black">RM {currentGoldPrice.toFixed(2)}/g</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsModalOpen(true)}
+                        className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 hover:bg-corporate-teal-500 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-lg shadow-corporate-teal-950/40 backdrop-blur-md transition-all active:scale-95"
                       >
-                        <div className="flex items-center justify-between gap-1">
-                          <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full text-xs ${isToday ? 'bg-emerald-600 font-bold text-white' : isCurrentMonth ? 'text-slate-700' : 'text-slate-400'}`}>
-                            {date.getDate()}
-                          </span>
-                          {entries.length > 0 && (
-                            <span className="rounded-full bg-amber-100 px-1.5 text-[10px] font-bold text-amber-800">{entries.length}</span>
-                          )}
-                        </div>
-                        {entries.slice(0, 2).map(tx => (
-                          <p key={tx.id} className="hidden sm:block mt-1 truncate text-[10px] font-medium text-amber-800" title={`Surat #${tx.refNo}`}>
-                            #{tx.refNo}
-                          </p>
-                        ))}
-                      </div>
-                    );
-                  })}
+                        <Plus size={16} />
+                        <span>Rekod SAG Baharu</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportAnalyticsCSV}
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 hover:bg-white/20 px-4 py-2.5 text-xs sm:text-sm font-semibold text-white backdrop-blur-md transition-all active:scale-95"
+                      >
+                        <DownloadCloud size={16} />
+                        <span>Laporan CSV</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <div className="mt-5">
-                  <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                    <h4 className="font-bold text-slate-800">Transaksi matang bulan ini</h4>
-                    <span className="text-xs text-slate-500">{maturityCalendar.entries.length} rekod</span>
-                  </div>
-                  {maturityCalendar.entries.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-slate-200 p-4 text-sm text-slate-500">
-                      Tiada rekod tarikh matang untuk bulan ini. Isi tarikh tebus pada transaksi di lejar untuk memaparkannya di kalendar.
+                {/* 4 Interactive Hero KPI Telemetry Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Card 1: Modal Pembiayaan */}
+                  <div
+                    onClick={() => setActiveTab('transactions')}
+                    className="group relative cursor-pointer overflow-hidden rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm transition-all hover:border-corporate-teal-400 hover:shadow-md"
+                  >
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Jumlah Pembiayaan (Loan)</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700 transition-colors group-hover:bg-corporate-teal-600 group-hover:text-white">
+                        <Wallet size={20} />
+                      </div>
                     </div>
-                  ) : (
-                    <div className="space-y-2">
-                      {maturityCalendar.entries.map(tx => {
-                        const isSettled = ['Selesai', 'Ditebus', 'Dilelong'].includes(tx.status);
-                        const statusLabel = isSettled
-                          ? tx.status
-                          : tx.daysRemaining < 0
-                            ? `Lewat ${Math.abs(tx.daysRemaining)} hari`
-                            : tx.daysRemaining === 0
-                              ? 'Matang hari ini'
-                              : `Baki ${tx.daysRemaining} hari`;
-                        return (
-                          <div key={tx.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-xl border border-slate-100 bg-slate-50/70 px-3 py-2.5">
-                            <div className="min-w-0">
-                              <p className="text-sm font-bold text-slate-800">Surat #{tx.refNo} · {tx.institution}</p>
-                              <p className="maturity-alert-detail text-xs text-slate-500">
-                                Matang {new Date(`${tx.redemptionDate}T00:00:00`).toLocaleDateString('ms-MY', { day: 'numeric', month: 'long', year: 'numeric' })} · {formatRM(getCurrentRedemption(tx))}
-                              </p>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {formatRM(totalCapital)}
+                    </p>
+                    <div className="mt-3 flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-corporate-teal-50 px-2.5 py-0.5 font-bold text-corporate-teal-800">
+                        {activeTickets} Surat Aktif
+                      </span>
+                      <span className="font-semibold text-corporate-teal-600 group-hover:underline flex items-center gap-0.5">
+                        Lihat lejar <ChevronRight size={13} />
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Lebihan Tunai Direkod */}
+                  <div className="relative overflow-hidden rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm transition-all hover:border-corporate-magenta-400 hover:shadow-md">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Lebihan Tunai Direkod</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700">
+                        <TrendingUp size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-amber-600 tracking-tight">
+                      {formatRM(totalProfit)}
+                    </p>
+                    <div className="mt-3">
+                      <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 border border-amber-200 px-2.5 py-0.5 text-[11px] font-bold text-amber-800">
+                        Penstrukturan Semula (Bukan Dividen)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 3: EDR (Emas Ar-Rahnu) */}
+                  <div
+                    onClick={() => setActiveTab('assets')}
+                    className="group relative cursor-pointer overflow-hidden rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm transition-all hover:border-sky-400 hover:shadow-md"
+                  >
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Emas Ar-Rahnu (EDR)</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-50 text-sky-700 transition-colors group-hover:bg-sky-600 group-hover:text-white">
+                        <Clock size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {edrBalance}g
+                    </p>
+                    <div className="mt-3 flex items-center justify-between text-xs">
+                      <span className="text-slate-500 font-medium">
+                        Nilai Marhun: ~<strong className="text-slate-700">{formatRM(edrBalance * currentGoldPrice)}</strong>
+                      </span>
+                      <span className="font-semibold text-sky-600 group-hover:underline flex items-center gap-0.5">
+                        Aset <ChevronRight size={13} />
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 4: EDT (Emas Di Tangan) & Safety Ratio */}
+                  <div
+                    onClick={() => setActiveTab('assets')}
+                    className={`group relative cursor-pointer overflow-hidden rounded-3xl border p-5 shadow-sm transition-all hover:shadow-md ${
+                      edtBalance < edrBalance
+                        ? 'border-rose-200 bg-rose-50/20 hover:border-rose-400'
+                        : 'border-slate-200/80 bg-white hover:border-emerald-400'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Emas Di Tangan (EDT)</span>
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
+                        edtBalance < edrBalance ? 'bg-rose-100 text-rose-700' : 'bg-emerald-50 text-emerald-700'
+                      }`}>
+                        <Scale size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {edtBalance}g
+                    </p>
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between text-[11px] mb-1">
+                        <span className="font-semibold text-slate-500">Nisbah Keselamatan</span>
+                        <span className={`font-black ${edtBalance < edrBalance ? 'text-rose-700' : 'text-emerald-700'}`}>
+                          {edtBalance < edrBalance ? 'Kritikal (Tambah EDT)' : 'Ratio Selamat'}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            edtBalance < edrBalance ? 'bg-rose-500' : 'bg-emerald-500'
+                          }`}
+                          style={{ width: `${Math.min(100, Math.max(10, edtPercentage))}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Smart Radar Tarikh Matang Banner */}
+                {redemptionNotifications.length > 0 ? (
+                  <div className="relative overflow-hidden rounded-3xl border border-amber-300 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 p-5 shadow-sm">
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="flex items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-500 text-white shadow-md">
+                          <Bell size={20} className="animate-bounce" />
+                        </div>
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <h3 className="font-extrabold text-slate-900 text-base">
+                              Tindakan Diperlukan: {redemptionNotifications.length} Surat Hampir / Lewat Matang
+                            </h3>
+                            <span className="rounded-full bg-amber-600 px-2 py-0.5 text-xs font-bold text-white">
+                              Segera
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-600 mt-0.5">
+                            Surat gadaian ini memerlukan tindakan tebus, salin, atau overlap dalam masa 3 hari atau telah melepasi tarikh matang.
+                          </p>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => setActiveTab('transactions')}
+                        className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-amber-600 hover:bg-amber-700 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-md transition-all active:scale-95"
+                      >
+                        <span>Buka Lejar &amp; Selesaikan</span>
+                        <ChevronRight size={15} />
+                      </button>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                      {redemptionNotifications.slice(0, 3).map(tx => (
+                        <div key={tx.id} className="flex items-center justify-between rounded-2xl bg-white/90 border border-amber-200/80 p-3 shadow-sm">
+                          <div>
+                            <p className="text-xs font-bold text-slate-800">Surat #{tx.refNo} · {tx.institution}</p>
+                            <p className="text-[11px] text-slate-500 mt-0.5">Tebus: {formatRM(getCurrentRedemption(tx))}</p>
+                          </div>
+                          <span className={`rounded-full px-2.5 py-1 text-[11px] font-black ${
+                            tx.daysRemaining < 0
+                              ? 'bg-rose-100 text-rose-800'
+                              : tx.daysRemaining === 0
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-orange-100 text-orange-800'
+                          }`}>
+                            {tx.daysRemaining < 0
+                              ? `Lewat ${Math.abs(tx.daysRemaining)}h`
+                              : tx.daysRemaining === 0 ? 'Hari Ini' : `Baki ${tx.daysRemaining}h`}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-emerald-200/80 bg-gradient-to-r from-emerald-50/60 to-teal-50/60 px-5 py-3.5 flex items-center justify-between text-xs text-emerald-900">
+                    <div className="flex items-center gap-2.5">
+                      <ShieldCheck size={18} className="text-emerald-600 shrink-0" />
+                      <span className="font-semibold">Semua Tarikh Matang Terkawal · Tiada transaksi yang matang dalam masa 3 hari terdekat.</span>
+                    </div>
+                    <button
+                      onClick={() => setActiveTab('transactions')}
+                      className="font-bold text-emerald-800 hover:text-emerald-950 underline shrink-0 hidden sm:inline"
+                    >
+                      Semak Lejar
+                    </button>
+                  </div>
+                )}
+
+                {/* Dual-Pane Interactive Executive Studio */}
+                <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+                  {/* Left Column (8 cols): Interactive Performance Studio */}
+                  <div className="xl:col-span-8 min-w-0 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80 flex flex-col justify-between">
+                    <div>
+                      {/* Studio Top Navigation Bar */}
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 pb-5">
+                        <div>
+                          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-corporate-teal-600 mb-1">
+                            <BarChart3 size={14} />
+                            <span>Visual Analitik Eksekutif</span>
+                          </div>
+                          <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                            Analitik Prestasi Portfolio
+                          </h3>
+                        </div>
+
+                        {/* Interactive Segmented Tabs */}
+                        <div className="flex flex-wrap items-center gap-1 rounded-2xl bg-slate-100 p-1.5 self-start sm:self-center">
+                          <button
+                            type="button"
+                            onClick={() => setExecutiveChartTab('marhun')}
+                            className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all ${
+                              executiveChartTab === 'marhun'
+                                ? 'bg-white text-slate-900 shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            Aliran Marhun
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setExecutiveChartTab('institution')}
+                            className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all ${
+                              executiveChartTab === 'institution'
+                                ? 'bg-corporate-teal-600 text-white shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            Pinjaman &amp; Tebus
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setExecutiveChartTab('types')}
+                            className={`rounded-xl px-3 py-1.5 text-xs font-bold transition-all ${
+                              executiveChartTab === 'types'
+                                ? 'bg-corporate-magenta-600 text-white shadow-sm'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            Pecahan Jenis
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Active Tab Sub-header Readout */}
+                      <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+                        <span>
+                          {executiveChartTab === 'marhun' && 'Trend penambahan nilai marhun portfolio mengikut garis masa'}
+                          {executiveChartTab === 'institution' && 'Perbandingan jumlah pinjaman berbanding komitmen tebus mengikut institusi'}
+                          {executiveChartTab === 'types' && 'Pecahan status kitaran transaksi (Pajakan Asal, Salin, OL, Tebus)'}
+                        </span>
+                        {executiveChartTab === 'marhun' && latestCumulativeMarhun > 0 && (
+                          <span className="font-bold text-corporate-teal-700 bg-corporate-teal-50 px-2.5 py-0.5 rounded-full">
+                            Terkumpul: {formatRM(latestCumulativeMarhun)}
+                          </span>
+                        )}
+                        {executiveChartTab === 'institution' && (
+                          <span className="font-bold text-slate-700 bg-slate-100 px-2.5 py-0.5 rounded-full">
+                            {institutionAnalysis.length} Institusi Aktif
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Chart Canvas */}
+                      <div className="mt-5 h-72 sm:h-80">
+                        {executiveChartTab === 'marhun' && (
+                          cumulativeMarhunData.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-xs text-slate-400 bg-slate-50 rounded-2xl">
+                              <Scale size={32} className="text-slate-300 mb-2" />
+                              <span>Tiada rekod marhun untuk dipaparkan.</span>
                             </div>
-                            <div className="flex items-center justify-between sm:justify-end gap-3">
-                              <span className={`text-xs font-semibold ${isSettled ? 'text-slate-500' : tx.daysRemaining <= 3 ? 'text-rose-700' : 'text-emerald-700'}`}>
-                                {statusLabel}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => setActiveTab('transactions')}
-                                className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline"
-                              >
-                                Buka lejar
-                              </button>
+                          ) : (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <AreaChart data={cumulativeMarhunData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                <defs>
+                                  <linearGradient id="colorMarhunExecutive" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="5%" stopColor="#047ea0" stopOpacity={0.35} />
+                                    <stop offset="95%" stopColor="#047ea0" stopOpacity={0} />
+                                  </linearGradient>
+                                </defs>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" opacity={0.7} />
+                                <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} dy={10} />
+                                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={value => `RM${Number(value).toLocaleString('en-MY')}`} />
+                                <Tooltip
+                                  formatter={value => [formatRM(Number(value)), 'Nilai Marhun Terkumpul']}
+                                  contentStyle={{ borderRadius: '12px', border: '1px solid #cbd5e1', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.95)' }}
+                                />
+                                <Area type="monotone" dataKey="accumulatedValue" name="Nilai Marhun Terkumpul" stroke="#047ea0" strokeWidth={3} fillOpacity={1} fill="url(#colorMarhunExecutive)" />
+                              </AreaChart>
+                            </ResponsiveContainer>
+                          )
+                        )}
+
+                        {executiveChartTab === 'institution' && (
+                          institutionAnalysis.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-xs text-slate-400 bg-slate-50 rounded-2xl">
+                              <Building2 size={32} className="text-slate-300 mb-2" />
+                              <span>Tiada data institusi untuk dianalisis.</span>
+                            </div>
+                          ) : (
+                            <ResponsiveContainer width="100%" height="100%">
+                              <BarChart data={institutionAnalysis} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" opacity={0.7} />
+                                <XAxis dataKey="institution" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} dy={10} />
+                                <YAxis axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
+                                <Tooltip
+                                  cursor={{ fill: '#f1f5f9' }}
+                                  formatter={(value, name) => [formatRM(Number(value)), name]}
+                                  contentStyle={{ borderRadius: '12px', border: '1px solid #cbd5e1', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.95)' }}
+                                />
+                                <Legend wrapperStyle={{ paddingTop: '15px', fontSize: '12px' }} />
+                                <Bar dataKey="loan" name="Pinjaman (RM)" fill="#047ea0" radius={[6, 6, 0, 0]} maxBarSize={45} />
+                                <Bar dataKey="redemption" name="Jumlah Tebus (RM)" fill="#a6a7a9" radius={[6, 6, 0, 0]} maxBarSize={45} />
+                              </BarChart>
+                            </ResponsiveContainer>
+                          )
+                        )}
+
+                        {executiveChartTab === 'types' && (
+                          transactionTypeAnalysis.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-xs text-slate-400 bg-slate-50 rounded-2xl">
+                              <Scale size={32} className="text-slate-300 mb-2" />
+                              <span>Belum ada transaksi untuk dianalisis.</span>
+                            </div>
+                          ) : (
+                            <div className="h-full flex flex-col md:flex-row items-center justify-between gap-4">
+                              <div className="w-full md:w-3/5 h-full">
+                                <ResponsiveContainer width="100%" height="100%">
+                                  <PieChart>
+                                    <Pie
+                                      data={transactionTypeAnalysis}
+                                      dataKey="count"
+                                      nameKey="name"
+                                      cx="50%"
+                                      cy="50%"
+                                      innerRadius={55}
+                                      outerRadius={85}
+                                      paddingAngle={4}
+                                    >
+                                      {transactionTypeAnalysis.map((entry, index) => (
+                                        <Cell
+                                          key={entry.name}
+                                          fill={['#0096d8', '#047ea0', '#cf3983', '#66686a', '#b72e70'][index % 5]}
+                                        />
+                                      ))}
+                                    </Pie>
+                                    <Tooltip formatter={(value) => [`${value} rekod`, 'Bilangan']} />
+                                  </PieChart>
+                                </ResponsiveContainer>
+                              </div>
+                              <div className="w-full md:w-2/5 space-y-2 pr-4">
+                                {transactionTypeAnalysis.map((entry, index) => (
+                                  <div key={entry.name} className="flex items-center justify-between text-xs p-2 rounded-xl bg-slate-50 border border-slate-100">
+                                    <div className="flex items-center gap-2">
+                                      <span
+                                        className="h-3 w-3 rounded-full shrink-0"
+                                        style={{ backgroundColor: ['#0096d8', '#047ea0', '#cf3983', '#66686a', '#b72e70'][index % 5] }}
+                                      />
+                                      <span className="font-semibold text-slate-700">{entry.name}</span>
+                                    </div>
+                                    <span className="font-bold text-slate-900">{entry.count} rekod</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
+                      <span>Dikemaskini daripada transaksi lejar aktif.</span>
+                      <span className="font-mono font-medium">BI Live Engine</span>
+                    </div>
+                  </div>
+
+                  {/* Right Column (4 cols): Pusat Matang & Kalendar Pintar */}
+                  <div className="xl:col-span-4 min-w-0 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80 flex flex-col justify-between">
+                    <div>
+                      {/* Header with Navigation & Toggle */}
+                      <div className="border-b border-slate-100 pb-4">
+                        <div className="flex items-center justify-between mb-3">
+                          <h3 className="text-base sm:text-lg font-bold text-slate-800 flex items-center gap-1.5">
+                            <CalendarDays size={18} className="text-corporate-teal-600" />
+                            <span>Jadual Matang</span>
+                          </h3>
+                          <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-xs font-bold text-slate-700">
+                            {maturityCalendar.entries.length} rekod
+                          </span>
+                        </div>
+
+                        {/* Month Navigator */}
+                        <div className="flex items-center justify-between gap-1 rounded-2xl bg-slate-50 p-1 border border-slate-200/60">
+                          <button
+                            type="button"
+                            aria-label="Bulan sebelumnya"
+                            onClick={() => setCalendarMonth(month => new Date(month.getFullYear(), month.getMonth() - 1, 1))}
+                            className="p-1.5 rounded-xl hover:bg-white hover:shadow-sm text-slate-600 transition-all"
+                          >
+                            <ChevronLeft size={16} />
+                          </button>
+                          <p className="text-xs font-extrabold text-slate-800 capitalize">
+                            {calendarMonth.toLocaleDateString('ms-MY', { month: 'long', year: 'numeric' })}
+                          </p>
+                          <button
+                            type="button"
+                            aria-label="Bulan seterusnya"
+                            onClick={() => setCalendarMonth(month => new Date(month.getFullYear(), month.getMonth() + 1, 1))}
+                            className="p-1.5 rounded-xl hover:bg-white hover:shadow-sm text-slate-600 transition-all"
+                          >
+                            <ChevronRight size={16} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setCalendarMonth(new Date(currentDate.getFullYear(), currentDate.getMonth(), 1))}
+                            className="px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-white hover:shadow-sm rounded-xl transition-all"
+                          >
+                            Hari Ini
+                          </button>
+                        </div>
+
+                        {/* View Switcher: Agenda vs Grid */}
+                        <div className="mt-3 flex items-center justify-end gap-1.5 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setDashboardCalendarView('agenda')}
+                            className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                              dashboardCalendarView === 'agenda'
+                                ? 'bg-corporate-teal-50 text-corporate-teal-800 border border-corporate-teal-200'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            Senarai Agenda
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setDashboardCalendarView('calendar')}
+                            className={`px-2.5 py-1 rounded-lg font-bold transition-all ${
+                              dashboardCalendarView === 'calendar'
+                                ? 'bg-corporate-teal-50 text-corporate-teal-800 border border-corporate-teal-200'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            Grid Kalendar
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Content Area: Agenda List or Compact Calendar Grid */}
+                      <div className="mt-4">
+                        {dashboardCalendarView === 'agenda' ? (
+                          maturityCalendar.entries.length === 0 ? (
+                            <div className="rounded-2xl bg-slate-50 p-6 text-center text-xs text-slate-400 border border-slate-100">
+                              <CalendarDays size={28} className="mx-auto text-slate-300 mb-1.5" />
+                              <p className="font-semibold text-slate-600">Tiada transaksi matang bulan ini.</p>
+                              <p className="text-[11px] mt-0.5">Semua surat selamat daripada tarikh matang bagi bulan ini.</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2.5 max-h-72 overflow-y-auto pr-1 custom-scrollbar">
+                              {maturityCalendar.entries.map(tx => {
+                                const isSettled = ['Selesai', 'Ditebus', 'Dilelong'].includes(tx.status);
+                                const statusLabel = isSettled
+                                  ? tx.status
+                                  : tx.daysRemaining < 0
+                                    ? `Lewat ${Math.abs(tx.daysRemaining)}h`
+                                    : tx.daysRemaining === 0 ? 'Hari Ini' : `Baki ${tx.daysRemaining}h`;
+
+                                return (
+                                  <div
+                                    key={tx.id}
+                                    className="flex items-center justify-between rounded-2xl border border-slate-100 bg-slate-50/70 p-3 transition-all hover:bg-slate-50 hover:border-slate-200"
+                                  >
+                                    <div>
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="font-mono text-xs font-bold text-slate-800">
+                                          Surat #{tx.refNo}
+                                        </span>
+                                        <span className="text-[11px] text-slate-500">· {tx.institution}</span>
+                                      </div>
+                                      <p className="text-[11px] text-slate-500 mt-0.5">
+                                        Matang: {tx.redemptionDate} · <strong className="text-slate-700">{formatRM(getCurrentRedemption(tx))}</strong>
+                                      </p>
+                                    </div>
+                                    <span className={`rounded-full px-2.5 py-0.5 text-[10px] font-black ${
+                                      isSettled
+                                        ? 'bg-slate-200 text-slate-600'
+                                        : tx.daysRemaining <= 3
+                                          ? 'bg-rose-100 text-rose-800'
+                                          : 'bg-emerald-100 text-emerald-800'
+                                    }`}>
+                                      {statusLabel}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )
+                        ) : (
+                          /* Compact Calendar Grid */
+                          <div className="rounded-2xl border border-slate-200/80 bg-white p-2">
+                            <div className="grid grid-cols-7 text-center text-[10px] font-bold text-slate-400 mb-1">
+                              {['Ah', 'Is', 'Se', 'Ra', 'Kh', 'Ju', 'Sa'].map(d => <span key={d}>{d}</span>)}
+                            </div>
+                            <div className="grid grid-cols-7 gap-1">
+                              {maturityCalendar.days.map(({ date, dateKey, isCurrentMonth, entries }) => {
+                                const isToday = dateKey === `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(currentDate.getDate()).padStart(2, '0')}`;
+                                return (
+                                  <div
+                                    key={dateKey}
+                                    className={`relative flex flex-col items-center justify-center h-8 rounded-lg text-xs font-semibold ${
+                                      isToday
+                                        ? 'bg-corporate-teal-600 text-white font-bold'
+                                        : entries.length > 0
+                                          ? 'bg-amber-100 text-amber-900 font-bold border border-amber-300'
+                                          : isCurrentMonth
+                                            ? 'text-slate-700 hover:bg-slate-100'
+                                            : 'text-slate-300'
+                                    }`}
+                                  >
+                                    <span>{date.getDate()}</span>
+                                    {entries.length > 0 && !isToday && (
+                                      <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-amber-500" />
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
                           </div>
-                        );
-                      })}
+                        )}
+                      </div>
                     </div>
-                  )}
-                </div>
-              </section>
 
-              {/* Charts Row */}
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 sm:gap-6">
-                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-base font-bold text-slate-800 mb-6 flex items-center">
-                    <TrendingUp className="mr-2 text-emerald-500" size={20} /> Lebihan tunai direkod mengikut tarikh (bukan untung)
-                  </h3>
-                  <div className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={profitTrendData}>
-                        <defs>
-                          <linearGradient id="colorProfit" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#0096d8" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#0096d8" stopOpacity={0} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
-                        <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                        <Area type="monotone" dataKey="profit" stroke="#0096d8" strokeWidth={3} fillOpacity={1} fill="url(#colorProfit)" />
-                      </AreaChart>
-                    </ResponsiveContainer>
+                    {/* Bottom Monthly Redemption Sum */}
+                    <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-xs">
+                      <span className="text-slate-500 font-medium">Jumlah tebus bulan ini:</span>
+                      <span className="font-extrabold text-slate-900 text-sm">
+                        {formatRM(monthTotalRedemption)}
+                      </span>
+                    </div>
                   </div>
                 </div>
 
-                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-base font-bold text-slate-800 mb-6 flex items-center">
-                    <Building2 className="mr-2 text-blue-500" size={20} /> Pinjaman dan tebus mengikut institusi
-                  </h3>
-                  <div className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={institutionAnalysis}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
-                        <XAxis dataKey="institution" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
-                        <Tooltip cursor={{ fill: '#eeeeef' }} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                        <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                        <Bar dataKey="loan" name="Pinjaman (RM)" fill="#047ea0" radius={[4, 4, 0, 0]} maxBarSize={50} />
-                        <Bar dataKey="redemption" name="Jumlah tebus (RM)" fill="#a6a7a9" radius={[4, 4, 0, 0]} maxBarSize={50} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </div>
-                </div>
+                {/* Portfolio Reserves & Asset Diversification Strip */}
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-6 shadow-sm">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                    <div>
+                      <h4 className="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+                        <Scale size={16} className="text-corporate-teal-600" />
+                        <span>Komposisi Rizab Emas Fizikal (EDT vs EDR)</span>
+                      </h4>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Jumlah rizab terkumpul: <strong className="text-slate-800">{totalGoldGrams}g</strong> emas bernilai anggaran <strong className="text-slate-800">{formatRM(totalGoldGrams * currentGoldPrice)}</strong>.
+                      </p>
+                    </div>
 
-                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-base font-bold text-slate-800 mb-4 flex items-center">
-                    <Scale className="mr-2 text-amber-500" size={20} /> Pecahan jenis rekod
-                  </h3>
-                  {transactionTypeAnalysis.length === 0 ? (
-                    <div className="h-64 flex items-center justify-center text-sm text-slate-400">
-                      Belum ada transaksi untuk dianalisis.
+                    <div className="flex items-center gap-3 text-xs">
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-3 w-3 rounded-full bg-emerald-500" />
+                        <span className="text-slate-600 font-medium">Emas Di Tangan (EDT): <strong>{edtBalance}g</strong> ({edtPercentage}%)</span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <span className="h-3 w-3 rounded-full bg-corporate-teal-500" />
+                        <span className="text-slate-600 font-medium">Emas Ar-Rahnu (EDR): <strong>{edrBalance}g</strong> ({edrPercentage}%)</span>
+                      </div>
                     </div>
-                  ) : (
-                    <div className="h-64">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <PieChart>
-                          <Pie
-                            data={transactionTypeAnalysis}
-                            dataKey="count"
-                            nameKey="name"
-                            cx="50%"
-                            cy="45%"
-                            outerRadius={78}
-                            label={({ name, percent }) => `${name} ${Math.round(percent * 100)}%`}
-                          >
-                            {transactionTypeAnalysis.map((entry, index) => (
-                              <Cell
-                                key={entry.name}
-                                fill={['#059669', '#d97706', '#2563eb', '#64748b', '#a855f7'][index % 5]}
-                              />
-                            ))}
-                          </Pie>
-                          <Tooltip formatter={(value) => [`${value} rekod`, 'Bilangan']} />
-                          <Legend />
-                        </PieChart>
-                      </ResponsiveContainer>
+                  </div>
+
+                  {/* Dual Segmented Allocation Bar */}
+                  <div className="mt-4 h-3 w-full rounded-full bg-slate-100 overflow-hidden flex">
+                    <div
+                      className="h-full bg-emerald-500 transition-all duration-500"
+                      style={{ width: `${edtPercentage}%` }}
+                      title={`Emas Di Tangan: ${edtBalance}g (${edtPercentage}%)`}
+                    />
+                    <div
+                      className="h-full bg-corporate-teal-500 transition-all duration-500"
+                      style={{ width: `${edrPercentage}%` }}
+                      title={`Emas Ar-Rahnu: ${edrBalance}g (${edrPercentage}%)`}
+                    />
+                  </div>
+
+                  {/* 3 Executive Pillars Summary */}
+                  <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-3 border-t border-slate-100 pt-4 text-xs">
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <span className="text-slate-400 font-medium block text-[11px]">Nisbah Keselamatan Fizikal</span>
+                      <span className={`font-bold mt-0.5 block ${edtBalance >= edrBalance ? 'text-emerald-700' : 'text-rose-700'}`}>
+                        {edtBalance >= edrBalance ? '✓ 100% Dilindungi (EDT ≥ EDR)' : '⚠ Perlu Tambah EDT fizikal'}
+                      </span>
                     </div>
-                  )}
-                  <p className="mt-2 text-xs text-slate-400">Kiraan transaksi, bukan jumlah nilai pinjaman.</p>
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <span className="text-slate-400 font-medium block text-[11px]">Institusi Pembiayaan Terbesar</span>
+                      <span className="font-bold text-slate-800 mt-0.5 block truncate">
+                        {topInstitution ? `${topInstitution.institution} (${formatRM(topInstitution.loan)})` : 'Tiada rekod'}
+                      </span>
+                    </div>
+                    <div className="rounded-2xl bg-slate-50 p-3">
+                      <span className="text-slate-400 font-medium block text-[11px]">Status Kitaran Lejar</span>
+                      <span className="font-bold text-corporate-teal-700 mt-0.5 block">
+                        {activeTickets} Surat Aktif daripada {visibleTransactions.length} Transaksi
+                      </span>
+                    </div>
+                  </div>
                 </div>
               </div>
-
-              <section className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2 mb-5">
-                  <div>
-                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                      <Scale className="mr-2 text-amber-500" size={20} /> Aliran Nilai Marhun Terkumpul
-                    </h3>
-                    <p className="text-sm text-slate-500 mt-1">Jumlah nilai marhun transaksi mengikut tarikh.</p>
-                  </div>
-                  {cumulativeMarhunData.length > 0 && (
-                    <div className="sm:text-right">
-                      <p className="text-xs text-slate-500">Nilai terkumpul</p>
-                      <p className="text-lg font-bold text-amber-700">{formatRM(cumulativeMarhunData[cumulativeMarhunData.length - 1].accumulatedValue)}</p>
-                    </div>
-                  )}
-                </div>
-                <div className="h-64 sm:h-72">
-                  {cumulativeMarhunData.length === 0 ? (
-                    <div className="h-full flex items-center justify-center text-sm text-slate-400">
-                      Tiada rekod transaksi dengan berat dan kadar marhun untuk dipaparkan.
-                    </div>
-                  ) : (
-                    <ResponsiveContainer width="100%" height="100%">
-                      <AreaChart data={cumulativeMarhunData}>
-                        <defs>
-                          <linearGradient id="colorMarhunAccumulated" x1="0" y1="0" x2="0" y2="1">
-                            <stop offset="5%" stopColor="#047ea0" stopOpacity={0.3} />
-                            <stop offset="95%" stopColor="#047ea0" stopOpacity={0} />
-                          </linearGradient>
-                        </defs>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
-                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
-                        <YAxis axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} tickFormatter={value => `RM${Number(value).toLocaleString('en-MY')}`} />
-                        <Tooltip
-                          formatter={value => [formatRM(Number(value)), 'Nilai Marhun terkumpul']}
-                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
-                        />
-                        <Area type="monotone" dataKey="accumulatedValue" name="Nilai Marhun terkumpul" stroke="#047ea0" strokeWidth={3} fillOpacity={1} fill="url(#colorMarhunAccumulated)" />
-                      </AreaChart>
-                    </ResponsiveContainer>
-                  )}
-                </div>
-                <p className="text-xs text-slate-400 mt-2">Dikira daripada berat (g) × kadar marhun (RM/g); transaksi Salin dan OL dikira sebagai aktiviti berasingan.</p>
-              </section>
-            </div>
-          )}
+            );
+          })()}
 
           {/* TAB: TRANSACTIONS (CRUD) */}
           {activeTab === 'transactions' && (
@@ -5044,201 +5386,492 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {/* TAB: AI PREDICTIONS */}
           {activeTab === 'ai' && (
             <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              {/* AI Banner */}
-              <div className="bg-gradient-to-r from-emerald-900 to-emerald-800 rounded-2xl p-6 md:p-8 text-white shadow-lg relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 md:p-8 opacity-10">
-                  <BrainCircuit size={100} className="md:w-32 md:h-32" />
+              {/* Modern Cyber-FinTech AI Telemetry Hub */}
+              <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-700/50 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 sm:p-8 text-white shadow-2xl">
+                {/* Ambient glow effects */}
+                <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/15 blur-3xl" />
+                <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
+                <div className="pointer-events-none absolute right-10 top-1/2 -translate-y-1/2 opacity-5">
+                  <BrainCircuit size={320} />
                 </div>
-                <div className="relative z-10 max-w-3xl">
-                  <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center gap-3 mb-4">
-                    <div className="flex items-center space-x-2 text-amber-400 bg-emerald-950/50 px-4 py-1.5 rounded-full border border-emerald-700 text-xs sm:text-sm">
-                      <Sparkles size={16} />
-                      <span className="font-bold tracking-wide">ANALISIS BERASASKAN DATA</span>
-                    </div>
-                    <div className="flex items-center space-x-2 text-emerald-200 bg-emerald-950/50 px-4 py-1.5 rounded-full border border-emerald-700 text-xs sm:text-sm">
-                      <Globe size={16} />
-                      <span className="font-bold tracking-wide">Gold API + ExchangeRate-API</span>
-                    </div>
-                    <button
-                      onClick={() => handleRefresh()}
-                      disabled={isRefreshing}
-                      className="mt-3 sm:mt-0 sm:ml-auto w-full sm:w-auto flex justify-center items-center space-x-2 bg-emerald-700 hover:bg-emerald-600 text-white px-4 py-2 sm:py-1.5 rounded-full transition-all border border-emerald-500 shadow-sm disabled:opacity-50"
-                    >
-                      <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
-                      <span className="text-sm font-bold">{isRefreshing ? 'Mengemas kini...' : 'Kemas kini harga'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleExportAnalyticsCSV}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-full border border-emerald-500 bg-white/10 px-4 py-2 text-sm font-bold text-white hover:bg-white/20"
-                    >
-                      <DownloadCloud size={16} /> Laporan CSV
-                    </button>
-                  </div>
-                  <h2 className="text-2xl md:text-3xl font-bold mb-4">Ramalan dan cadangan portfolio</h2>
 
-                  <div className="flex flex-col sm:flex-row flex-wrap gap-4 mb-6">
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-emerald-400/30 flex-1 sm:flex-none">
-                      <p className="text-emerald-200 text-xs font-bold uppercase tracking-wider mb-1">Harga spot terakhir dalam aplikasi</p>
-                      <p className="text-3xl md:text-4xl font-black text-white">RM {currentGoldPrice.toFixed(2)}<span className="text-base md:text-lg text-emerald-200 font-medium tracking-normal">/g</span></p>
+                <div className="relative z-10">
+                  {/* Top Status & Controls Toolbar */}
+                  <div className="flex flex-col sm:flex-row flex-wrap items-start sm:items-center justify-between gap-3 border-b border-white/10 pb-5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/40 bg-corporate-teal-950/80 px-3.5 py-1.5 text-xs font-bold text-corporate-teal-200 shadow-inner backdrop-blur-md">
+                        <span className="relative flex h-2 w-2">
+                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
+                        </span>
+                        <span className="tracking-wide">ANALISIS BERASASKAN DATA</span>
+                      </div>
+                      <div className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-300 backdrop-blur-md">
+                        <Globe size={13} className="text-corporate-teal-300" />
+                        <span>Gold API + ExchangeRate-API</span>
+                      </div>
                     </div>
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-amber-400/30 flex-1 sm:flex-none">
-                      <p className="text-amber-200 text-xs font-bold uppercase tracking-wider mb-1">Anggaran trend 12 minggu</p>
-                      <p className="text-3xl md:text-4xl font-black text-amber-400">
-                        {twelveWeekGoldEstimate === null
-                          ? 'Belum tersedia'
-                          : <>RM {twelveWeekGoldEstimate.toFixed(2)}<span className="text-base md:text-lg text-amber-200 font-medium tracking-normal">/g</span></>}
+
+                    <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                      <button
+                        onClick={() => handleRefresh()}
+                        disabled={isRefreshing}
+                        className="flex flex-1 sm:flex-none items-center justify-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 hover:bg-corporate-teal-500 px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-lg shadow-corporate-teal-950/40 transition-all active:scale-95 disabled:opacity-50"
+                      >
+                        <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
+                        <span>{isRefreshing ? 'Mengemas kini...' : 'Kemas kini harga'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleExportAnalyticsCSV}
+                        className="inline-flex flex-1 sm:flex-none items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 hover:bg-white/20 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white backdrop-blur-md transition-all active:scale-95"
+                      >
+                        <DownloadCloud size={14} />
+                        <span>Laporan CSV</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowAiMethodology(prev => !prev)}
+                        className="inline-flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/5 hover:bg-white/15 px-3 py-2 text-xs font-semibold text-slate-300 backdrop-blur-md transition-all"
+                        title="Papar penerangan metodologi sistem"
+                      >
+                        <Info size={14} />
+                        <span>{showAiMethodology ? 'Tutup Nota' : 'Nota Sistem'}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Title & Introduction */}
+                  <div className="mt-6 flex flex-col md:flex-row md:items-end justify-between gap-4">
+                    <div>
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-corporate-teal-300 mb-1">
+                        <Zap size={14} className="text-amber-400" />
+                        <span>Predictive Intelligence &amp; Portfolio Health</span>
+                      </div>
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white">
+                        Ramalan dan Cadangan Portfolio
+                      </h2>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-2xl leading-relaxed">
+                        Sistem menganalisis harga pasaran harian, kelayakan tebus surat gadaian, dan simulasi penstrukturan semula portfolio Ar-Rahnu.
                       </p>
                     </div>
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-xl border border-sky-400/30 flex-1 sm:flex-none">
-                      <p className="text-sky-200 text-xs font-bold uppercase tracking-wider mb-1">Snapshot harga</p>
-                      <p className="text-3xl md:text-4xl font-black text-white">{goldPriceHistory.length}</p>
-                      <p className="text-xs text-sky-100">hari direkod</p>
+                  </div>
+
+                  {/* Telemetry KPI Cards Grid */}
+                  <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+                    {/* Card 1: Harga Spot Emas */}
+                    <div className="relative overflow-hidden rounded-2xl border border-corporate-teal-500/30 bg-gradient-to-b from-white/10 to-white/5 p-4 backdrop-blur-md">
+                      <div className="flex items-center justify-between text-corporate-teal-200">
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Harga Spot Semasa</span>
+                        <TrendingUp size={16} className="text-emerald-400" />
+                      </div>
+                      <p className="mt-2 text-2xl sm:text-3xl font-black text-white">
+                        RM {currentGoldPrice.toFixed(2)}
+                        <span className="text-xs sm:text-sm font-semibold text-slate-300">/g</span>
+                      </p>
+                      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-corporate-teal-200">
+                        <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                        <span>Asas kiraan marhun live</span>
+                      </div>
+                    </div>
+
+                    {/* Card 2: Unjuran 12 Minggu */}
+                    <div className="relative overflow-hidden rounded-2xl border border-corporate-magenta-500/30 bg-gradient-to-b from-white/10 to-white/5 p-4 backdrop-blur-md">
+                      <div className="flex items-center justify-between text-corporate-magenta-200">
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Unjuran 12 Minggu</span>
+                        <Activity size={16} className="text-corporate-magenta-300" />
+                      </div>
+                      <p className="mt-2 text-2xl sm:text-3xl font-black text-amber-300">
+                        {twelveWeekGoldEstimate === null ? (
+                          <span className="text-lg sm:text-xl font-bold text-slate-300">Belum tersedia</span>
+                        ) : (
+                          <>
+                            RM {twelveWeekGoldEstimate.toFixed(2)}
+                            <span className="text-xs sm:text-sm font-semibold text-amber-200">/g</span>
+                          </>
+                        )}
+                      </p>
+                      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-slate-300">
+                        {twelveWeekGoldEstimate !== null ? (
+                          <span className="text-emerald-300 font-semibold">Regresi linear 30 snapshot</span>
+                        ) : (
+                          <span className="text-amber-300">Perlu min. 7 snapshot harian</span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Card 3: Snapshot Pasaran */}
+                    <div className="relative overflow-hidden rounded-2xl border border-sky-400/30 bg-gradient-to-b from-white/10 to-white/5 p-4 backdrop-blur-md">
+                      <div className="flex items-center justify-between text-sky-200">
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Snapshot Harga</span>
+                        <BarChart3 size={16} className="text-sky-300" />
+                      </div>
+                      <p className="mt-2 text-2xl sm:text-3xl font-black text-white">
+                        {goldPriceHistory.length}
+                        <span className="text-xs sm:text-sm font-semibold text-slate-300"> hari</span>
+                      </p>
+                      <div className="mt-2">
+                        <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                          <div
+                            className="h-full rounded-full bg-sky-400 transition-all duration-500"
+                            style={{ width: `${Math.min(100, Math.round((goldPriceHistory.length / 7) * 100))}%` }}
+                          />
+                        </div>
+                        <span className="mt-1 block text-[10px] text-slate-300">
+                          {goldPriceHistory.length >= 7 ? 'Baseline 7 hari dicapai' : `${7 - goldPriceHistory.length} hari lagi untuk aktifkan ramalan`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Card 4: Skor Kesiapsiagaan Purata */}
+                    <div className="relative overflow-hidden rounded-2xl border border-corporate-teal-400/30 bg-gradient-to-b from-white/10 to-white/5 p-4 backdrop-blur-md">
+                      <div className="flex items-center justify-between text-corporate-teal-200">
+                        <span className="text-[11px] font-bold uppercase tracking-wider">Skor Kesiapsiagaan</span>
+                        <ShieldCheck size={16} className="text-corporate-teal-300" />
+                      </div>
+                      <p className="mt-2 text-2xl sm:text-3xl font-black text-white">
+                        {averageRiskScore === null ? (
+                          <span className="text-lg sm:text-xl font-bold text-slate-300">Belum dikira</span>
+                        ) : (
+                          `${averageRiskScore}/100`
+                        )}
+                      </p>
+                      <div className="mt-2 flex items-center gap-1.5 text-[11px]">
+                        {averageRiskScore === null ? (
+                          <span className="text-slate-400">Isi data tunai di bawah</span>
+                        ) : averageRiskScore >= 80 ? (
+                          <span className="text-emerald-300 font-bold">● Tahap Bersedia</span>
+                        ) : averageRiskScore >= 60 ? (
+                          <span className="text-amber-300 font-bold">● Perlu Semakan</span>
+                        ) : (
+                          <span className="text-rose-300 font-bold">● Perlu Perhatian</span>
+                        )}
+                      </div>
                     </div>
                   </div>
 
-                  <p className="text-emerald-100 text-sm md:text-lg leading-relaxed max-w-2xl">
-                    Sistem menyimpan satu snapshot harga bagi setiap hari apabila anda menekan “Kemas kini harga”. Ramalan hanya muncul selepas sekurang-kurangnya 7 hari data, menggunakan trend linear ringkas, bukan jaminan harga. Kadar institusi ialah anggaran spot + spread tersimpan; sahkan kadar dan caj sebenar di kaunter.
-                  </p>
+                  {/* Collapsible Methodology Info Panel */}
+                  {showAiMethodology && (
+                    <div className="mt-5 rounded-2xl border border-white/15 bg-slate-950/70 p-4 sm:p-5 text-xs text-slate-300 backdrop-blur-md animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="flex items-center justify-between mb-2">
+                        <p className="font-bold text-corporate-teal-300 flex items-center gap-1.5">
+                          <Info size={14} /> Metodologi Pengiraan &amp; Penafian
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setShowAiMethodology(false)}
+                          className="text-slate-400 hover:text-white"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
+                      <ul className="space-y-1.5 leading-relaxed list-disc pl-4 text-slate-300">
+                        <li><strong>Snapshot Harian:</strong> Sistem menyimpan satu snapshot harga bagi setiap hari apabila anda menekan &ldquo;Kemas kini harga&rdquo;.</li>
+                        <li><strong>Unjuran Trend:</strong> Ramalan hanya muncul selepas sekurang-kurangnya 7 hari data menggunakan trend linear ringkas daripada sehingga 30 snapshot terkini, bukan jaminan harga pasaran.</li>
+                        <li><strong>Kadar Institusi:</strong> Nilai marhun ialah anggaran spot + spread tersimpan; sentiasa sahkan kadar dan caj sebenar dengan pihak institusi.</li>
+                        <li><strong>AI Score:</strong> Skor mengukur kesiapsiagaan tebus (tempoh matang, nisbah tunai, nisbah EDT/EDR dan kelengkapan data), bukan model machine learning atau jaminan kelulusan.</li>
+                      </ul>
+                    </div>
+                  )}
                 </div>
               </div>
 
-              <section className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm sm:p-6">
-                <div className="mb-4">
-                  <h3 className="text-lg font-bold text-slate-800">AI Presumption, AI Predictive &amp; AI Score Surat Gadaian</h3>
-                  <p className="mt-1 text-sm leading-relaxed text-slate-500">
-                    Andaian membandingkan nilai semasa anggaran (berat × kadar institusi tersimpan) dengan nilai asas surat (jumlah pembiayaan ÷ margin).
-                    Ramalan menggunakan trend linear harga spot 12 minggu, sekurang-kurangnya 7 snapshot harian, dan andaian spread institusi kekal.
-                    Ia tidak meramal caj, tempoh lanjutan atau lelong.
-                    AI Score mengukur kesiapsiagaan tebus (tempoh matang, tunai, nisbah EDT/EDR dan kelengkapan data), bukan ramalan harga.
-                    Ini indikator berasaskan formula, bukan model machine learning;
-                    ia tidak mengubah Status surat secara automatik. Pastikan kadar institusi sepadan dengan ketulenan emas dan sahkan kadar serta caj sebenar dengan institusi.
-                  </p>
+              {/* SECTION: AI Presumption, Predictive & Score Surat Gadaian */}
+              <section className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-7 shadow-sm">
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 border-b border-slate-100 pb-5">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-corporate-teal-600 mb-1">
+                      <Layers size={14} />
+                      <span>Surat Gadaian Telemetry</span>
+                    </div>
+                    <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                      AI Presumption, AI Predictive &amp; AI Score Surat Gadaian
+                    </h3>
+                    <p className="mt-1 text-xs sm:text-sm text-slate-500 max-w-2xl leading-relaxed">
+                      Membandingkan nilai semasa anggaran (berat × kadar institusi) dengan nilai asas surat (pembiayaan ÷ margin) serta unjuran trend 12 minggu.
+                    </p>
+                  </div>
+
+                  {/* Filter Pills */}
+                  <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-xl self-start sm:self-center">
+                    <button
+                      type="button"
+                      onClick={() => setSagFilter('all')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        sagFilter === 'all'
+                          ? 'bg-white text-slate-800 shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Semua ({sagAiIndicators.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSagFilter('overlap')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        sagFilter === 'overlap'
+                          ? 'bg-corporate-teal-500 text-white shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Potensi Overlap ({sagAiIndicators.filter(i => i.presumption === 'Potensi overlap').length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSagFilter('shortfall')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        sagFilter === 'shortfall'
+                          ? 'bg-corporate-magenta-500 text-white shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Shortfall ({sagAiIndicators.filter(i => i.presumption === 'Petunjuk shortfall').length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSagFilter('ready')}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                        sagFilter === 'ready'
+                          ? 'bg-emerald-600 text-white shadow-sm'
+                          : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      Skor &ge; 80 ({sagAiIndicators.filter(i => (i.readinessScore ?? 0) >= 80).length})
+                    </button>
+                  </div>
                 </div>
-                {sagAiIndicators.length === 0 ? (
-                  <p className="rounded-xl bg-slate-50 p-5 text-center text-sm text-slate-500">
-                    Tiada surat aktif untuk dianalisis.
-                  </p>
+
+                {filteredSagAiIndicators.length === 0 ? (
+                  <div className="mt-6 rounded-2xl bg-slate-50 border border-slate-200/60 p-8 text-center">
+                    <BrainCircuit size={32} className="mx-auto text-slate-400 mb-2" />
+                    <p className="font-semibold text-slate-700">
+                      {sagAiIndicators.length === 0 ? 'Tiada surat aktif untuk dianalisis.' : 'Tiada rekod sepadan dengan tapisan yang dipilih.'}
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1">
+                      {sagAiIndicators.length === 0 ? 'Daftarkan transaksi aktif di lejar untuk melihat analisa automatik.' : 'Pilih tapisan "Semua" untuk melihat kembali senarai surat.'}
+                    </p>
+                  </div>
                 ) : (
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {sagAiIndicators.map(indicator => (
-                      <article key={indicator.transaction.id} className="rounded-xl border border-slate-200 p-4">
-                        <div className="flex items-start justify-between gap-2">
+                  <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {filteredSagAiIndicators.map(indicator => {
+                      const isOverlap = indicator.presumption === 'Potensi overlap';
+                      const isShortfall = indicator.presumption === 'Petunjuk shortfall';
+                      const score = indicator.readinessScore;
+
+                      return (
+                        <article
+                          key={indicator.transaction.id}
+                          className="group relative flex flex-col justify-between overflow-hidden rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm transition-all hover:border-corporate-teal-400 hover:shadow-md"
+                        >
+                          <div className={`absolute top-0 left-0 right-0 h-1.5 ${
+                            isOverlap ? 'bg-corporate-teal-500' : isShortfall ? 'bg-corporate-magenta-500' : 'bg-slate-300'
+                          }`} />
+
                           <div>
-                            <h4 className="font-bold text-slate-800">Surat {indicator.transaction.refNo || 'tanpa nombor'}</h4>
-                            <p className="text-xs text-slate-500">{indicator.transaction.institution || 'Institusi belum dipilih'}</p>
-                          </div>
-                          <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-700">
-                            {indicator.transaction.status || 'Aktif'}
-                          </span>
-                        </div>
-                        <dl className="mt-4 space-y-3 text-sm">
-                          <div>
-                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Presumption</dt>
-                            <dd className={`font-bold ${
-                              indicator.presumption === 'Potensi overlap'
-                                ? 'text-emerald-700'
-                                : indicator.presumption === 'Petunjuk shortfall'
-                                  ? 'text-rose-700'
-                                  : 'text-slate-700'
-                            }`}>{indicator.presumption}</dd>
-                            <dd className="text-xs text-slate-500">
-                              {indicator.currentMarhunValue === null || indicator.impliedLetterValue === null
-                                ? 'Lengkapkan nilai surat dan kadar institusi untuk perbandingan.'
-                                : `Anggaran semasa ${formatRM(indicator.currentMarhunValue)} · asas surat ${formatRM(indicator.impliedLetterValue)}`}
-                            </dd>
-                          </div>
-                          <div>
-                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Predictive · 12 minggu</dt>
-                            <dd className="font-semibold text-slate-700">
-                              {indicator.prediction || 'Belum tersedia — kumpulkan 7 snapshot harga harian.'}
-                            </dd>
-                            {indicator.projectedMarhunValue !== null && (
-                              <dd className="text-xs text-slate-500">
-                                Nilai marhun unjuran {formatRM(indicator.projectedMarhunValue)}
-                                {indicator.projectedFinancing !== null && ` · pembiayaan anggaran ${formatRM(indicator.projectedFinancing)}`}
-                              </dd>
+                            {/* Card Top Title */}
+                            <div className="flex items-start justify-between gap-2 pt-1">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-sm font-extrabold text-slate-900">
+                                    Surat #{indicator.transaction.refNo || 'N/A'}
+                                  </span>
+                                  <span className="rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-bold text-slate-700">
+                                    {indicator.transaction.status || 'Aktif'}
+                                  </span>
+                                </div>
+                                <p className="text-xs font-medium text-slate-500 mt-0.5 flex items-center gap-1">
+                                  <Building2 size={12} className="text-slate-400" />
+                                  <span>{indicator.transaction.institution || 'Institusi belum dipilih'}</span>
+                                </p>
+                              </div>
+
+                              {/* Readiness Score Badge */}
+                              <div className="text-right">
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-black ${
+                                  score === null
+                                    ? 'bg-slate-100 text-slate-600'
+                                    : score >= 80
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : score >= 60
+                                        ? 'bg-amber-100 text-amber-800'
+                                        : 'bg-rose-100 text-rose-800'
+                                }`}>
+                                  <ShieldCheck size={12} />
+                                  <span>{score === null ? 'N/A' : `${score}/100`}</span>
+                                </span>
+                              </div>
+                            </div>
+
+                            {/* Readiness Mini Bar */}
+                            {score !== null && (
+                              <div className="mt-3">
+                                <div className="flex items-center justify-between text-[11px] text-slate-500 mb-1">
+                                  <span>Kesiapsiagaan tebus</span>
+                                  <span className="font-bold text-slate-700">
+                                    {score >= 80 ? 'Bersedia' : score >= 60 ? 'Perlu Semakan' : 'Perlu Perhatian'}
+                                  </span>
+                                </div>
+                                <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all duration-500 ${
+                                      score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-amber-500' : 'bg-rose-500'
+                                    }`}
+                                    style={{ width: `${Math.min(100, Math.max(0, score))}%` }}
+                                  />
+                                </div>
+                              </div>
                             )}
+
+                            {/* Metric Grid: Presumption & Predictive */}
+                            <div className="mt-4 space-y-3 divide-y divide-slate-100">
+                              {/* Presumption Block */}
+                              <div className="pt-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                    AI Presumption
+                                  </span>
+                                  <span className={`inline-flex items-center gap-1 text-xs font-bold ${
+                                    isOverlap ? 'text-corporate-teal-700' : isShortfall ? 'text-corporate-magenta-700' : 'text-slate-700'
+                                  }`}>
+                                    {isOverlap ? <ArrowUpRight size={14} /> : isShortfall ? <ArrowDownRight size={14} /> : null}
+                                    <span>{indicator.presumption}</span>
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-xs text-slate-600 leading-normal">
+                                  {indicator.currentMarhunValue === null || indicator.impliedLetterValue === null
+                                    ? 'Lengkapkan nilai surat dan kadar institusi untuk perbandingan.'
+                                    : (
+                                      <>
+                                        Anggaran Semasa <strong className="text-slate-800">{formatRM(indicator.currentMarhunValue)}</strong> vs Asas Surat <strong className="text-slate-800">{formatRM(indicator.impliedLetterValue)}</strong>
+                                        {indicator.estimatedCashBeforeNewFees !== null && (
+                                          <span className="block mt-0.5 text-[11px] text-slate-500">
+                                            Baki sebelum fi: <span className={indicator.estimatedCashBeforeNewFees >= 0 ? 'text-emerald-700 font-bold' : 'text-rose-700 font-bold'}>
+                                              {indicator.estimatedCashBeforeNewFees >= 0 ? `+${formatRM(indicator.estimatedCashBeforeNewFees)}` : formatRM(indicator.estimatedCashBeforeNewFees)}
+                                            </span>
+                                          </span>
+                                        )}
+                                      </>
+                                    )}
+                                </p>
+                              </div>
+
+                              {/* Predictive Block */}
+                              <div className="pt-3">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                                    Unjuran 12 Minggu
+                                  </span>
+                                </div>
+                                <p className="mt-1 text-xs font-medium text-slate-700">
+                                  {indicator.prediction || 'Belum tersedia — kumpulkan 7 snapshot harga.'}
+                                </p>
+                                {indicator.projectedMarhunValue !== null && (
+                                  <p className="mt-1 text-[11px] text-slate-500">
+                                    Nilai unjuran: <strong className="text-slate-700">{formatRM(indicator.projectedMarhunValue)}</strong>
+                                    {indicator.projectedFinancing !== null && ` · Pinjaman unjuran ${formatRM(indicator.projectedFinancing)}`}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
                           </div>
-                          <div>
-                            <dt className="text-xs font-semibold uppercase tracking-wide text-slate-500">AI Score kesiapsiagaan</dt>
-                            <dd className="font-bold text-slate-800">
-                              {indicator.readinessScore === null
-                                ? 'Belum dikira — masukkan tunai tersedia'
-                                : `${indicator.readinessScore}/100 · ${indicator.readinessScore >= 80
-                                  ? 'Bersedia'
-                                  : indicator.readinessScore >= 60
-                                    ? 'Perlu semakan'
-                                    : 'Perlu perhatian'}`}
-                            </dd>
-                          </div>
-                        </dl>
-                        {indicator.marhunValueMismatch && (
-                          <p className="mt-3 rounded-lg bg-amber-50 p-2 text-xs font-semibold text-amber-800">
-                            Nilai marhun yang direkod berbeza daripada jumlah pembiayaan ÷ margin. Sila semak angka surat.
-                          </p>
-                        )}
-                      </article>
-                    ))}
+
+                          {/* Mismatch Alert Box */}
+                          {indicator.marhunValueMismatch && (
+                            <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-2.5 text-xs font-semibold text-amber-900 flex items-start gap-1.5">
+                              <AlertCircle size={14} className="text-amber-700 shrink-0 mt-0.5" />
+                              <span>Nilai marhun berbeza daripada pembiayaan ÷ margin. Semak angka surat.</span>
+                            </div>
+                          )}
+                        </article>
+                      );
+                    })}
                   </div>
                 )}
               </section>
 
+              {/* SECTION: AI Forecast Chart & Makcik AI Insights */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                 {/* AI Forecast Chart */}
-                <div className="min-w-0 lg:col-span-2 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center">
-                    <TrendingUp className="mr-2 text-blue-500" size={20} /> Harga spot dan unjuran 12 minggu (RM/g)
-                  </h3>
+                <div className="min-w-0 lg:col-span-2 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80">
+                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-6">
+                    <div>
+                      <h3 className="text-lg sm:text-xl font-bold text-slate-800 flex items-center">
+                        <TrendingUp className="mr-2 text-corporate-teal-600" size={20} />
+                        Harga Spot &amp; Unjuran Linear 12 Minggu
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Trend harga spot emas harian (RM/g) serta unjuran regresi linear
+                      </p>
+                    </div>
+                    <span className="self-start sm:self-auto rounded-full bg-corporate-teal-50 px-3 py-1 text-xs font-bold text-corporate-teal-700 border border-corporate-teal-100">
+                      {dynamicAiData.length} data point direkod
+                    </span>
+                  </div>
+
                   {dynamicAiData.length === 0 ? (
-                    <div className="h-72 sm:h-80 flex flex-col items-center justify-center gap-3 rounded-xl bg-slate-50 px-6 text-center">
+                    <div className="h-72 sm:h-80 flex flex-col items-center justify-center gap-3 rounded-2xl bg-slate-50 px-6 text-center border border-slate-100">
+                      <BarChart3 size={36} className="text-slate-400" />
                       <p className="font-semibold text-slate-700">Belum ada snapshot harga.</p>
-                      <p className="max-w-md text-sm text-slate-500">Tekan “Kemas kini harga” untuk mengambil harga daripada sumber live dan mula membina sejarah harian.</p>
+                      <p className="max-w-md text-xs text-slate-500 leading-relaxed">
+                        Tekan butang &ldquo;Kemas kini harga&rdquo; di atas untuk mengambil harga live dan membina rekod harian.
+                      </p>
                     </div>
                   ) : (
                     <>
                       <div className="h-72 sm:h-80">
                         <ResponsiveContainer width="100%" height="100%">
-                          <LineChart data={dynamicAiData}>
-                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcdde0" />
-                            <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} dy={10} />
-                            <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#66686a', fontSize: 12 }} />
-                            <Tooltip formatter={value => [formatRM(Number(value)), 'Harga per gram']} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                            <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                            <Line type="monotone" dataKey="actual" name="Snapshot sebenar" stroke="#047ea0" strokeWidth={3} dot={{ r: 4, fill: '#047ea0', strokeWidth: 2, stroke: '#fff' }} connectNulls />
-                            <Line type="monotone" dataKey="predicted" name="Trend linear" stroke="#cf3983" strokeWidth={3} strokeDasharray="5 5" dot={{ r: 3, fill: '#cf3983', strokeWidth: 2, stroke: '#fff' }} connectNulls />
+                          <LineChart data={dynamicAiData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" opacity={0.7} />
+                            <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} dy={10} />
+                            <YAxis domain={['auto', 'auto']} axisLine={false} tickLine={false} tick={{ fill: '#64748b', fontSize: 11 }} />
+                            <Tooltip
+                              formatter={value => [formatRM(Number(value)), 'Harga spot']}
+                              contentStyle={{ borderRadius: '12px', border: '1px solid #cbd5e1', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)', backgroundColor: 'rgba(255, 255, 255, 0.95)' }}
+                            />
+                            <Legend wrapperStyle={{ paddingTop: '20px', fontSize: '12px' }} />
+                            <Line type="monotone" dataKey="actual" name="Snapshot Sebenar" stroke="#047ea0" strokeWidth={3} dot={{ r: 4, fill: '#047ea0', strokeWidth: 2, stroke: '#fff' }} connectNulls />
+                            <Line type="monotone" dataKey="predicted" name="Trend Linear" stroke="#cf3983" strokeWidth={2.5} strokeDasharray="5 5" dot={{ r: 3, fill: '#cf3983', strokeWidth: 2, stroke: '#fff' }} connectNulls />
                           </LineChart>
                         </ResponsiveContainer>
                       </div>
-                      <p className="mt-3 text-xs text-slate-500">
-                        {goldForecastAvailable
-                          ? 'Unjuran dikira daripada sehingga 30 snapshot harian terkini. Ia tidak mengambil kira perubahan pasaran mendadak.'
-                          : `Ramalan belum diaktifkan. Kumpulkan sekurang-kurangnya 7 snapshot pada hari berlainan. Kini: ${goldPriceHistory.length}.`}
-                      </p>
+                      <div className="mt-4 rounded-xl bg-slate-50 p-3 text-xs text-slate-500 flex items-center justify-between gap-2">
+                        <span>
+                          {goldForecastAvailable
+                            ? 'Unjuran dikira daripada sehingga 30 snapshot harian terkini.'
+                            : `Ramalan memerlukan min. 7 snapshot harian. Rekod semasa: ${goldPriceHistory.length}.`}
+                        </span>
+                        <span className="font-semibold text-slate-700 shrink-0">Model Regresi Linear</span>
+                      </div>
                     </>
                   )}
                 </div>
 
-                {/* AI Actionable Insights */}
-                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100 flex flex-col">
-                  <h3 className="text-lg font-bold text-slate-800 mb-1 flex items-center">
-                    <AlertCircle className="mr-2 text-amber-500" size={20} /> Makcik AI
-                  </h3>
-                  <p className="text-xs text-slate-500 mb-4">Rules &amp; Indicators · Pesanan untuk portfolio acik</p>
-                  <div className="flex-1 space-y-4 overflow-y-auto pr-2 custom-scrollbar">
+                {/* AI Actionable Insights (Makcik AI) */}
+                <div className="min-w-0 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80 flex flex-col">
+                  <div className="flex items-center justify-between mb-1">
+                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
+                      <Sparkles className="mr-2 text-corporate-magenta-500" size={20} />
+                      Makcik AI Advisor
+                    </h3>
+                    <span className="rounded-full bg-corporate-magenta-100 px-2.5 py-0.5 text-xs font-black text-corporate-magenta-800">
+                      {systemIndicators.length} Perhatian
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mb-4">Rules &amp; Indicators pintar untuk lindungi portfolio acik</p>
 
+                  <div className="flex-1 space-y-3 overflow-y-auto pr-1 custom-scrollbar max-h-[380px]">
                     {systemIndicators.length === 0 && (
                       <div className="p-6 bg-gradient-to-br from-emerald-50 via-teal-50 to-emerald-100/50 border border-emerald-200 rounded-2xl text-center space-y-3 shadow-sm animate-in fade-in duration-300">
                         <div className="w-12 h-12 bg-emerald-600 text-white rounded-full flex items-center justify-center mx-auto shadow-md">
                           <CheckCircle2 size={26} />
                         </div>
-                        <h4 className="font-bold text-slate-800 text-base">Tiada indikator tindakan aktif</h4>
-                        <p className="text-xs text-slate-600 leading-relaxed max-w-sm mx-auto">
-                          Tiada peraturan amaran yang dicetuskan sekarang. Semak tarikh matang dan syarat institusi secara berkala.
+                        <h4 className="font-bold text-slate-800 text-sm">Tiada indikator tindakan aktif</h4>
+                        <p className="text-xs text-slate-600 leading-relaxed">
+                          Tiada peraturan amaran yang dicetuskan sekarang. Portfolio dalam keadaan teratur.
                         </p>
-                        <div className="inline-flex items-center space-x-1.5 px-3 py-1 bg-emerald-100 text-emerald-800 text-xs font-semibold rounded-full border border-emerald-300">
-                          <ShieldCheck size={14} className="text-emerald-600" />
-                          <span>Indikator sahaja; bukan pengesahan keselamatan portfolio</span>
+                        <div className="inline-flex items-center space-x-1 px-2.5 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-semibold rounded-full border border-emerald-300">
+                          <ShieldCheck size={12} className="text-emerald-600" />
+                          <span>Status Sihat</span>
                         </div>
                       </div>
                     )}
@@ -5246,18 +5879,22 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     {systemIndicators.map((indicator) => {
                       const styles = indStyles[indicator.color];
                       return (
-                        <div key={indicator.id} className={`p-4 border ${styles.border} ${styles.bg} rounded-xl relative overflow-hidden group`}>
-                          <div className={`absolute top-0 left-0 w-1 h-full ${styles.strip}`}></div>
+                        <div key={indicator.id} className={`p-4 border ${styles.border} ${styles.bg} rounded-2xl relative overflow-hidden group shadow-sm transition-all hover:shadow`}>
+                          <div className={`absolute top-0 left-0 w-1.5 h-full ${styles.strip}`}></div>
                           <div className="flex justify-between items-start gap-2 mb-2">
-                            <span className={`text-xs font-bold ${styles.text} ${styles.badgeBg} px-2 py-1 rounded`}>{indicator.badge}</span>
-                            <span className="text-[11px] font-mono font-semibold text-slate-500 text-right shrink-0">Surat #{indicator.ticket}</span>
+                            <span className={`text-[11px] font-bold ${styles.text} ${styles.badgeBg} px-2.5 py-0.5 rounded-full`}>
+                              {indicator.badge}
+                            </span>
+                            <span className="text-[11px] font-mono font-bold text-slate-500 text-right shrink-0">
+                              Surat #{indicator.ticket}
+                            </span>
                           </div>
                           <h4 className="font-bold text-slate-800 text-sm mb-1">{indicator.title}</h4>
                           <p className="text-xs text-slate-600 leading-relaxed">{indicator.desc}</p>
-                          <div className="mt-2 flex justify-end">
+                          <div className="mt-3 flex justify-end">
                             <button
                               onClick={() => handleResolveIndicator(indicator)}
-                              className="text-[11px] font-semibold px-2.5 py-1 text-slate-500 hover:text-slate-800 hover:bg-white/70 rounded-md transition-colors flex items-center space-x-1"
+                              className="text-xs font-bold px-3 py-1.5 bg-white/90 hover:bg-white text-slate-700 hover:text-slate-900 border border-slate-200/80 rounded-xl transition-all shadow-sm flex items-center space-x-1.5"
                             >
                               {indicator.type === 'RATIO' ? <Plus size={13} /> : <ArrowRightLeft size={13} />}
                               <span>{indicator.type === 'RATIO' ? 'Tambah aset' : 'Rekod tindakan'}</span>
@@ -5266,63 +5903,91 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         </div>
                       );
                     })}
-
                   </div>
                 </div>
               </div>
 
+              {/* SECTION: AI Score Kesiapsiagaan & Kedudukan Kewangan */}
               <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                <div className="lg:col-span-2 min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                {/* Left (2 cols): AI Score Kesiapsiagaan */}
+                <div className="lg:col-span-2 min-w-0 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80">
+                  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 border-b border-slate-100 pb-5">
                     <div>
-                      <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                        <ShieldCheck className="mr-2 text-emerald-600" size={20} /> AI Score kesiapsiagaan tebus
+                      <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-corporate-teal-600 mb-1">
+                        <ShieldCheck size={14} />
+                        <span>Kesiapsiagaan Penebusan</span>
+                      </div>
+                      <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                        AI Score Kesiapsiagaan Tebus
                       </h3>
-                      <p className="mt-1 text-sm text-slate-500">Skor heuristik bagi setiap surat aktif menggunakan data surat dan kewangan portfolio.</p>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-500">
+                        Skor heuristik bagi setiap surat aktif menggunakan data surat dan kewangan portfolio.
+                      </p>
                     </div>
-                    <div className="rounded-xl bg-slate-50 px-4 py-3 text-center">
-                      <p className="text-xs font-semibold uppercase text-slate-500">Purata portfolio</p>
-                      <p className="mt-1 text-2xl font-black text-slate-800">
+                    <div className="rounded-2xl border border-slate-200 bg-slate-50/80 px-5 py-3 text-center sm:text-right shrink-0">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Purata Portfolio</p>
+                      <p className="mt-0.5 text-2xl font-black text-slate-800">
                         {averageRiskScore === null ? 'Belum dikira' : `${averageRiskScore}/100`}
                       </p>
                     </div>
                   </div>
 
-                  <div className="mt-4 rounded-lg border border-blue-100 bg-blue-50 p-3 text-xs leading-relaxed text-blue-900">
-                    AI Score memberi 30 mata kepada tempoh matang, 35 kepada tunai berbanding jumlah tebus aktif,
-                    20 kepada nisbah EDT/EDR dan 15 kepada kelengkapan sembilan medan utama surat gadaian.
-                    80 ke atas bermaksud lebih bersedia, 60–79 perlu disemak, bawah 60 perlu perhatian.
-                    Ini skor berasaskan peraturan, bukan model machine learning, skor kredit atau jaminan kelulusan.
+                  {/* 4 Pillars Visual Pill */}
+                  <div className="mt-5 grid grid-cols-2 sm:grid-cols-4 gap-2 text-center text-xs">
+                    <div className="rounded-xl bg-corporate-teal-50/60 border border-corporate-teal-100 p-2.5">
+                      <span className="font-extrabold text-corporate-teal-800">30 Mata</span>
+                      <p className="text-[11px] text-corporate-teal-600 mt-0.5">Tempoh Matang</p>
+                    </div>
+                    <div className="rounded-xl bg-emerald-50/60 border border-emerald-100 p-2.5">
+                      <span className="font-extrabold text-emerald-800">35 Mata</span>
+                      <p className="text-[11px] text-emerald-600 mt-0.5">Tunai vs Tebus</p>
+                    </div>
+                    <div className="rounded-xl bg-sky-50/60 border border-sky-100 p-2.5">
+                      <span className="font-extrabold text-sky-800">20 Mata</span>
+                      <p className="text-[11px] text-sky-600 mt-0.5">Nisbah EDT/EDR</p>
+                    </div>
+                    <div className="rounded-xl bg-amber-50/60 border border-amber-100 p-2.5">
+                      <span className="font-extrabold text-amber-800">15 Mata</span>
+                      <p className="text-[11px] text-amber-600 mt-0.5">Kelengkapan Data</p>
+                    </div>
                   </div>
 
-                  <div className="mt-4 space-y-3">
+                  {/* Ticket List */}
+                  <div className="mt-5 space-y-2.5">
                     {riskScores.length === 0 ? (
-                      <p className="rounded-xl bg-slate-50 p-5 text-center text-sm text-slate-500">
+                      <p className="rounded-2xl bg-slate-50 p-5 text-center text-sm text-slate-500">
                         Tiada surat aktif untuk dinilai.
                       </p>
                     ) : riskScores.map(({ transaction, daysRemaining, score }) => (
-                      <div key={transaction.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-xl border border-slate-100 p-3">
+                      <div key={transaction.id} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 rounded-2xl border border-slate-100 bg-slate-50/50 p-3.5 transition-all hover:bg-slate-50">
                         <div>
-                          <p className="font-bold text-slate-800">Surat {transaction.refNo || 'tanpa nombor'} · {transaction.institution || 'Institusi belum dipilih'}</p>
-                          <p className="text-xs text-slate-500">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-slate-800 text-sm">
+                              Surat #{transaction.refNo || 'tanpa nombor'}
+                            </span>
+                            <span className="text-xs text-slate-500 font-medium">
+                              · {transaction.institution || 'Institusi belum dipilih'}
+                            </span>
+                          </div>
+                          <p className="text-xs text-slate-500 mt-0.5">
                             {daysRemaining === null
                               ? 'Tarikh matang belum diisi'
                               : daysRemaining < 0
-                                ? `Lewat ${Math.abs(daysRemaining)} hari`
+                                ? <span className="text-rose-600 font-bold">Lewat {Math.abs(daysRemaining)} hari</span>
                                 : daysRemaining === 0
-                                  ? 'Matang hari ini'
-                                  : `Baki ${daysRemaining} hari`}
-                            {' · Jumlah tebus '}{formatRM(getCurrentRedemption(transaction))}
+                                  ? <span className="text-amber-600 font-bold">Matang hari ini</span>
+                                  : <span>Baki {daysRemaining} hari</span>}
+                            {' · Jumlah tebus '}<strong className="text-slate-700">{formatRM(getCurrentRedemption(transaction))}</strong>
                           </p>
                         </div>
-                        <span className={`self-start sm:self-auto rounded-full px-3 py-1 text-sm font-bold ${
+                        <span className={`self-start sm:self-auto rounded-full px-3 py-1 text-xs font-black ${
                           score === null
-                            ? 'bg-slate-100 text-slate-600'
+                            ? 'bg-slate-200 text-slate-600'
                             : score >= 80
-                              ? 'bg-emerald-100 text-emerald-800'
+                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
                               : score >= 60
-                                ? 'bg-amber-100 text-amber-800'
-                                : 'bg-rose-100 text-rose-800'
+                                ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                                : 'bg-rose-100 text-rose-800 border border-rose-200'
                         }`}>
                           {score === null
                             ? 'Masukkan tunai tersedia'
@@ -5332,116 +5997,166 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     ))}
                   </div>
 
-                  <div className="mt-4 rounded-xl border border-amber-100 bg-amber-50 p-4">
-                    <h4 className="text-sm font-bold text-amber-900">Cadangan tindakan</h4>
-                    <ul className="mt-2 space-y-1.5 text-sm text-amber-900">
-                      {cashOnHand === null && <li>• Masukkan tunai tersedia untuk mengira kemampuan menebus.</li>}
+                  {/* Recommendations */}
+                  <div className="mt-5 rounded-2xl border border-amber-200/80 bg-gradient-to-r from-amber-50 to-orange-50/50 p-4">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-amber-900 flex items-center gap-1.5">
+                      <Sparkles size={13} className="text-amber-700" /> Cadangan Tindakan AI
+                    </h4>
+                    <ul className="mt-2 space-y-1.5 text-xs text-amber-900 leading-relaxed">
+                      {cashOnHand === null && <li>• Masukkan angka tunai tersedia di sebelah untuk mengira keupayaan menebus surat.</li>}
                       {cashOnHand !== null && cashOnHand < activeRedemptionTotal && (
-                        <li>• Tunai yang direkod kurang {formatRM(activeRedemptionTotal - cashOnHand)} daripada jumlah tebus surat aktif.</li>
+                        <li>• Tunai yang direkod kurang <strong>{formatRM(activeRedemptionTotal - cashOnHand)}</strong> daripada jumlah tebus surat aktif.</li>
                       )}
                       {monthlyExpenses !== null && cashOnHand !== null && cashOnHand < monthlyExpenses * 3 && (
-                        <li>• Dana tunai belum mencapai penanda perbelanjaan tiga bulan ({formatRM(monthlyExpenses * 3)}).</li>
+                        <li>• Dana tunai belum mencapai penanda kecemasan 3 bulan (<strong>{formatRM(monthlyExpenses * 3)}</strong>).</li>
                       )}
                       {riskScores.some(item => item.daysRemaining !== null && item.daysRemaining <= 7) && (
-                        <li>• Semak surat yang matang dalam tujuh hari atau sudah lewat, kemudian sahkan jumlah tebus dengan institusi.</li>
+                        <li>• Terdapat surat yang matang dalam 7 hari atau sudah lewat; sahkan segera jumlah tebus rasmi di kaunter institusi.</li>
                       )}
                       {activePortfolioTransactions.length > 0 && cashOnHand !== null && cashOnHand >= activeRedemptionTotal &&
                         !(monthlyExpenses !== null && cashOnHand < monthlyExpenses * 3) &&
                         !riskScores.some(item => item.daysRemaining !== null && item.daysRemaining <= 7) && (
-                          <li>• Tunai yang direkod meliputi jumlah tebus aktif. Semak tarikh matang dan caj sebelum membuat keputusan.</li>
+                          <li>• Tunai yang direkod meliputi jumlah tebus aktif. Portfolio berada pada zon selamat.</li>
                         )}
                     </ul>
                   </div>
                 </div>
 
-                <div className="min-w-0 bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                  <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                    <Wallet className="mr-2 text-emerald-600" size={20} /> Kedudukan kewangan
-                  </h3>
-                  <p className="mt-1 text-sm text-slate-500">Masukkan angka semasa untuk skor dan cadangan.</p>
-                  <div className="mt-4 space-y-3">
-                    <label className="block text-sm font-semibold text-slate-700">
-                      Tunai tersedia (RM)
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={financialReadiness.cashOnHand}
-                        onChange={event => setFinancialReadiness(current => ({ ...current, cashOnHand: event.target.value }))}
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                        placeholder="Contoh: 5000"
-                      />
-                    </label>
-                    <label className="block text-sm font-semibold text-slate-700">
-                      Pendapatan bulanan (RM)
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={financialReadiness.monthlyIncome}
-                        onChange={event => setFinancialReadiness(current => ({ ...current, monthlyIncome: event.target.value }))}
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                        placeholder="Pilihan"
-                      />
-                    </label>
-                    <label className="block text-sm font-semibold text-slate-700">
-                      Perbelanjaan bulanan (RM)
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={financialReadiness.monthlyExpenses}
-                        onChange={event => setFinancialReadiness(current => ({ ...current, monthlyExpenses: event.target.value }))}
-                        className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                        placeholder="Pilihan"
-                      />
-                    </label>
+                {/* Right (1 col): Kedudukan Kewangan */}
+                <div className="min-w-0 bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80 flex flex-col justify-between">
+                  <div>
+                    <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-600 mb-1">
+                      <Wallet size={14} />
+                      <span>Input Kecairan</span>
+                    </div>
+                    <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                      Kedudukan Kewangan
+                    </h3>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Masukkan data semasa untuk menjana skor dan cadangan portfolio.
+                    </p>
+
+                    <div className="mt-5 space-y-3.5">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Tunai Tersedia
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20 overflow-hidden">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs font-bold text-slate-400">RM</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={financialReadiness.cashOnHand}
+                            onChange={event => setFinancialReadiness(current => ({ ...current, cashOnHand: event.target.value }))}
+                            className="w-full py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                            placeholder="Contoh: 5000"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Pendapatan Bulanan <span className="font-normal text-slate-400">(Pilihan)</span>
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20 overflow-hidden">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs font-bold text-slate-400">RM</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={financialReadiness.monthlyIncome}
+                            onChange={event => setFinancialReadiness(current => ({ ...current, monthlyIncome: event.target.value }))}
+                            className="w-full py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                            placeholder="Contoh: 4500"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Perbelanjaan Bulanan <span className="font-normal text-slate-400">(Pilihan)</span>
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20 overflow-hidden">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs font-bold text-slate-400">RM</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={financialReadiness.monthlyExpenses}
+                            onChange={event => setFinancialReadiness(current => ({ ...current, monthlyExpenses: event.target.value }))}
+                            className="w-full py-2.5 pl-10 pr-3 text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                            placeholder="Contoh: 2800"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Financial Benchmark Chips */}
+                    <div className="mt-4 space-y-2">
+                      {monthlyExpenses !== null && (
+                        <div className="rounded-xl border border-slate-200/80 bg-slate-50 p-3 text-xs text-slate-600">
+                          <span className="font-bold text-slate-800">Dana Kecemasan 3 Bulan:</span>{' '}
+                          <strong>{formatRM(monthlyExpenses * 3)}</strong>
+                          {cashOnHand !== null && (
+                            <span className="block mt-0.5 text-[11px] text-slate-500">
+                              {cashOnHand >= monthlyExpenses * 3 ? '✓ Mencukupi penanda aras' : `Kekurangan ${formatRM(Math.max(0, monthlyExpenses * 3 - cashOnHand))}`}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {monthlyIncome !== null && (
+                        <div className="rounded-xl border border-slate-200/80 bg-slate-50 p-3 text-xs text-slate-600">
+                          <span className="font-bold text-slate-800">Simpanan 10% Sasaran:</span>{' '}
+                          <strong>{formatRM(monthlyIncome * 0.1)}</strong> sebulan
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  {monthlyExpenses !== null && (
-                    <p className="mt-4 rounded-lg bg-slate-50 p-3 text-xs leading-relaxed text-slate-600">
-                      Penanda tunai tiga bulan: <strong>{formatRM(monthlyExpenses * 3)}</strong>
-                      {cashOnHand !== null && ` · Kekurangan ${formatRM(Math.max(0, monthlyExpenses * 3 - cashOnHand))}`}
-                    </p>
-                  )}
-                  {monthlyIncome !== null && (
-                    <p className="mt-2 text-xs text-slate-500">
-                      Penanda simpanan 10% pendapatan: {formatRM(monthlyIncome * 0.1)} sebulan.
-                    </p>
-                  )}
-                  <p className="mt-3 text-[11px] leading-relaxed text-slate-400">
-                    Nilai disimpan setempat pada browser ini mengikut akaun, bukan di Supabase. Data ini tidak berpindah ke peranti lain dan hilang jika storan browser dipadam.
+
+                  <p className="mt-4 text-[11px] leading-relaxed text-slate-400 border-t border-slate-100 pt-3">
+                    Disimpan setempat pada browser ini. Data kewangan peribadi kekal di peranti anda.
                   </p>
                 </div>
               </section>
 
-              <section className="bg-white p-4 sm:p-6 rounded-2xl shadow-sm border border-slate-100">
-                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+              {/* SECTION: Simulasi Andaian Overlap */}
+              <section className="bg-white p-5 sm:p-7 rounded-3xl shadow-sm border border-slate-200/80">
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 border-b border-slate-100 pb-5">
                   <div>
-                    <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                      <Scale className="mr-2 text-amber-500" size={20} /> Simulasi andaian overlap
+                    <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-amber-600 mb-1">
+                      <Scale size={14} />
+                      <span>Financial Scenario Lab</span>
+                    </div>
+                    <h3 className="text-lg sm:text-xl font-bold text-slate-800">
+                      Simulasi Andaian Overlap
                     </h3>
-                    <p className="mt-1 max-w-3xl text-sm text-slate-500">
-                      Nilai semula emas yang sama, kira pembiayaan baharu dan selesaikan surat lama. Baki tunai ialah perbezaan pembiayaan selepas caj dan fi; ia bukan keuntungan.
+                    <p className="mt-1 max-w-2xl text-xs sm:text-sm text-slate-500 leading-relaxed">
+                      Nilai semula emas yang sama, kira pembiayaan baharu dan selesaikan surat lama. Baki tunai ialah perbezaan pembiayaan bersih selepas caj dan fi.
                     </p>
                   </div>
                   <button
                     type="button"
                     onClick={handleExportAnalyticsCSV}
-                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm font-bold text-slate-700 hover:bg-slate-100"
+                    className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-xs sm:text-sm font-bold text-slate-700 hover:bg-slate-100 transition-all shadow-sm"
                   >
-                    <Download size={17} /> Muat turun analisis
+                    <Download size={15} /> Muat Turun Analisis
                   </button>
                 </div>
 
                 {activePortfolioTransactions.length === 0 ? (
-                  <p className="mt-5 rounded-xl bg-slate-50 p-5 text-sm text-slate-500">
+                  <p className="mt-6 rounded-2xl bg-slate-50 p-6 text-sm text-slate-500 text-center">
                     Tambah transaksi aktif untuk menggunakan simulasi ini.
                   </p>
                 ) : (
                   <>
-                    <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                      <label className="text-sm font-semibold text-slate-700">
-                        Surat lama aktif
+                    {/* Input Controls Grid */}
+                    <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Surat Lama Aktif
+                        </label>
                         <select
                           value={selectedScenarioTransaction?.id ?? ''}
                           onChange={event => {
@@ -5457,17 +6172,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             setScenarioOldFees('');
                             setScenarioNewFees('');
                           }}
-                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20 shadow-sm"
                         >
                           {activePortfolioTransactions.map(transaction => (
                             <option key={transaction.id} value={transaction.id}>
-                              {transaction.refNo || `ID ${transaction.id}`} · {transaction.institution || 'Tiada institusi'}
+                              Surat #{transaction.refNo || `ID ${transaction.id}`} · {transaction.institution || 'Tiada institusi'}
                             </option>
                           ))}
                         </select>
-                      </label>
-                      <label className="text-sm font-semibold text-slate-700">
-                        Institusi pajakan baharu
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Institusi Pajakan Baharu
+                        </label>
                         <select
                           value={scenarioInstitutionName || selectedScenarioTransaction?.institution || ''}
                           onChange={event => {
@@ -5476,134 +6194,201 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             setScenarioMargin(String(institution?.maxMargin ?? ''));
                             setScenarioNewFees('');
                           }}
-                          className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-emerald-500"
+                          className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20 shadow-sm"
                         >
                           {visibleInstitutions.map(institution => (
                             <option key={institution.id} value={institution.name}>{institution.name}</option>
                           ))}
                         </select>
-                      </label>
-                      <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm">
-                        <span className="font-semibold text-slate-700">Pembiayaan lama</span>
-                        <p className="mt-1 text-slate-600">{formatRM(scenarioOldPrincipal)}</p>
                       </div>
-                      <label className="text-sm font-semibold text-slate-700">
-                        Caj tertunggak surat lama (RM)
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={scenarioOldFees === '' ? scenarioOldFeesDefault : scenarioOldFees}
-                          onChange={event => setScenarioOldFees(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Masukkan caj sebenar"
-                        />
-                        <span className="mt-1 block text-xs font-normal text-slate-500">
-                          Anggaran awal daripada jumlah tebus lama − pembiayaan lama; sahkan dengan institusi.
+
+                      <div className="rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-2.5 flex flex-col justify-center">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Pembiayaan Lama (Tolak)</span>
+                        <p className="mt-0.5 text-base sm:text-lg font-black text-slate-800">{formatRM(scenarioOldPrincipal)}</p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Caj Tertunggak Surat Lama
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-corporate-teal-500 focus-within:ring-2 focus-within:ring-corporate-teal-500/20 overflow-hidden">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs font-bold text-slate-400">RM</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={scenarioOldFees === '' ? scenarioOldFeesDefault : scenarioOldFees}
+                            onChange={event => setScenarioOldFees(event.target.value)}
+                            className="w-full py-2.5 pl-10 pr-3 text-xs sm:text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                            placeholder="Masukkan caj sebenar"
+                          />
+                        </div>
+                        <span className="mt-1 block text-[11px] text-slate-500">
+                          Anggaran awal: Tebus lama − Pembiayaan lama.
                         </span>
-                      </label>
-                      <label className="text-sm font-semibold text-slate-700">
-                        Margin pembiayaan baharu (%)
-                        <input
-                          type="number"
-                          min="0"
-                          max="100"
-                          step="0.1"
-                          value={scenarioMargin === ''
-                            ? scenarioInstitution?.maxMargin ?? selectedScenarioTransaction?.margin ?? ''
-                            : scenarioMargin}
-                          onChange={event => setScenarioMargin(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                        />
-                      </label>
-                      <label className="text-sm font-semibold text-slate-700">
-                        Fi berkaitan baharu (RM)
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          value={scenarioNewFees}
-                          onChange={event => setScenarioNewFees(event.target.value)}
-                          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 font-normal outline-none focus:ring-2 focus:ring-emerald-500"
-                          placeholder="Masukkan fi / caj berkaitan"
-                        />
-                        <span className="mt-1 block text-xs font-normal text-slate-500">
-                          Masukkan caj yang dikenakan untuk pajakan baharu. Baki akhir tidak dikira sehingga nilai ini diisi.
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Margin Pembiayaan Baharu
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-corporate-teal-500 focus-within:ring-2 focus-within:ring-corporate-teal-500/20 overflow-hidden">
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            value={scenarioMargin === ''
+                              ? scenarioInstitution?.maxMargin ?? selectedScenarioTransaction?.margin ?? ''
+                              : scenarioMargin}
+                            onChange={event => setScenarioMargin(event.target.value)}
+                            className="w-full py-2.5 pl-3 pr-8 text-xs sm:text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                          />
+                          <span className="absolute inset-y-0 right-0 flex items-center pr-3 text-xs font-bold text-slate-400">%</span>
+                        </div>
+                        <span className="mt-1 block text-[11px] text-slate-500">
+                          Kadar margin institusi baharu dipilih.
                         </span>
-                      </label>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Fi Berkaitan Baharu
+                        </label>
+                        <div className="relative rounded-xl border border-slate-200 bg-white shadow-sm focus-within:border-corporate-teal-500 focus-within:ring-2 focus-within:ring-corporate-teal-500/20 overflow-hidden">
+                          <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-xs font-bold text-slate-400">RM</span>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={scenarioNewFees}
+                            onChange={event => setScenarioNewFees(event.target.value)}
+                            className="w-full py-2.5 pl-10 pr-3 text-xs sm:text-sm font-semibold text-slate-800 outline-none bg-transparent"
+                            placeholder="Contoh: 15.00"
+                          />
+                        </div>
+                        <span className="mt-1 block text-[11px] text-slate-500">
+                          Fi pajakan baharu untuk pengiraan baki akhir.
+                        </span>
+                      </div>
                     </div>
 
                     {goldPriceHistory.length === 0 && (
-                      <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
-                        Belum ada snapshot live. Simulasi ini menggunakan harga rujukan dalam aplikasi sehingga anda menekan “Kemas kini harga”.
-                      </p>
+                      <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 flex items-center gap-2">
+                        <AlertCircle size={15} className="text-amber-700 shrink-0" />
+                        <span>Belum ada snapshot live. Simulasi menggunakan harga rujukan aplikasi sehingga harga dikemas kini.</span>
+                      </div>
                     )}
 
-                    <div className="mt-5 grid grid-cols-1 md:grid-cols-3 gap-3">
-                      {scenarioOutcomes.map(scenario => (
-                        <div key={scenario.label} className="rounded-xl border border-slate-200 p-4">
-                          <h4 className="font-bold text-slate-800">{scenario.label}</h4>
-                          <dl className="mt-3 space-y-2 text-sm">
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Nilai marhun baharu (emas sama)</dt>
-                              <dd className="font-semibold text-slate-800">{formatRM(scenario.newMarhunValue)}</dd>
+                    {/* 3 Outcome Scenario Cards */}
+                    <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+                      {scenarioOutcomes.map((scenario, index) => {
+                        const isPositive = scenario.cashDifference !== null && scenario.cashDifference >= 0;
+                        const isPending = scenario.cashDifference === null;
+
+                        return (
+                          <div
+                            key={scenario.label}
+                            className="flex flex-col justify-between rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm transition-all hover:shadow-md"
+                          >
+                            <div>
+                              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                                <div>
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                                    {index === 0 ? 'Senario Bearish' : index === 1 ? 'Senario Asas' : 'Senario Bullish'}
+                                  </span>
+                                  <h4 className="font-extrabold text-slate-800 text-sm">{scenario.label}</h4>
+                                </div>
+                                <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${
+                                  index === 0 ? 'bg-rose-50 text-rose-700' : index === 1 ? 'bg-slate-100 text-slate-700' : 'bg-emerald-50 text-emerald-700'
+                                }`}>
+                                  {index === 0 ? '-10%' : index === 1 ? 'Spot' : '+10%'}
+                                </span>
+                              </div>
+
+                              <dl className="mt-3 space-y-2 text-xs">
+                                <div className="flex justify-between gap-2">
+                                  <dt className="text-slate-500">Nilai marhun baharu</dt>
+                                  <dd className="font-bold text-slate-800">{formatRM(scenario.newMarhunValue)}</dd>
+                                </div>
+                                <div className="flex justify-between gap-2">
+                                  <dt className="text-slate-500">Kadar marhun simulasi</dt>
+                                  <dd className="font-semibold text-slate-700">{formatRM(scenario.simulatedRate)}/g</dd>
+                                </div>
+                                <div className="flex justify-between gap-2 border-t border-slate-100 pt-2 font-bold text-corporate-teal-800">
+                                  <dt>Pembiayaan baharu</dt>
+                                  <dd>{formatRM(scenario.newFinancing)}</dd>
+                                </div>
+                                <div className="flex justify-between gap-2 text-slate-500">
+                                  <dt>Tolak pembiayaan lama</dt>
+                                  <dd className="font-semibold text-slate-700">−{formatRM(scenario.oldPrincipal)}</dd>
+                                </div>
+                                <div className="flex justify-between gap-2 text-slate-500">
+                                  <dt>Tolak caj tertunggak lama</dt>
+                                  <dd className="font-semibold text-slate-700">−{formatRM(scenario.oldFees)}</dd>
+                                </div>
+                                <div className="flex justify-between gap-2 border-t border-slate-100 pt-2 font-medium text-slate-600">
+                                  <dt>Baki sebelum fi baharu</dt>
+                                  <dd className="font-bold text-slate-800">{formatRM(scenario.cashDifferenceBeforeNewFees)}</dd>
+                                </div>
+                                <div className="flex justify-between gap-2 text-slate-500">
+                                  <dt>Tolak fi berkaitan baharu</dt>
+                                  <dd className="font-semibold text-slate-700">
+                                    {scenario.newFees === null ? 'Belum diisi' : `−${formatRM(scenario.newFees)}`}
+                                  </dd>
+                                </div>
+                              </dl>
                             </div>
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Anggaran kadar marhun</dt>
-                              <dd className="font-semibold text-slate-800">{formatRM(scenario.simulatedRate)}/g</dd>
-                            </div>
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Pembiayaan baharu</dt>
-                              <dd className="font-semibold text-slate-800">{formatRM(scenario.newFinancing)}</dd>
-                            </div>
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Tolak pembiayaan lama</dt>
-                              <dd className="font-semibold text-slate-800">−{formatRM(scenario.oldPrincipal)}</dd>
-                            </div>
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Tolak caj tertunggak lama</dt>
-                              <dd className="font-semibold text-slate-800">−{formatRM(scenario.oldFees)}</dd>
-                            </div>
-                            <div className="flex justify-between gap-2 border-t border-slate-100 pt-2">
-                              <dt className="text-slate-500">Baki sebelum fi baharu</dt>
-                              <dd className="font-bold text-slate-700">
-                                {formatRM(scenario.cashDifferenceBeforeNewFees)}
-                              </dd>
-                            </div>
-                            <div className="flex justify-between gap-2">
-                              <dt className="text-slate-500">Tolak fi berkaitan baharu</dt>
-                              <dd className="font-semibold text-slate-800">
-                                {scenario.newFees === null ? 'Belum dimasukkan' : `−${formatRM(scenario.newFees)}`}
-                              </dd>
-                            </div>
-                            <div className="flex justify-between gap-2 border-t border-slate-100 pt-2">
-                              <dt className="text-slate-500">Baki tunai akhir</dt>
-                              <dd className={`font-bold ${
-                                scenario.cashDifference === null
-                                  ? 'text-amber-700'
-                                  : scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'
+
+                            {/* Net Cash Outcome Box */}
+                            <div className={`mt-4 rounded-xl p-3.5 border ${
+                              isPending
+                                ? 'bg-amber-50/80 border-amber-200'
+                                : isPositive
+                                  ? 'bg-emerald-50 border-emerald-200'
+                                  : 'bg-rose-50 border-rose-200'
+                            }`}>
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold uppercase tracking-wider text-slate-600">
+                                  Baki Tunai Bersih
+                                </span>
+                                <span className={`text-xs font-black ${
+                                  isPending ? 'text-amber-800' : isPositive ? 'text-emerald-800' : 'text-rose-800'
+                                }`}>
+                                  {isPending ? 'Fi Diperlukan' : isPositive ? 'Lebihan Tunai' : 'Kurang Tunai'}
+                                </span>
+                              </div>
+                              <p className={`mt-1 text-lg font-black ${
+                                isPending ? 'text-amber-800' : isPositive ? 'text-emerald-700' : 'text-rose-700'
                               }`}>
-                                {scenario.cashDifference === null
-                                  ? 'Fi baharu diperlukan'
-                                  : formatRM(scenario.cashDifference)}
-                              </dd>
+                                {isPending ? 'Masukkan fi baharu' : formatRM(scenario.cashDifference)}
+                              </p>
+                              <p className="mt-0.5 text-[10px] text-slate-500">
+                                {isPending
+                                  ? 'Isi anggaran fi untuk menjana baki tunai akhir.'
+                                  : isPositive
+                                    ? 'Lebihan tunai di tangan (bukan keuntungan pelaburan).'
+                                    : 'Perlu tambah tunai sendiri untuk tebus overlap.'}
+                              </p>
                             </div>
-                          </dl>
-                          <p className={`mt-3 text-xs font-semibold ${
-                            scenario.cashDifference === null
-                              ? 'text-amber-700'
-                              : scenario.cashDifference >= 0 ? 'text-emerald-700' : 'text-rose-700'
-                          }`}>
-                            {scenario.cashDifference === null
-                              ? 'Masukkan fi berkaitan untuk baki akhir'
-                              : scenario.cashDifference >= 0 ? 'Lebihan tunai, bukan untung' : 'Perlu tambah tunai'}
-                          </p>
-                        </div>
-                      ))}
+                          </div>
+                        );
+                      })}
                     </div>
-                    <p className="mt-4 text-xs leading-relaxed text-slate-500">
-                      Formula: baki tunai = pembiayaan baharu − pembiayaan lama − caj tertunggak surat lama − fi berkaitan baharu. Pembiayaan baharu = nilai marhun emas yang sama × margin institusi baharu. Harga turun/kekal/naik ialah simulasi ±10%, bukan ramalan atau kelulusan; sahkan nilai semasa, caj penebusan dan syarat institusi.
-                    </p>
+
+                    {/* Formula Callout */}
+                    <div className="mt-5 rounded-2xl bg-slate-50 border border-slate-200/80 p-4 text-xs text-slate-600">
+                      <p className="font-bold text-slate-800 mb-1 flex items-center gap-1.5">
+                        <Info size={14} className="text-corporate-teal-600" />
+                        Formula Aliran Tunai Overlap:
+                      </p>
+                      <p className="font-mono text-[11px] bg-white border border-slate-200 rounded-lg p-2 text-slate-700 overflow-x-auto">
+                        Baki Tunai Bersih = Pembiayaan Baharu − Pembiayaan Lama − Caj Tertunggak Lama − Fi Berkaitan Baharu
+                      </p>
+                      <p className="mt-1.5 text-[11px] text-slate-500">
+                        Pembiayaan baharu = Nilai marhun emas yang sama × Margin institusi baharu. Simulasi ±10% adalah ilustrasi stres-ujian pasaran, bukan jaminan harga atau kelulusan pembiayaan.
+                      </p>
+                    </div>
                   </>
                 )}
               </section>
