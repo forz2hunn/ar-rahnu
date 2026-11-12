@@ -572,6 +572,50 @@ const getDaysUntilDate = (dateString) => {
   const todayDate = Date.UTC(today.getFullYear(), today.getMonth(), today.getDate());
   return Math.round((dueDate - todayDate) / 86400000);
 };
+const getSagStatusBadge = (tx: any) => {
+  const isSettled = tx.status === 'Selesai';
+  const isRedeemed = tx.status === 'Ditebus';
+  const isAuctioned = tx.status === 'Dilelong';
+  const days = getDaysUntilDate(tx.redemptionDate);
+
+  if (isAuctioned) {
+    return {
+      label: 'Dilelong',
+      badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold',
+      dotClass: 'bg-rose-500'
+    };
+  }
+
+  if (isSettled || isRedeemed) {
+    return {
+      label: isRedeemed ? 'Ditebus' : 'Selesai',
+      badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
+      dotClass: 'bg-slate-400'
+    };
+  }
+
+  if (days !== null && days < 0) {
+    return {
+      label: `Tamat Tempoh (Lewat ${Math.abs(days)}h)`,
+      badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-black animate-pulse',
+      dotClass: 'bg-rose-500'
+    };
+  }
+
+  if (days !== null && days <= 3) {
+    return {
+      label: days === 0 ? 'Matang Hari Ini' : `Hampir Matang (${days}h)`,
+      badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-black',
+      dotClass: 'bg-amber-500'
+    };
+  }
+
+  return {
+    label: 'Aktif',
+    badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold',
+    dotClass: 'bg-emerald-500'
+  };
+};
 const isMissingSupabaseTableError = (error) =>
   error?.code === 'PGRST205' ||
   error?.code === '42P01' ||
@@ -5884,51 +5928,6 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             const totalActiveMarhun = activePortfolioTransactions.reduce((sum, tx) => sum + getTransactionMarhunValue(tx), 0);
             const urgentRedemptionTotal = redemptionNotifications.reduce((sum, tx) => sum + getCurrentRedemption(tx), 0);
 
-            const getSagStatusBadge = (tx: any) => {
-              const isSettled = tx.status === 'Selesai';
-              const isRedeemed = tx.status === 'Ditebus';
-              const isAuctioned = tx.status === 'Dilelong';
-              const days = getDaysUntilDate(tx.redemptionDate);
-
-              if (isAuctioned) {
-                return {
-                  label: 'Dilelong',
-                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold',
-                  dotClass: 'bg-rose-500'
-                };
-              }
-
-              if (isSettled || isRedeemed) {
-                return {
-                  label: isRedeemed ? 'Ditebus' : 'Selesai',
-                  badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
-                  dotClass: 'bg-slate-400'
-                };
-              }
-
-              if (days !== null && days < 0) {
-                return {
-                  label: `Tamat Tempoh (Lewat ${Math.abs(days)}h)`,
-                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-black animate-pulse',
-                  dotClass: 'bg-rose-500'
-                };
-              }
-
-              if (days !== null && days <= 3) {
-                return {
-                  label: days === 0 ? 'Matang Hari Ini' : `Hampir Matang (${days}h)`,
-                  badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-black',
-                  dotClass: 'bg-amber-500'
-                };
-              }
-
-              return {
-                label: 'Aktif',
-                badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold',
-                dotClass: 'bg-emerald-500'
-              };
-            };
-
             const filteredSagList = sortedTransactions.filter(tx => {
               if (sagSearchQuery.trim()) {
                 const q = sagSearchQuery.toLowerCase().trim();
@@ -7310,6 +7309,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     asset={viewingAssetRecord}
                     statusInfo={getAssetStatusBadge(viewingAssetRecord)}
                     currentGoldPrice={currentGoldPrice}
+                    relatedTransactions={transactions
+                      .filter(transaction => getTransactionAssetIds(transaction).map(String).includes(String(viewingAssetRecord.id)))
+                      .slice()
+                      .sort((a, b) => getTransactionTimestamp(b.date) - getTransactionTimestamp(a.date))}
                     isLocked={checkedInAssetIds.has(String(viewingAssetRecord.id))}
                     supabaseClient={supabaseClient}
                     onClose={() => setViewingAssetRecord(null)}
@@ -10434,7 +10437,7 @@ function AssetImageViewer({ path, label, supabaseClient, onClose }: { path: stri
 }
 
 
-function AssetDetailModal({ asset, statusInfo, currentGoldPrice, isLocked, supabaseClient, onClose, onEdit, onOpenImage }) {
+function AssetDetailModal({ asset, statusInfo, currentGoldPrice, relatedTransactions = [], isLocked, supabaseClient, onClose, onEdit, onOpenImage }) {
   const marketValue = (parseFloat(asset.weight) || 0) * (currentGoldPrice || 0);
   const costPrice = parseFloat(asset.price) || 0;
   const difference = marketValue - costPrice;
@@ -10463,7 +10466,7 @@ function AssetDetailModal({ asset, statusInfo, currentGoldPrice, isLocked, supab
 
   return (
     <div role="dialog" aria-modal="true" aria-label={`Maklumat aset ${code}`} className="fixed inset-0 z-[58] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm animate-in fade-in duration-200 sm:p-4" onClick={onClose}>
-      <div className="flex max-h-[92dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+      <div className="flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
           <div className="min-w-0 space-y-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -10531,6 +10534,60 @@ function AssetDetailModal({ asset, statusInfo, currentGoldPrice, isLocked, supab
               </div>
             </div>
             <p className="mt-2 text-[11px] text-slate-500">Spot emas semasa: {formatRM(currentGoldPrice || 0)}/g</p>
+          </div>
+
+          <div className="mt-5">
+            <div className="flex items-baseline justify-between gap-2">
+              <h3 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Surat Gadaian (SAG) Berkaitan</h3>
+              <span className="text-[11px] font-semibold text-slate-400">{relatedTransactions.length} rekod</span>
+            </div>
+            {relatedTransactions.length === 0 ? (
+              <p className="mt-2 rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-xs font-semibold text-slate-500">
+                Tiada surat gadaian berkaitan dengan aset ini.
+              </p>
+            ) : (
+              <div className="mt-2 overflow-x-auto rounded-xl border border-slate-200">
+                <table className="w-full min-w-max border-collapse text-left text-xs">
+                  <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-3 py-2 font-bold">No. Siri SAG</th>
+                      <th className="px-3 py-2 font-bold">Jenis</th>
+                      <th className="px-3 py-2 font-bold">Institusi</th>
+                      <th className="px-3 py-2 font-bold">Status</th>
+                      <th className="px-3 py-2 text-right font-bold">Berat (g)</th>
+                      <th className="px-3 py-2 text-right font-bold">Nilai Marhun</th>
+                      <th className="px-3 py-2 text-right font-bold">Baki Pinjaman</th>
+                      <th className="px-3 py-2 font-bold">Tarikh Matang</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {relatedTransactions.map(transaction => {
+                      const sagStatus = getSagStatusBadge(transaction);
+                      return (
+                        <tr key={transaction.id} className="transition-colors hover:bg-slate-50/70">
+                          <td className="px-3 py-2">
+                            <span className="font-mono font-bold text-slate-900">#{transaction.refNo || '-'}</span>
+                            <span className="mt-0.5 block text-[10px] text-slate-400">{formatTransactionDateTime(transaction.date)}</span>
+                          </td>
+                          <td className="px-3 py-2 text-slate-600">{getTransactionStatus(transaction)}</td>
+                          <td className="px-3 py-2 text-slate-600">{transaction.institution || '-'}</td>
+                          <td className="px-3 py-2">
+                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[10px] ${sagStatus.badgeClass}`}>
+                              <span className={`h-1.5 w-1.5 rounded-full ${sagStatus.dotClass}`} />
+                              <span>{sagStatus.label}</span>
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-slate-800">{getCurrentPledgedWeight(transaction)}g</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-corporate-teal-800">{formatRM(getTransactionMarhunValue(transaction))}</td>
+                          <td className="px-3 py-2 text-right font-mono font-bold text-slate-900">{formatRM(getCurrentPrincipal(transaction))}</td>
+                          <td className="px-3 py-2 text-slate-600">{transaction.redemptionDate || '-'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         </div>
 
