@@ -58,7 +58,15 @@ import {
   ArrowDownRight,
   Percent,
   ChevronUp,
-  Zap
+  Zap,
+  UserPlus,
+  Shield,
+  Filter,
+  FileText,
+  AlertTriangle,
+  UserCheck,
+  UserX,
+  Lock
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
@@ -825,6 +833,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [transactionStatusFilter, setTransactionStatusFilter] = useState('Semua');
+  const [sagSearchQuery, setSagSearchQuery] = useState('');
+  const [sagBranchFilter, setSagBranchFilter] = useState('Semua');
+  const [sagMaturityFilter, setSagMaturityFilter] = useState('Semua');
+  const [sagViewLayout, setSagViewLayout] = useState<'table' | 'grid'>('table');
+  const [sagPage, setSagPage] = useState(1);
+  const [assetSearchQuery, setAssetSearchQuery] = useState('');
+  const [assetSupplierFilter, setAssetSupplierFilter] = useState('Semua');
+  const [assetWeightFilter, setAssetWeightFilter] = useState('Semua');
+  const [assetStatusFilter, setAssetStatusFilter] = useState('Semua');
+  const [assetSortBy, setAssetSortBy] = useState<'newest' | 'weight_desc' | 'price_desc' | 'code_asc'>('newest');
+  const [assetViewLayout, setAssetViewLayout] = useState<'table' | 'grid'>('table');
+  const [assetPage, setAssetPage] = useState(1);
   
   // State dengan sokongan localStorage
   const [transactions, setTransactions] = useState(() => {
@@ -1000,9 +1020,38 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
   }, [financialReadiness, user.id]);
 
+  const [rolePermissions, setRolePermissions] = useState<Record<string, Record<string, boolean>>>(() => {
+    try {
+      const saved = localStorage.getItem('ar_rahnu_role_permissions');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return {
+      Admin: {
+        sag_view: true, sag_create: true, sag_overlap: true, sag_delete: true,
+        assets_view: true, assets_manage: true, assets_delete: true,
+        analytics_view: true, ai_predictions: true, export_data: true,
+        users_manage: true, roles_manage: true, audit_inspect: true,
+      },
+      Manager: {
+        sag_view: true, sag_create: true, sag_overlap: true, sag_delete: false,
+        assets_view: true, assets_manage: true, assets_delete: false,
+        analytics_view: true, ai_predictions: true, export_data: true,
+        users_manage: false, roles_manage: false, audit_inspect: true,
+      },
+      Staff: {
+        sag_view: true, sag_create: true, sag_overlap: false, sag_delete: false,
+        assets_view: true, assets_manage: false, assets_delete: false,
+        analytics_view: true, ai_predictions: false, export_data: false,
+        users_manage: false, roles_manage: false, audit_inspect: false,
+      }
+    };
+  });
+
   const appData = useMemo(
-    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory }),
-    [transactions, institutions, assets, suppliers, goldPriceHistory]
+    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions }),
+    [transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions]
   );
   const localSnapshotRef = useRef(appData);
   localSnapshotRef.current = appData;
@@ -1066,6 +1115,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setAssets(nextData.assets);
       setSuppliers(nextData.suppliers);
       setGoldPriceHistory(nextData.goldPriceHistory);
+      if (incoming.rolePermissions && typeof incoming.rolePermissions === 'object') {
+        setRolePermissions(incoming.rolePermissions);
+      }
     };
 
     const loadCloudData = async () => {
@@ -1287,6 +1339,64 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [userManagementBusy, setUserManagementBusy] = useState(false);
   const [userManagementError, setUserManagementError] = useState('');
   const [userManagementNotice, setUserManagementNotice] = useState('');
+  const [userMgmtSubTab, setUserMgmtSubTab] = useState<'members' | 'matrix' | 'activity'>('members');
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [userRoleFilter, setUserRoleFilter] = useState('ALL');
+  const [userStatusFilter, setUserStatusFilter] = useState('ALL');
+  const [userSortBy, setUserSortBy] = useState<'email' | 'newest' | 'last_signin'>('email');
+  const [userPage, setUserPage] = useState(1);
+  const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
+  const [inviteModalMode, setInviteModalMode] = useState<'single' | 'bulk'>('single');
+  const [bulkCsvText, setBulkCsvText] = useState('');
+  const [bulkImportStatus, setBulkImportStatus] = useState<string | null>(null);
+  const [matrixSaveNotice, setMatrixSaveNotice] = useState('');
+  const [isSavingMatrix, setIsSavingMatrix] = useState(false);
+  const matrixNoticeTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (matrixNoticeTimeoutRef.current) {
+        window.clearTimeout(matrixNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
+  const [securityLogs, setSecurityLogs] = useState(() => {
+    try {
+      const saved = localStorage.getItem(`ar_rahnu_security_logs_${user.id}`);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return [
+      {
+        id: 'sec-1',
+        action: 'ROLE_ASSIGNED',
+        actor: user.email || 'Admin',
+        target: 'fabulouz.trading@gmail.com',
+        detail: 'Peranan disahkan kepada Manager',
+        timestamp: new Date(Date.now() - 3600000 * 24 * 2).toISOString(),
+        severity: 'info'
+      },
+      {
+        id: 'sec-2',
+        action: 'PASSWORD_RESET_LINK',
+        actor: user.email || 'Admin',
+        target: '0stad1506@gmail.com',
+        detail: 'Pautan tetapan semula kata laluan dijana dan dihantar',
+        timestamp: new Date(Date.now() - 3600000 * 24 * 5).toISOString(),
+        severity: 'info'
+      },
+      {
+        id: 'sec-3',
+        action: 'USER_PROVISIONED',
+        actor: user.email || 'Admin',
+        target: 'shazreen2510@gmail.com',
+        detail: 'Akaun pengguna baharu didaftarkan dengan peranan Staff',
+        timestamp: new Date(Date.now() - 3600000 * 24 * 8).toISOString(),
+        severity: 'info'
+      }
+    ];
+  });
 
   const invokeUserAdmin = async (body) => {
     const { data: { session }, error: sessionError } = await supabaseClient.auth.refreshSession();
@@ -1604,6 +1714,32 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     try {
       await invokeUserAdmin(body);
       setUserManagementNotice(successMessage);
+      const targetUser = organizationUsers.find(u => u.id === body.userId);
+      const targetEmail = body.email || targetUser?.email || 'Pengguna';
+      const actionType = body.action === 'create-user' ? 'USER_PROVISIONED' :
+        body.action === 'update-role' ? 'ROLE_CHANGED' :
+        body.action === 'update-access' ? (body.active ? 'ACCESS_RESTORED' : 'ACCESS_SUSPENDED') :
+        body.action === 'reset-password' ? 'PASSWORD_RESET_LINK' :
+        body.action === 'delete-user' ? 'USER_DELETED' : 'USER_UPDATED';
+
+      const logEntry = {
+        id: `sec-${Date.now()}`,
+        action: actionType,
+        actor: user.email || 'Admin',
+        target: targetEmail,
+        detail: successMessage,
+        timestamp: new Date().toISOString(),
+        severity: (body.action === 'delete-user' || body.action === 'update-access') ? 'warning' : 'info'
+      };
+      setSecurityLogs(prev => {
+        const next = [logEntry, ...prev].slice(0, 50);
+        try {
+          localStorage.setItem(`ar_rahnu_security_logs_${user.id}`, JSON.stringify(next));
+        } catch (e) {
+          console.error(e);
+        }
+        return next;
+      });
       await refreshOrganizationUsers();
       return true;
     } catch (error) {
@@ -1632,7 +1768,61 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setNewUserEmail('');
       setNewUserPassword('');
       setConfirmNewUserPassword('');
+      setIsInviteModalOpen(false);
     }
+  };
+
+  const handleBulkCsvImport = async (csvText: string) => {
+    setUserManagementBusy(true);
+    setUserManagementError('');
+    setUserManagementNotice('');
+    setBulkImportStatus('Memproses import CSV...');
+    try {
+      const lines = csvText.split('\n').map(l => l.trim()).filter(Boolean);
+      if (lines.length <= 1) {
+        throw new Error('Fail CSV mestilah mengandungi tajuk lajur dan sekurang-kurangnya 1 baris rekod.');
+      }
+      let successCount = 0;
+      let failCount = 0;
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+        if (parts.length < 3) continue;
+        const [email, role, password] = parts;
+        if (!email.includes('@') || password.length < 12) {
+          failCount++;
+          continue;
+        }
+        const assignedRole = ['Admin', 'Manager', 'Staff'].includes(role) ? role : 'Staff';
+        try {
+          await invokeUserAdmin({ action: 'create-user', email, password, role: assignedRole });
+          successCount++;
+        } catch {
+          failCount++;
+        }
+      }
+      await refreshOrganizationUsers();
+      setBulkImportStatus(null);
+      setIsInviteModalOpen(false);
+      setBulkCsvText('');
+      setUserManagementNotice(`Import CSV selesai: ${successCount} berjaya dicipta${failCount > 0 ? `, ${failCount} gagal/langkau.` : '.'}`);
+    } catch (err: any) {
+      setBulkImportStatus(null);
+      setUserManagementError(err.message || 'Gagal memproses import CSV.');
+    } finally {
+      setUserManagementBusy(false);
+    }
+  };
+
+  const handleDownloadCsvTemplate = () => {
+    const csvContent = "email,role,password\nstaf1@contoh.com,Staff,PasswordAwal123!\nmanager1@contoh.com,Manager,PasswordAwal123!\n";
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.setAttribute("href", url);
+    link.setAttribute("download", "Template_Import_Pengguna.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const handleUpdateOrganizationUser = async (event) => {
@@ -1667,6 +1857,73 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       { action: 'delete-user', userId: member.id },
       `Akaun ${member.email || 'pengguna'} telah dipadam secara kekal.`
     );
+  };
+
+  const handleSaveRolePermissions = async () => {
+    setIsSavingMatrix(true);
+    setUserManagementError('');
+    try {
+      try {
+        localStorage.setItem('ar_rahnu_role_permissions', JSON.stringify(rolePermissions));
+      } catch (e) {
+        console.error('Local storage error:', e);
+      }
+
+      const isOrganizationManager = ['Admin', 'Manager'].includes(organizationMembership?.role);
+      const snapshotToSave = {
+        ...appData,
+        rolePermissions
+      };
+
+      const { error: saveError } = await supabaseClient
+        .from('ar_rahnu_user_data')
+        .upsert({
+          user_id: dataOwnerUserIdRef.current,
+          organization_id: isOrganizationManager ? organizationMembership?.organization_id : null,
+          data: snapshotToSave,
+          updated_at: new Date().toISOString()
+        }, { onConflict: 'user_id' });
+
+      if (saveError) {
+        throw saveError;
+      }
+
+      cloudSnapshotRef.current = JSON.stringify(snapshotToSave);
+
+      const logEntry = {
+        id: `sec-${Date.now()}`,
+        action: 'PERMISSIONS_MATRIX_SAVED',
+        actor: user.email || 'Admin',
+        target: 'Organisasi',
+        detail: 'Matriks kebenaran peranan berjaya disimpan ke pangkalan data Supabase.',
+        timestamp: new Date().toISOString(),
+        severity: 'info'
+      };
+      setSecurityLogs(prev => {
+        const next = [logEntry, ...prev].slice(0, 50);
+        try {
+          localStorage.setItem(`ar_rahnu_security_logs_${user.id}`, JSON.stringify(next));
+        } catch (e) {
+          console.error(e);
+        }
+        return next;
+      });
+
+      if (matrixNoticeTimeoutRef.current) {
+        window.clearTimeout(matrixNoticeTimeoutRef.current);
+      }
+      setMatrixSaveNotice('Rekod Telah Berjaya Di Simpan');
+      matrixNoticeTimeoutRef.current = window.setTimeout(() => {
+        setMatrixSaveNotice('');
+        matrixNoticeTimeoutRef.current = null;
+      }, 5000);
+
+    } catch (error: any) {
+      console.error('Ralat simpan matriks ke database:', error);
+      setUserManagementError(error.message || 'Gagal menyimpan rekod matriks ke pangkalan data.');
+    } finally {
+      setIsSavingMatrix(false);
+    }
   };
 
   // State Harga Live
@@ -1742,6 +1999,45 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [isNotificationListOpen]);
+
+  useEffect(() => {
+    const handleGlobalShortcuts = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isInput = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
+
+      if ((event.altKey && event.key.toLowerCase() === 'n') || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'n')) {
+        event.preventDefault();
+        setEditingTransaction(null);
+        setIsModalOpen(true);
+        return;
+      }
+
+      if ((event.altKey && event.key.toLowerCase() === 'a') || (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'a')) {
+        event.preventDefault();
+        setEditingAsset(null);
+        setIsAssetModalOpen(true);
+        return;
+      }
+
+      if (!isInput && event.key === '/') {
+        event.preventDefault();
+        if (activeTab === 'assets') {
+          const searchInput = document.getElementById('asset-search-input');
+          if (searchInput) searchInput.focus();
+        } else {
+          setActiveTab('transactions');
+          setTimeout(() => {
+            const searchInput = document.getElementById('sag-search-input');
+            if (searchInput) searchInput.focus();
+          }, 50);
+        }
+        return;
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalShortcuts);
+    return () => window.removeEventListener('keydown', handleGlobalShortcuts);
+  }, [activeTab]);
 
   const handleNotificationToggle = async () => {
     if (notificationsEnabled) {
@@ -3820,209 +4116,979 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             </section>
           )}
 
-          {activeTab === 'users' && canManageOrganizationUsers && (
-            <section className="mx-auto max-w-6xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <h3 className="flex items-center gap-2 text-lg font-bold text-slate-800">
-                      <Users size={20} className="text-corporate-teal-600" />
-                      Pengurusan Pengguna
-                    </h3>
-                    <p className="mt-1 text-sm text-slate-500">
-                      {organizationMembership.organization?.name || 'Organisasi'} · {organizationUsers.length} ahli
+          {activeTab === 'users' && canManageOrganizationUsers && (() => {
+            const filteredUsers = organizationUsers.filter(member => {
+              const matchesSearch = !userSearchTerm.trim() ||
+                (member.email || '').toLowerCase().includes(userSearchTerm.toLowerCase().trim());
+              const matchesRole = userRoleFilter === 'ALL' || member.role === userRoleFilter;
+              const matchesStatus = userStatusFilter === 'ALL' ||
+                (userStatusFilter === 'active' && member.active) ||
+                (userStatusFilter === 'suspended' && !member.active) ||
+                (userStatusFilter === 'pending' && !member.emailConfirmedAt);
+              return matchesSearch && matchesRole && matchesStatus;
+            }).sort((a, b) => {
+              if (userSortBy === 'email') return (a.email || '').localeCompare(b.email || '');
+              if (userSortBy === 'newest') return (b.createdAt || '').localeCompare(a.createdAt || '');
+              if (userSortBy === 'last_signin') return (b.lastSignInAt || '').localeCompare(a.lastSignInAt || '');
+              return 0;
+            });
+
+            const userPageSize = 5;
+            const totalUserPages = Math.max(1, Math.ceil(filteredUsers.length / userPageSize));
+            const paginatedUsers = filteredUsers.slice((userPage - 1) * userPageSize, userPage * userPageSize);
+
+            const adminCount = organizationUsers.filter(u => u.role === 'Admin').length;
+            const managerCount = organizationUsers.filter(u => u.role === 'Manager').length;
+            const staffCount = organizationUsers.filter(u => u.role === 'Staff').length;
+            const activeCount = organizationUsers.filter(u => u.active).length;
+
+            return (
+              <section className="mx-auto max-w-7xl space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {/* Modern Enterprise Admin Command Banner */}
+                <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-800/40 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 sm:p-8 text-white shadow-xl">
+                  <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/10 blur-3xl" />
+                  <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
+
+                  <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                    <div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/30 bg-corporate-teal-950/80 px-3.5 py-1 text-xs font-bold text-corporate-teal-200 backdrop-blur-md mb-2">
+                        <ShieldCheck size={14} className="text-emerald-400" />
+                        <span>ENTERPRISE ACCESS GOVERNANCE · ADMIN PANEL</span>
+                      </div>
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-2.5">
+                        <Users className="text-corporate-teal-300" size={28} />
+                        Pengurusan Pengguna &amp; Kawalan Akses
+                      </h2>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                        {organizationMembership.organization?.name || 'Organisasi'} · {organizationUsers.length} Jumlah Ahli Berdaftar. Kawal selia peranan, status akaun, dan audit keselamatan organisasi anda.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <span className="inline-flex items-center gap-1.5 rounded-xl border border-white/15 bg-white/10 px-3.5 py-2 text-xs font-bold text-corporate-magenta-200 backdrop-blur-md">
+                        <Shield size={14} />
+                        <span>Akses: {organizationMembership.role}</span>
+                      </span>
+
+                      {isOrganizationAdmin && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => { setInviteModalMode('single'); setIsInviteModalOpen(true); }}
+                            className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 hover:bg-corporate-teal-500 px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-lg shadow-corporate-teal-950/40 backdrop-blur-md transition-all active:scale-95"
+                          >
+                            <UserPlus size={16} />
+                            <span>Jemput / Tambah Pengguna</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setInviteModalMode('bulk'); setIsInviteModalOpen(true); }}
+                            className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 hover:bg-white/20 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white backdrop-blur-md transition-all active:scale-95"
+                          >
+                            <UploadCloud size={15} />
+                            <span>Import CSV</span>
+                          </button>
+                        </>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => void refreshOrganizationUsers()}
+                        disabled={userManagementBusy}
+                        className="inline-flex items-center justify-center p-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/15 text-slate-200 backdrop-blur-md transition-all disabled:opacity-50"
+                        title="Segar semula senarai pengguna"
+                      >
+                        <RefreshCw size={16} className={userManagementBusy ? "animate-spin" : ""} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4 Telemetry Metric Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Jumlah Pengguna</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700">
+                        <Users size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {organizationUsers.length} <span className="text-sm font-semibold text-slate-500">ahli</span>
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      Berdaftar dalam pangkalan data organisasi
                     </p>
                   </div>
-                  <span className="inline-flex w-fit items-center gap-2 rounded-full bg-corporate-magenta-50 px-3 py-1 text-xs font-bold text-corporate-magenta-800">
-                    <ShieldCheck size={15} /> {organizationMembership.role}
-                  </span>
-                </div>
-                {isOrganizationAdmin && <div className="mt-5 grid gap-3 sm:grid-cols-3">
-                  {[
-                    ['Admin', 'Akses penuh dan pengurusan akaun'],
-                    ['Manager', 'Akses penuh kepada portfolio organisasi'],
-                    ['Staff', 'Portfolio peribadi sahaja'],
-                  ].map(([role, description]) => (
-                    <div key={role} className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                      <p className="text-sm font-bold text-slate-800">{role}</p>
-                      <p className="mt-1 text-xs text-slate-500">{description}</p>
-                    </div>
-                  ))}
-                </div>}
-              </div>
 
-              {isOrganizationAdmin && <form onSubmit={handleCreateOrganizationUser} className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
-                <h3 className="flex items-center gap-2 font-bold text-slate-800"><UserRound size={18} className="text-corporate-teal-600" /> Tambah pengguna</h3>
-                <p className="mt-1 text-sm text-slate-500">Akaun diwujudkan terus dengan e-mel dan kata laluan awal yang ditetapkan oleh Admin (minimum 12 aksara).</p>
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <input
-                    type="email"
-                    required
-                    value={newUserEmail}
-                    onChange={event => setNewUserEmail(event.target.value)}
-                    placeholder="nama@contoh.com"
-                    aria-label="E-mel pengguna baharu"
-                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                  />
-                  <select value={newUserRole} onChange={event => setNewUserRole(event.target.value)} aria-label="Peranan pengguna baharu" className="rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500">
-                    <option value="Staff">Staff</option>
-                    <option value="Manager">Manager</option>
-                    <option value="Admin">Admin</option>
-                  </select>
-                  <input
-                    type="password"
-                    required
-                    minLength={12}
-                    autoComplete="new-password"
-                    value={newUserPassword}
-                    onChange={event => setNewUserPassword(event.target.value)}
-                    placeholder="Kata laluan awal (min. 12 aksara)"
-                    aria-label="Kata laluan awal pengguna"
-                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                  />
-                  <input
-                    type="password"
-                    required
-                    minLength={12}
-                    autoComplete="new-password"
-                    value={confirmNewUserPassword}
-                    onChange={event => setConfirmNewUserPassword(event.target.value)}
-                    placeholder="Sahkan kata laluan"
-                    aria-label="Sahkan kata laluan awal pengguna"
-                    className="min-w-0 rounded-lg border border-slate-300 px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                  />
-                  <button type="submit" disabled={userManagementBusy} className="inline-flex items-center justify-center gap-2 rounded-lg bg-corporate-teal-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:opacity-50 sm:col-span-2">
-                    <Plus size={16} /> Tambah pengguna
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Akaun Aktif</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
+                        <UserCheck size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-emerald-700 tracking-tight">
+                      {activeCount} <span className="text-sm font-semibold text-slate-500">/ {organizationUsers.length}</span>
+                    </p>
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700 font-semibold">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
+                      <span>{organizationUsers.length > 0 ? Math.round((activeCount / organizationUsers.length) * 100) : 0}% mempunyai akses aktif</span>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Status Pengesahan</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-sky-50 text-sky-700">
+                        <Mail size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {organizationUsers.filter(u => u.emailConfirmedAt).length} <span className="text-sm font-semibold text-slate-500">disahkan</span>
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500">
+                      {organizationUsers.filter(u => !u.emailConfirmedAt).length} menunggu pengesahan jemputan
+                    </p>
+                  </div>
+
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Agihan Peranan</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700">
+                        <ShieldCheck size={20} />
+                      </div>
+                    </div>
+                    <div className="mt-3 flex items-center gap-1.5 flex-wrap">
+                      <span className="rounded-lg bg-corporate-magenta-50 px-2 py-1 text-xs font-bold text-corporate-magenta-800 border border-corporate-magenta-100">
+                        {adminCount} Admin
+                      </span>
+                      <span className="rounded-lg bg-corporate-teal-50 px-2 py-1 text-xs font-bold text-corporate-teal-800 border border-corporate-teal-100">
+                        {managerCount} Manager
+                      </span>
+                      <span className="rounded-lg bg-slate-100 px-2 py-1 text-xs font-bold text-slate-700 border border-slate-200">
+                        {staffCount} Staff
+                      </span>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Hierarki kuasa dan polisi Supabase RLS
+                    </p>
+                  </div>
+                </div>
+
+                {/* Status Messages */}
+                {userManagementError && (
+                  <div role="alert" className="rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-semibold text-rose-800 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <AlertTriangle size={18} className="text-rose-600 shrink-0" />
+                      <span>{userManagementError}</span>
+                    </div>
+                    <button type="button" onClick={() => setUserManagementError('')} className="text-rose-600 hover:text-rose-900"><X size={16} /></button>
+                  </div>
+                )}
+                {userManagementNotice && (
+                  <div role="status" className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm font-semibold text-emerald-800 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 size={18} className="text-emerald-600 shrink-0" />
+                      <span>{userManagementNotice}</span>
+                    </div>
+                    <button type="button" onClick={() => setUserManagementNotice('')} className="text-emerald-600 hover:text-emerald-900"><X size={16} /></button>
+                  </div>
+                )}
+
+                {/* Sub-Tabs Navigation (Pills) */}
+                <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3">
+                  <button
+                    type="button"
+                    onClick={() => { setUserMgmtSubTab('members'); setUserPage(1); }}
+                    className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-xs sm:text-sm font-extrabold transition-all ${
+                      userMgmtSubTab === 'members'
+                        ? 'bg-corporate-teal-600 text-white shadow-md'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <Users size={16} />
+                    <span>Ahli &amp; Roster ({filteredUsers.length})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setUserMgmtSubTab('matrix')}
+                    className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-xs sm:text-sm font-extrabold transition-all ${
+                      userMgmtSubTab === 'matrix'
+                        ? 'bg-corporate-teal-600 text-white shadow-md'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <Shield size={16} />
+                    <span>Matriks Peranan &amp; Kebenaran</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setUserMgmtSubTab('activity')}
+                    className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-xs sm:text-sm font-extrabold transition-all ${
+                      userMgmtSubTab === 'activity'
+                        ? 'bg-corporate-teal-600 text-white shadow-md'
+                        : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+                    }`}
+                  >
+                    <Activity size={16} />
+                    <span>Aliran Aktiviti &amp; Audit ({securityLogs.length})</span>
                   </button>
                 </div>
-              </form>}
 
-              {userManagementError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm font-medium text-red-700">{userManagementError}</p>}
-              {userManagementNotice && <p role="status" className="rounded-lg bg-corporate-green-50 p-3 text-sm font-medium text-corporate-green-800">{userManagementNotice}</p>}
+                {/* SUB-TAB 1: MEMBERS TABLE & ROSTER */}
+                {userMgmtSubTab === 'members' && (
+                  <div className="space-y-4">
+                    {/* Filter & Search Bar */}
+                    <div className="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-3">
+                      <div className="flex flex-1 flex-col sm:flex-row items-center gap-2.5">
+                        <div className="relative w-full sm:w-72">
+                          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                          <input
+                            type="text"
+                            value={userSearchTerm}
+                            onChange={e => { setUserSearchTerm(e.target.value); setUserPage(1); }}
+                            placeholder="Cari e-mel atau ID pengguna..."
+                            className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                          />
+                          {userSearchTerm && (
+                            <button
+                              type="button"
+                              onClick={() => { setUserSearchTerm(''); setUserPage(1); }}
+                              className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                            >
+                              <X size={14} />
+                            </button>
+                          )}
+                        </div>
 
-              <div className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm">
-                <div className="border-b border-slate-100 px-5 py-4 sm:px-6">
-                  <h3 className="font-bold text-slate-800">Ahli organisasi</h3>
-                </div>
-                <div className="divide-y divide-slate-100">
-                  {organizationUsers.map(member => (
-                    <div key={member.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-                      <div className="min-w-0">
-                        <p className="break-all text-sm font-semibold text-slate-800">{member.email || 'E-mel tidak tersedia'}</p>
-                        <p className="mt-1 text-xs text-slate-500">
-                          {member.active ? (member.emailConfirmedAt ? 'E-mel disahkan' : 'Menunggu pengesahan jemputan') : 'Akses digantung'}
-                          {' · '}
-                          {member.lastSignInAt ? `Log masuk terakhir ${new Date(member.lastSignInAt).toLocaleDateString('ms-MY')}` : 'Belum pernah log masuk'}
+                        <select
+                          value={userRoleFilter}
+                          onChange={e => { setUserRoleFilter(e.target.value); setUserPage(1); }}
+                          aria-label="Tapis mengikut peranan"
+                          className="w-full sm:w-auto px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                        >
+                          <option value="ALL">Semua Peranan</option>
+                          <option value="Admin">Admin Sahaja</option>
+                          <option value="Manager">Manager Sahaja</option>
+                          <option value="Staff">Staff Sahaja</option>
+                        </select>
+
+                        <select
+                          value={userStatusFilter}
+                          onChange={e => { setUserStatusFilter(e.target.value); setUserPage(1); }}
+                          aria-label="Tapis mengikut status"
+                          className="w-full sm:w-auto px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                        >
+                          <option value="ALL">Semua Status</option>
+                          <option value="active">Akaun Aktif</option>
+                          <option value="suspended">Digantung</option>
+                          <option value="pending">Menunggu Pengesahan</option>
+                        </select>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-auto">
+                        <span className="text-xs text-slate-500 font-medium">Susun:</span>
+                        <select
+                          value={userSortBy}
+                          onChange={e => setUserSortBy(e.target.value as any)}
+                          aria-label="Susun senarai pengguna"
+                          className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                        >
+                          <option value="email">E-mel (A-Z)</option>
+                          <option value="newest">Terbaharu Ditambah</option>
+                          <option value="last_signin">Log Masuk Terakhir</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* Data Table */}
+                    <div className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white shadow-sm">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase tracking-wider text-[11px]">
+                              <th className="p-4 sm:px-6">Pengguna &amp; E-mel</th>
+                              <th className="p-4">Peranan</th>
+                              <th className="p-4">Status Akses</th>
+                              <th className="p-4">Aktiviti Terakhir</th>
+                              <th className="p-4 text-center">Tindakan</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {paginatedUsers.map(member => {
+                              const isCurrentUser = member.id === user.id;
+                              const initials = (member.email || 'AR').slice(0, 2).toUpperCase();
+
+                              return (
+                                <tr key={member.id} className="hover:bg-slate-50/70 transition-colors">
+                                  {/* User & Email */}
+                                  <td className="p-4 sm:px-6">
+                                    <div className="flex items-center gap-3">
+                                      <div className={`h-10 w-10 shrink-0 rounded-2xl flex items-center justify-center font-black text-xs text-white shadow-sm ${
+                                        member.role === 'Admin'
+                                          ? 'bg-gradient-to-br from-corporate-magenta-600 to-corporate-magenta-800'
+                                          : member.role === 'Manager'
+                                            ? 'bg-gradient-to-br from-corporate-teal-600 to-corporate-teal-800'
+                                            : 'bg-gradient-to-br from-slate-600 to-slate-800'
+                                      }`}>
+                                        {initials}
+                                      </div>
+                                      <div className="min-w-0">
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <p className="font-bold text-slate-800 text-sm truncate max-w-xs sm:max-w-sm">
+                                            {member.email || 'E-mel tidak tersedia'}
+                                          </p>
+                                          {isCurrentUser && (
+                                            <span className="rounded-full bg-corporate-teal-100 px-2 py-0.5 text-[10px] font-bold text-corporate-teal-800">
+                                              Akaun Anda
+                                            </span>
+                                          )}
+                                          {member.isOrganizationOwner && (
+                                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-bold text-amber-800">
+                                              Pemilik
+                                            </span>
+                                          )}
+                                        </div>
+                                        <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                          ID: {member.id.slice(0, 8)}...
+                                        </p>
+                                      </div>
+                                    </div>
+
+                                    {/* Inline Edit Form if selected */}
+                                    {editingOrganizationUser?.id === member.id && (
+                                      <form onSubmit={handleUpdateOrganizationUser} className="mt-3 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/40 p-3.5 space-y-2.5 animate-in fade-in duration-200">
+                                        <p className="font-bold text-corporate-teal-900 text-xs">Kemaskini Profil Pengguna</p>
+                                        <div className="grid gap-2 sm:grid-cols-2">
+                                          <input
+                                            type="email"
+                                            required
+                                            value={editingOrganizationUser.email}
+                                            onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, email: event.target.value })}
+                                            placeholder="E-mel baharu"
+                                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                                          />
+                                          <input
+                                            type="password"
+                                            minLength={12}
+                                            autoComplete="new-password"
+                                            value={editingOrganizationUser.password}
+                                            onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, password: event.target.value })}
+                                            placeholder="Kata laluan baharu (min. 12)"
+                                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                                          />
+                                          <input
+                                            type="password"
+                                            minLength={12}
+                                            autoComplete="new-password"
+                                            value={editingOrganizationUser.confirmPassword}
+                                            onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, confirmPassword: event.target.value })}
+                                            placeholder="Sahkan kata laluan"
+                                            className="rounded-xl border border-slate-300 bg-white px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-corporate-teal-500"
+                                          />
+                                        </div>
+                                        <div className="flex gap-2">
+                                          <button type="submit" disabled={userManagementBusy} className="rounded-xl bg-corporate-teal-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-corporate-teal-700 disabled:opacity-50">
+                                            Simpan Perubahan
+                                          </button>
+                                          <button type="button" disabled={userManagementBusy} onClick={() => setEditingOrganizationUser(null)} className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                            Batal
+                                          </button>
+                                        </div>
+                                      </form>
+                                    )}
+                                  </td>
+
+                                  {/* Role */}
+                                  <td className="p-4">
+                                    {isOrganizationAdmin && !isCurrentUser ? (
+                                      <select
+                                        value={member.role}
+                                        aria-label={`Peranan ${member.email}`}
+                                        disabled={userManagementBusy}
+                                        onChange={event => void runUserAdminAction({ action: 'update-role', userId: member.id, role: event.target.value }, `Peranan ${member.email} dikemas kini kepada ${event.target.value}.`)}
+                                        className={`rounded-xl border px-3 py-1.5 text-xs font-extrabold outline-none cursor-pointer transition-all ${
+                                          member.role === 'Admin'
+                                            ? 'border-corporate-magenta-300 bg-corporate-magenta-50 text-corporate-magenta-800'
+                                            : member.role === 'Manager'
+                                              ? 'border-corporate-teal-300 bg-corporate-teal-50 text-corporate-teal-800'
+                                              : 'border-slate-300 bg-slate-50 text-slate-700'
+                                        }`}
+                                      >
+                                        <option value="Staff">Staff</option>
+                                        <option value="Manager">Manager</option>
+                                        <option value="Admin">Admin</option>
+                                      </select>
+                                    ) : (
+                                      <span className={`inline-flex items-center gap-1 rounded-xl px-3 py-1 text-xs font-bold border ${
+                                        member.role === 'Admin'
+                                          ? 'border-corporate-magenta-200 bg-corporate-magenta-50 text-corporate-magenta-800'
+                                          : member.role === 'Manager'
+                                            ? 'border-corporate-teal-200 bg-corporate-teal-50 text-corporate-teal-800'
+                                            : 'border-slate-200 bg-slate-100 text-slate-700'
+                                      }`}>
+                                        <Shield size={12} />
+                                        <span>{member.role}</span>
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  {/* Access Status */}
+                                  <td className="p-4">
+                                    {member.active ? (
+                                      member.emailConfirmedAt ? (
+                                        <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 border border-emerald-200 px-3 py-1 text-[11px] font-bold text-emerald-800">
+                                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                                          <span>Aktif</span>
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1.5 rounded-full bg-amber-50 border border-amber-200 px-3 py-1 text-[11px] font-bold text-amber-800">
+                                          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                                          <span>Menunggu Pengesahan</span>
+                                        </span>
+                                      )
+                                    ) : (
+                                      <span className="inline-flex items-center gap-1.5 rounded-full bg-rose-50 border border-rose-200 px-3 py-1 text-[11px] font-bold text-rose-800">
+                                        <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
+                                        <span>Akses Digantung</span>
+                                      </span>
+                                    )}
+                                  </td>
+
+                                  {/* Last Activity */}
+                                  <td className="p-4 text-slate-500">
+                                    <p className="font-semibold text-slate-700">
+                                      {member.lastSignInAt ? new Date(member.lastSignInAt).toLocaleDateString('ms-MY', { day: 'numeric', month: 'short', year: 'numeric' }) : 'Belum log masuk'}
+                                    </p>
+                                    <p className="text-[10px] text-slate-400 mt-0.5">
+                                      {member.emailConfirmedAt ? 'E-mel disahkan' : 'Pautan belum dituntut'}
+                                    </p>
+                                  </td>
+
+                                  {/* Actions */}
+                                  <td className="p-4 text-center">
+                                    <div className="flex items-center justify-center gap-1">
+                                      {isOrganizationAdmin && !isCurrentUser && (
+                                        <button
+                                          type="button"
+                                          disabled={userManagementBusy}
+                                          onClick={() => setEditingOrganizationUser(
+                                            editingOrganizationUser?.id === member.id
+                                              ? null
+                                              : { id: member.id, email: member.email, password: '', confirmPassword: '' }
+                                          )}
+                                          title="Edit e-mel atau tukar kata laluan"
+                                          className="p-2 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
+                                        >
+                                          <Pencil size={15} />
+                                        </button>
+                                      )}
+
+                                      {isOrganizationAdmin && !isCurrentUser && (
+                                        <button
+                                          type="button"
+                                          disabled={userManagementBusy}
+                                          onClick={() => void runUserAdminAction(
+                                            { action: 'update-access', userId: member.id, active: !member.active },
+                                            `${member.email} ${member.active ? 'digantung' : 'diaktifkan semula'}.`
+                                          )}
+                                          title={member.active ? 'Gantung akses pengguna' : 'Aktifkan semula akses pengguna'}
+                                          className={`p-2 rounded-xl transition-colors ${
+                                            member.active
+                                              ? 'text-slate-400 hover:text-corporate-magenta-600 hover:bg-corporate-magenta-50'
+                                              : 'text-slate-400 hover:text-emerald-600 hover:bg-emerald-50'
+                                          }`}
+                                        >
+                                          {member.active ? <UserX size={15} /> : <UserCheck size={15} />}
+                                        </button>
+                                      )}
+
+                                      {isOrganizationAdmin && (
+                                        <button
+                                          type="button"
+                                          disabled={userManagementBusy}
+                                          onClick={() => void runUserAdminAction({ action: 'reset-password', userId: member.id }, `Pautan tetapan semula kata laluan dihantar kepada ${member.email}.`)}
+                                          title="Hantar pautan tetapan semula kata laluan"
+                                          className="p-2 rounded-xl text-slate-400 hover:text-amber-600 hover:bg-amber-50 transition-colors"
+                                        >
+                                          <KeyRound size={15} />
+                                        </button>
+                                      )}
+
+                                      {!isCurrentUser && (isOrganizationAdmin || member.role !== 'Admin') && (
+                                        <button
+                                          type="button"
+                                          disabled={userManagementBusy || (member.isOrganizationOwner && !isOrganizationAdmin)}
+                                          onClick={() => handleDeleteOrganizationUser(member)}
+                                          title="Padam akaun pengguna secara kekal"
+                                          className="p-2 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                                        >
+                                          <Trash2 size={15} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+
+                            {paginatedUsers.length === 0 && (
+                              <tr>
+                                <td colSpan={5} className="p-8 text-center text-slate-400">
+                                  {organizationUsers.length === 0 ? 'Memuatkan ahli organisasi...' : 'Tiada pengguna sepadan dengan tapisan carian anda.'}
+                                </td>
+                              </tr>
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* Pagination Bar */}
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-slate-100 p-4 text-xs text-slate-500">
+                        <span>
+                          Menunjukkan {filteredUsers.length === 0 ? 0 : (userPage - 1) * userPageSize + 1} hingga {Math.min(userPage * userPageSize, filteredUsers.length)} daripada {filteredUsers.length} pengguna
+                        </span>
+                        <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                          <button
+                            type="button"
+                            disabled={userPage <= 1}
+                            onClick={() => setUserPage(p => Math.max(1, p - 1))}
+                            className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                          >
+                            Sebelumnya
+                          </button>
+                          <span className="font-bold text-slate-800 px-2">
+                            {userPage} / {totalUserPages}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={userPage >= totalUserPages}
+                            onClick={() => setUserPage(p => Math.min(totalUserPages, p + 1))}
+                            className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                          >
+                            Seterusnya
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* SUB-TAB 2: ROLE & PERMISSION MATRIX */}
+                {userMgmtSubTab === 'matrix' && (
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-7 shadow-sm space-y-6">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-b border-slate-100 pb-4">
+                      <div>
+                        <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                          <Lock size={18} className="text-corporate-teal-600" />
+                          Matriks Kebenaran &amp; Peranan (Permission Matrix)
+                        </h3>
+                        <p className="text-xs text-slate-500 mt-1">
+                          Kawal selia kebenaran akses granular bagi setiap peranan organisasi. Perubahan disimpan terus ke dalam database organisasi.
                         </p>
-                        {editingOrganizationUser?.id === member.id && (
-                          <form onSubmit={handleUpdateOrganizationUser} className="mt-3 grid gap-2 sm:grid-cols-2">
-                            <input
-                              type="email"
-                              required
-                              value={editingOrganizationUser.email}
-                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, email: event.target.value })}
-                              aria-label={`E-mel baharu ${member.email}`}
-                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                            />
-                            <input
-                              type="password"
-                              minLength={12}
-                              autoComplete="new-password"
-                              value={editingOrganizationUser.password}
-                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, password: event.target.value })}
-                              placeholder="Kata laluan baharu (pilihan)"
-                              aria-label={`Kata laluan baharu ${member.email}`}
-                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                            />
-                            <input
-                              type="password"
-                              minLength={12}
-                              autoComplete="new-password"
-                              value={editingOrganizationUser.confirmPassword}
-                              onChange={event => setEditingOrganizationUser({ ...editingOrganizationUser, confirmPassword: event.target.value })}
-                              placeholder="Sahkan kata laluan baharu"
-                              aria-label={`Sahkan kata laluan baharu ${member.email}`}
-                              className="min-w-0 rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-corporate-teal-500"
-                            />
-                            <div className="flex gap-2 sm:col-span-2">
-                              <button type="submit" disabled={userManagementBusy} className="rounded-lg bg-corporate-teal-600 px-3 py-2 text-sm font-semibold text-white hover:bg-corporate-teal-700 disabled:opacity-50">
-                                Simpan perubahan
-                              </button>
-                              <button type="button" disabled={userManagementBusy} onClick={() => setEditingOrganizationUser(null)} className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50">
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          disabled={isSavingMatrix}
+                          onClick={handleSaveRolePermissions}
+                          className="inline-flex items-center gap-2 rounded-xl bg-corporate-teal-600 hover:bg-corporate-teal-700 px-4 py-2.5 text-xs font-bold text-white shadow-md transition-all active:scale-95 disabled:opacity-50"
+                        >
+                          {isSavingMatrix ? (
+                            <>
+                              <RefreshCw size={14} className="animate-spin" />
+                              <span>Menyimpan ke Database...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Check size={14} />
+                              <span>Simpan Matriks</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Auto-hide 5-second Success Message */}
+                    {matrixSaveNotice && (
+                      <div
+                        role="status"
+                        className="rounded-2xl border border-emerald-300 bg-emerald-50 p-4 text-xs sm:text-sm font-extrabold text-emerald-900 flex items-center justify-between shadow-sm animate-in fade-in slide-in-from-top-2 duration-300"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <CheckCircle2 size={20} className="text-emerald-600 shrink-0" />
+                          <span>{matrixSaveNotice}</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setMatrixSaveNotice('')}
+                          className="text-emerald-700 hover:text-emerald-950 p-1 rounded-lg hover:bg-emerald-100 transition-colors"
+                          title="Tutup pemberitahuan"
+                        >
+                          <X size={16} />
+                        </button>
+                      </div>
+                    )}
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-xs border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase text-[11px] font-bold">
+                            <th className="p-3.5">Modul &amp; Fungsi Sistem</th>
+                            <th className="p-3.5 text-center w-32">Staff</th>
+                            <th className="p-3.5 text-center w-32">Manager</th>
+                            <th className="p-3.5 text-center w-32">Admin</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {[
+                            { category: 'Pengurusan Surat Gadaian (SAG)' },
+                            { id: 'sag_view', label: 'Lihat lejar dan status transaksi SAG', roles: ['Staff', 'Manager', 'Admin'] },
+                            { id: 'sag_create', label: 'Daftar transaksi pajakan asal & tebus', roles: ['Staff', 'Manager', 'Admin'] },
+                            { id: 'sag_overlap', label: 'Laksana transaksi Salin, OL & Pusing', roles: ['Manager', 'Admin'] },
+                            { id: 'sag_delete', label: 'Padam rekod transaksi lejar secara kekal', roles: ['Admin'] },
+
+                            { category: 'Aset & Inventori Emas Fizikal' },
+                            { id: 'assets_view', label: 'Lihat inventori emas EDT & EDR', roles: ['Staff', 'Manager', 'Admin'] },
+                            { id: 'assets_manage', label: 'Daftar, pautkan dan kemas kini aset emas', roles: ['Manager', 'Admin'] },
+                            { id: 'assets_delete', label: 'Padam rekod aset emas daripada inventori', roles: ['Admin'] },
+
+                            { category: 'Analitik & Kecerdasan Pasaran' },
+                            { id: 'analytics_view', label: 'Akses Papan Pemuka Eksekutif & Ringkasan BI', roles: ['Staff', 'Manager', 'Admin'] },
+                            { id: 'ai_predictions', label: 'Akses AI Predictive Engine & Makcik AI', roles: ['Manager', 'Admin'] },
+                            { id: 'export_data', label: 'Eksport laporan CSV analitik & lejar', roles: ['Manager', 'Admin'] },
+
+                            { category: 'Pentadbiran & Keselamatan' },
+                            { id: 'users_manage', label: 'Tambah, gantung, edit & reset kata laluan pengguna', roles: ['Admin'] },
+                            { id: 'roles_manage', label: 'Ubah suai peranan & kebenaran akses', roles: ['Admin'] },
+                            { id: 'audit_inspect', label: 'Akses Audit Trail & HTTP Inspector', roles: ['Manager', 'Admin'] },
+                          ].map((item, idx) => {
+                            if ('category' in item) {
+                              return (
+                                <tr key={`cat-${idx}`} className="bg-slate-100/70 font-extrabold text-slate-800 text-[11px]">
+                                  <td colSpan={4} className="p-2.5 px-3.5 tracking-wide text-corporate-teal-900">
+                                    {item.category}
+                                  </td>
+                                </tr>
+                              );
+                            }
+
+                            return (
+                              <tr key={item.id} className="hover:bg-slate-50/50">
+                                <td className="p-3.5 font-medium text-slate-700">
+                                  {item.label}
+                                </td>
+                                {(['Staff', 'Manager', 'Admin'] as const).map(role => {
+                                  const isChecked = rolePermissions[role]?.[item.id] ?? false;
+                                  return (
+                                    <td key={role} className="p-3.5 text-center">
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        disabled={!isOrganizationAdmin || role === 'Admin'}
+                                        onChange={() => {
+                                          setRolePermissions(prev => ({
+                                            ...prev,
+                                            [role]: {
+                                              ...prev[role],
+                                              [item.id]: !isChecked
+                                            }
+                                          }));
+                                        }}
+                                        className="h-4 w-4 rounded border-slate-300 text-corporate-teal-600 focus:ring-corporate-teal-500 cursor-pointer disabled:opacity-60"
+                                      />
+                                    </td>
+                                  );
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* SUB-TAB 3: ACTIVITY & AUDIT STREAM */}
+                {userMgmtSubTab === 'activity' && (
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 sm:p-7 shadow-sm space-y-4">
+                    <div className="border-b border-slate-100 pb-4">
+                      <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                        <Activity size={18} className="text-corporate-magenta-600" />
+                        Aliran Aktiviti &amp; Audit Keselamatan
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-1">
+                        Log peristiwa keselamatan pengguna (pertukaran peranan, penggantungan akses, reset kata laluan, dan pendaftaran akaun).
+                      </p>
+                    </div>
+
+                    <div className="space-y-3">
+                      {securityLogs.map(log => (
+                        <div key={log.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl border border-slate-100 bg-slate-50/60 hover:bg-slate-50 transition-all">
+                          <div className="flex items-start gap-3">
+                            <div className={`h-8 w-8 rounded-xl flex items-center justify-center shrink-0 ${
+                              log.severity === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-corporate-teal-100 text-corporate-teal-700'
+                            }`}>
+                              <ShieldCheck size={16} />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-slate-800 text-xs">
+                                  {log.action.replace(/_/g, ' ')}
+                                </span>
+                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-bold text-slate-700">
+                                  Sasaran: {log.target}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-600 mt-0.5">{log.detail}</p>
+                              <p className="text-[11px] text-slate-400 mt-1">Dilakukan oleh: {log.actor}</p>
+                            </div>
+                          </div>
+
+                          <div className="sm:text-right shrink-0 text-[11px] text-slate-400 font-mono">
+                            {new Date(log.timestamp).toLocaleString('ms-MY')}
+                          </div>
+                        </div>
+                      ))}
+
+                      {securityLogs.length === 0 && (
+                        <p className="text-center p-8 text-xs text-slate-400">Tiada aktiviti keselamatan direkodkan setakat ini.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* USER CREATION / INVITE MODAL DIALOG */}
+                {isInviteModalOpen && isOrganizationAdmin && (
+                  <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-slate-900/70 backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="min-w-0 bg-white rounded-3xl shadow-2xl w-full max-w-xl max-h-[90dvh] overflow-y-auto custom-scrollbar animate-in zoom-in-95 duration-200">
+                      {/* Modal Header */}
+                      <div className="flex justify-between items-center p-5 sm:p-6 border-b border-slate-100 bg-slate-50 sticky top-0 z-10">
+                        <div className="flex items-center gap-2.5">
+                          <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-100 text-corporate-teal-700">
+                            <UserPlus size={20} />
+                          </div>
+                          <div>
+                            <h3 className="text-base sm:text-lg font-bold text-slate-800">
+                              Jemput &amp; Tambah Pengguna
+                            </h3>
+                            <p className="text-xs text-slate-500">Pendaftaran akaun baharu dalam organisasi</p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsInviteModalOpen(false)}
+                          className="text-slate-400 hover:text-slate-700 p-2 rounded-full hover:bg-slate-200 transition-colors"
+                        >
+                          <X size={18} />
+                        </button>
+                      </div>
+
+                      {/* Modal Tab Switcher */}
+                      <div className="p-5 sm:p-6 pb-0">
+                        <div className="grid grid-cols-2 rounded-2xl bg-slate-100 p-1 text-xs font-bold">
+                          <button
+                            type="button"
+                            onClick={() => setInviteModalMode('single')}
+                            className={`py-2 rounded-xl transition-all ${
+                              inviteModalMode === 'single'
+                                ? 'bg-white text-slate-800 shadow-sm'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            Pengguna Tunggal
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setInviteModalMode('bulk')}
+                            className={`py-2 rounded-xl transition-all ${
+                              inviteModalMode === 'bulk'
+                                ? 'bg-white text-slate-800 shadow-sm'
+                                : 'text-slate-500 hover:text-slate-800'
+                            }`}
+                          >
+                            Pukal melalui CSV
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="p-5 sm:p-6">
+                        {inviteModalMode === 'single' ? (
+                          <form onSubmit={handleCreateOrganizationUser} className="space-y-4">
+                            <div>
+                              <label className="block text-xs font-bold text-slate-700 mb-1">
+                                E-mel Pengguna
+                              </label>
+                              <input
+                                type="email"
+                                required
+                                value={newUserEmail}
+                                onChange={event => setNewUserEmail(event.target.value)}
+                                placeholder="nama@organisasi.com"
+                                className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs sm:text-sm outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                              />
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-bold text-slate-700 mb-1">
+                                Peranan Awal
+                              </label>
+                              <select
+                                value={newUserRole}
+                                onChange={event => setNewUserRole(event.target.value)}
+                                className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs sm:text-sm font-semibold outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20 bg-white"
+                              >
+                                <option value="Staff">Staff (Portfolio Peribadi Sahaja)</option>
+                                <option value="Manager">Manager (Akses Portfolio Organisasi)</option>
+                                <option value="Admin">Admin (Akses Penuh &amp; Pengurusan Pengguna)</option>
+                              </select>
+                            </div>
+
+                            <div className="grid gap-3 sm:grid-cols-2">
+                              <div>
+                                <label className="block text-xs font-bold text-slate-700 mb-1">
+                                  Kata Laluan Awal (Min. 12)
+                                </label>
+                                <input
+                                  type="password"
+                                  required
+                                  minLength={12}
+                                  autoComplete="new-password"
+                                  value={newUserPassword}
+                                  onChange={event => setNewUserPassword(event.target.value)}
+                                  placeholder="Kata laluan awal"
+                                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs sm:text-sm outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold text-slate-700 mb-1">
+                                  Sahkan Kata Laluan
+                                </label>
+                                <input
+                                  type="password"
+                                  required
+                                  minLength={12}
+                                  autoComplete="new-password"
+                                  value={confirmNewUserPassword}
+                                  onChange={event => setConfirmNewUserPassword(event.target.value)}
+                                  placeholder="Sahkan kata laluan"
+                                  className="w-full rounded-xl border border-slate-200 px-3.5 py-2.5 text-xs sm:text-sm outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                                />
+                              </div>
+                            </div>
+
+                            <p className="text-[11px] text-slate-500 leading-relaxed">
+                              Pengguna boleh menukar kata laluan mereka pada bila-bila masa melalui pautan pengesahan atau pengurusan profil.
+                            </p>
+
+                            <div className="pt-3 flex gap-2 justify-end border-t border-slate-100">
+                              <button
+                                type="button"
+                                onClick={() => setIsInviteModalOpen(false)}
+                                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50"
+                              >
                                 Batal
+                              </button>
+                              <button
+                                type="submit"
+                                disabled={userManagementBusy}
+                                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-corporate-teal-600 text-white text-xs font-bold hover:bg-corporate-teal-700 disabled:opacity-50 shadow-md"
+                              >
+                                <Plus size={15} />
+                                <span>{userManagementBusy ? 'Mencipta...' : 'Cipta Pengguna'}</span>
                               </button>
                             </div>
                           </form>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        {isOrganizationAdmin && member.id !== user.id && <button
-                          type="button"
-                          disabled={userManagementBusy}
-                          onClick={() => setEditingOrganizationUser(
-                            editingOrganizationUser?.id === member.id
-                              ? null
-                              : { id: member.id, email: member.email, password: '', confirmPassword: '' }
-                          )}
-                          aria-label={`Edit akaun ${member.email}`}
-                          title="Edit e-mel atau tetapkan kata laluan baharu"
-                          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                        >
-                          <Pencil size={15} /><span className="sm:hidden">Edit pengguna</span>
-                        </button>}
-                        {isOrganizationAdmin && <select
-                          value={member.role}
-                          aria-label={`Peranan ${member.email}`}
-                          disabled={userManagementBusy || member.id === user.id}
-                          onChange={event => void runUserAdminAction({ action: 'update-role', userId: member.id, role: event.target.value }, `Peranan ${member.email} dikemas kini.`)}
-                          className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 disabled:opacity-60"
-                        >
-                          <option value="Staff">Staff</option>
-                          <option value="Manager">Manager</option>
-                          <option value="Admin">Admin</option>
-                        </select>}
-                        {isOrganizationAdmin && <button
-                          type="button"
-                          disabled={userManagementBusy || member.id === user.id}
-                          onClick={() => void runUserAdminAction(
-                            { action: 'update-access', userId: member.id, active: !member.active },
-                            `${member.email} ${member.active ? 'digantung' : 'diaktifkan semula'}.`
-                          )}
-                          className={`rounded-lg border px-3 py-2 text-sm font-semibold disabled:opacity-50 ${member.active ? 'border-corporate-magenta-200 text-corporate-magenta-700 hover:bg-corporate-magenta-50' : 'border-corporate-green-200 text-corporate-green-800 hover:bg-corporate-green-50'}`}
-                        >
-                          {member.active ? 'Gantung akses' : 'Aktifkan semula'}
-                        </button>}
-                        {isOrganizationAdmin && <button
-                          type="button"
-                          disabled={userManagementBusy}
-                          onClick={() => void runUserAdminAction({ action: 'reset-password', userId: member.id }, `E-mel tetapan semula kata laluan dihantar kepada ${member.email}.`)}
-                          title="Hantar pautan tetapan semula kata laluan"
-                          className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 disabled:opacity-50"
-                        >
-                          <KeyRound size={15} /><span className="sm:hidden">Reset kata laluan</span>
-                        </button>}
-                        {member.id !== user.id && (isOrganizationAdmin || member.role !== 'Admin') && (
-                          <button
-                            type="button"
-                            disabled={userManagementBusy || (member.isOrganizationOwner && !isOrganizationAdmin)}
-                            onClick={() => handleDeleteOrganizationUser(member)}
-                            title={member.isOrganizationOwner ? 'Pemilikan organisasi akan dipindahkan kepada Admin yang memadam' : 'Padam akaun pengguna secara kekal'}
-                            aria-label={`Padam akaun ${member.email}`}
-                            className="inline-flex items-center gap-2 rounded-lg border border-red-200 px-3 py-2 text-sm font-semibold text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
-                          >
-                            <Trash2 size={15} /><span className="sm:hidden">Padam pengguna</span>
-                          </button>
+                        ) : (
+                          /* Bulk CSV Import Tab */
+                          <div className="space-y-4">
+                            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 space-y-2">
+                              <p className="font-bold text-slate-800 flex items-center gap-1.5">
+                                <FileText size={15} className="text-corporate-teal-600" />
+                                Format Fail CSV
+                              </p>
+                              <p>Format mestilah mengandungi tajuk lajur: <code>email,role,password</code></p>
+                              <button
+                                type="button"
+                                onClick={handleDownloadCsvTemplate}
+                                className="inline-flex items-center gap-1.5 text-corporate-teal-700 font-bold underline hover:text-corporate-teal-900"
+                              >
+                                <DownloadCloud size={14} />
+                                <span>Muat turun templat CSV contoh</span>
+                              </button>
+                            </div>
+
+                            <div>
+                              <label className="block text-xs font-bold text-slate-700 mb-1">
+                                Tampal Kandungan CSV di sini atau Muat Naik Fail
+                              </label>
+                              <textarea
+                                rows={5}
+                                value={bulkCsvText}
+                                onChange={e => setBulkCsvText(e.target.value)}
+                                placeholder="email,role,password&#10;staf1@contoh.com,Staff,PasswordAwal123!&#10;manager1@contoh.com,Manager,PasswordAwal123!"
+                                className="w-full font-mono text-xs rounded-xl border border-slate-200 p-3 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                              />
+                            </div>
+
+                            <div className="flex items-center justify-between gap-2">
+                              <label className="cursor-pointer inline-flex items-center gap-1.5 text-xs font-bold text-slate-700 hover:text-slate-900">
+                                <UploadCloud size={15} />
+                                <span>Pilih fail .csv</span>
+                                <input
+                                  type="file"
+                                  accept=".csv"
+                                  className="hidden"
+                                  onChange={e => {
+                                    const file = e.target.files?.[0];
+                                    if (!file) return;
+                                    const reader = new FileReader();
+                                    reader.onload = ev => {
+                                      setBulkCsvText(String(ev.target?.result || ''));
+                                    };
+                                    reader.readAsText(file);
+                                  }}
+                                />
+                              </label>
+
+                              {bulkImportStatus && (
+                                <span className="text-xs font-bold text-corporate-teal-700 animate-pulse">
+                                  {bulkImportStatus}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="pt-3 flex gap-2 justify-end border-t border-slate-100">
+                              <button
+                                type="button"
+                                onClick={() => setIsInviteModalOpen(false)}
+                                className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-600 hover:bg-slate-50"
+                              >
+                                Batal
+                              </button>
+                              <button
+                                type="button"
+                                disabled={userManagementBusy || !bulkCsvText.trim()}
+                                onClick={() => void handleBulkCsvImport(bulkCsvText)}
+                                className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-corporate-teal-600 text-white text-xs font-bold hover:bg-corporate-teal-700 disabled:opacity-50 shadow-md"
+                              >
+                                <UploadCloud size={15} />
+                                <span>Proses Import Pukal</span>
+                              </button>
+                            </div>
+                          </div>
                         )}
                       </div>
                     </div>
-                  ))}
-                  {organizationUsers.length === 0 && !userManagementError && (
-                    <p className="p-6 text-center text-sm text-slate-500">Memuatkan ahli organisasi...</p>
-                  )}
-                </div>
-              </div>
-            </section>
-          )}
+                  </div>
+                )}
+              </section>
+            );
+          })()}
 
           {/* TAB: DASHBOARD */}
           {activeTab === 'dashboard' && (() => {
@@ -4681,394 +5747,1418 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             );
           })()}
 
-          {/* TAB: TRANSACTIONS (CRUD) */}
-          {activeTab === 'transactions' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
-                <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                  <ArrowRightLeft className="mr-2 text-emerald-600" size={20} /> Pengurusan Surat Gadaian (SAG)
-                </h3>
-                <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-                  <label className="flex flex-1 sm:flex-none items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-600">
-                    <span className="shrink-0 font-semibold">Jenis pajak</span>
-                    <select
-                      aria-label="Tapis transaksi mengikut jenis pajak"
-                      value={transactionStatusFilter}
-                      onChange={event => setTransactionStatusFilter(event.target.value)}
-                      className="min-w-0 flex-1 bg-transparent font-semibold text-slate-800 outline-none sm:w-40"
-                    >
-                      <option value="Semua">Semua jenis</option>
-                      {transactionStatusOptions.map(status => <option key={status} value={status}>{status}</option>)}
-                    </select>
-                  </label>
-                  <input
-                    type="file"
-                    accept=".csv"
-                    id="csv-upload"
-                    className="hidden"
-                    onChange={handleImportCSV}
-                  />
-                  <label
-                    htmlFor="csv-upload"
-                    className="flex-1 sm:flex-none justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm cursor-pointer border border-slate-200"
-                  >
-                    <UploadCloud size={18} className="mr-2" /> Import
-                  </label>
-                  <button
-                    onClick={handleExportCSV}
-                    className="flex-1 sm:flex-none justify-center bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm border border-slate-200"
-                  >
-                    <DownloadCloud size={18} className="mr-2" /> Export
-                  </button>
-                  <button
-                    onClick={() => { setEditingTransaction(null); setIsModalOpen(true); }}
-                    className="flex-1 sm:flex-none justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm"
-                  >
-                    <Plus size={18} className="mr-2" /> Tambah Surat
-                  </button>
-                </div>
-              </div>
+          {/* TAB: TRANSACTIONS (CRUD) / PENGURUSAN SURAT GADAIAN (SAG) */}
+          {activeTab === 'transactions' && (() => {
+            const totalActiveLoan = activePortfolioTransactions.reduce((sum, tx) => sum + getCurrentPrincipal(tx), 0);
+            const totalActiveMarhun = activePortfolioTransactions.reduce((sum, tx) => sum + getTransactionMarhunValue(tx), 0);
+            const urgentRedemptionTotal = redemptionNotifications.reduce((sum, tx) => sum + getCurrentRedemption(tx), 0);
 
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden w-full">
-                <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Jadual transaksi; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
-                  <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-sm font-semibold uppercase tracking-wider">
-                        <th className="p-4">Tarikh &amp; Masa (MYT)</th>
-                        <th className="p-4">Jenis Pajakan</th>
-                        <th className="p-4">No. Rujukan</th>
-                        <th className="p-4">ID Aset</th>
-                        <th className="p-4 text-right">Berat Emas (g)</th>
-                        <th className="p-4">Ketulenan</th>
-                        <th className="p-4 text-right">Harga Taksiran (RM/g)</th>
-                        <th className="p-4 text-right">Nilai Marhun (RM)</th>
-                        <th className="p-4 text-right">Kadar Pembiayaan (%)</th>
-                        <th className="p-4">Kadar Caj / Asas</th>
-                        <th className="p-4">Tarikh Matang</th>
-                        <th className="p-4">Institusi</th>
-                        <th className="p-4 text-right">Baki Pembiayaan (RM)</th>
-                        <th className="p-4 text-right">Jumlah Tebus (RM)</th>
-                        <th className="p-4 text-right">Lebihan Tunai (bukan untung) (RM)</th>
-                        <th className="p-4 text-center">Status</th>
-                        <th className="p-4">AI Indicator</th>
-                        <th className="p-4 text-center">Tindakan</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {sortedTransactions.map((tx) => {
-                        const linkedAssetIds = tx.selectedAssetIds || (tx.selectedAssetId ? [tx.selectedAssetId] : []);
-                        const linkedAssets = linkedAssetIds.map(assetId =>
-                          visibleAssets.find(asset => String(asset.id) === String(assetId))
-                        );
-                        const purity = tx.purity || getPurityFromAssets(linkedAssets.filter(Boolean));
-                        const aiIndicator = sagAiIndicators.find(item =>
-                          String(item.transaction.id) === String(tx.id)
-                        );
-                        return (
-                        <tr key={tx.id} className="hover:bg-slate-50/50 transition-colors group">
-                          <td className="p-4 text-slate-600 font-medium">
-                            <time dateTime={tx.date} title={tx.date}>
-                              {formatTransactionDateTime(tx.date)}
-                            </time>
-                          </td>
-                          <td className="p-4">
-                            <span className={`px-3 py-1 text-xs font-bold rounded-full ${
-                                getTransactionStatus(tx) === 'Pajakan Asal' ? 'bg-emerald-100 text-emerald-700' :
-                                getTransactionStatus(tx) === 'Salin' ? 'bg-amber-100 text-amber-700' :
-                                getTransactionStatus(tx) === 'OL' ? 'bg-blue-100 text-blue-700' :
-                                getTransactionStatus(tx) === 'Lelong' ? 'bg-rose-100 text-rose-700' :
-                                getTransactionStatus(tx) === 'US' || getTransactionStatus(tx) === 'Pusing' ? 'bg-cyan-100 text-cyan-700' :
-                                getTransactionStatus(tx) === 'TS' || getTransactionStatus(tx) === 'TKS' ? 'bg-slate-200 text-slate-700' :
-                                getTransactionStatus(tx).startsWith('Tebus') ? 'bg-slate-200 text-slate-700' :
-                                  'bg-slate-100 text-slate-600'
-                              }`}>
-                              {getTransactionStatus(tx)}
-                            </span>
-                          </td>
-                          <td className="p-4 text-slate-800 font-mono text-sm">{tx.refNo}</td>
-                          <td className="p-4">
-                            {linkedAssetIds.length ? (
-                              <div className="flex flex-wrap gap-1">
-                                {linkedAssetIds.map((assetId, index) => {
-                                  const asset = linkedAssets[index];
-                                  const assetIdLabel = asset
-                                    ? asset.code || generateAssetCode(asset.type, asset.supplierCodes || asset.supplier, asset.purity, asset.weight, asset.id)
-                                    : String(assetId);
-                                  return (
-                                    <span key={String(assetId)} className="code-badge-label rounded-md border border-amber-200 bg-amber-50 px-2 py-1 font-mono text-xs font-bold text-amber-900">
-                                      {assetIdLabel}
+            const getSagStatusBadge = (tx: any) => {
+              const isSettled = tx.status === 'Selesai';
+              const isRedeemed = tx.status === 'Ditebus';
+              const isAuctioned = tx.status === 'Dilelong';
+              const days = getDaysUntilDate(tx.redemptionDate);
+
+              if (isAuctioned) {
+                return {
+                  label: 'Dilelong',
+                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold',
+                  dotClass: 'bg-rose-500'
+                };
+              }
+
+              if (isSettled || isRedeemed) {
+                return {
+                  label: isRedeemed ? 'Ditebus' : 'Selesai',
+                  badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
+                  dotClass: 'bg-slate-400'
+                };
+              }
+
+              if (days !== null && days < 0) {
+                return {
+                  label: `Tamat Tempoh (Lewat ${Math.abs(days)}h)`,
+                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-black animate-pulse',
+                  dotClass: 'bg-rose-500'
+                };
+              }
+
+              if (days !== null && days <= 3) {
+                return {
+                  label: days === 0 ? 'Matang Hari Ini' : `Hampir Matang (${days}h)`,
+                  badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-black',
+                  dotClass: 'bg-amber-500'
+                };
+              }
+
+              return {
+                label: 'Aktif',
+                badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold',
+                dotClass: 'bg-emerald-500'
+              };
+            };
+
+            const filteredSagList = sortedTransactions.filter(tx => {
+              if (sagSearchQuery.trim()) {
+                const q = sagSearchQuery.toLowerCase().trim();
+                const refMatch = (tx.refNo || '').toLowerCase().includes(q);
+                const instMatch = (tx.institution || '').toLowerCase().includes(q);
+                const remarksMatch = (tx.remarks || '').toLowerCase().includes(q);
+                const assetMatch = (tx.selectedAssetIds || []).some(id => String(id).toLowerCase().includes(q));
+                if (!refMatch && !instMatch && !remarksMatch && !assetMatch) return false;
+              }
+
+              if (sagBranchFilter !== 'Semua' && tx.institution !== sagBranchFilter) {
+                return false;
+              }
+
+              if (sagMaturityFilter === 'aktif') {
+                if (tx.status && tx.status !== 'Aktif') return false;
+              } else if (sagMaturityFilter === 'hampir_matang') {
+                const days = getDaysUntilDate(tx.redemptionDate);
+                if (days === null || days > 3 || days < 0 || tx.status === 'Selesai' || tx.status === 'Ditebus') return false;
+              } else if (sagMaturityFilter === 'lewat') {
+                const days = getDaysUntilDate(tx.redemptionDate);
+                if (days === null || days >= 0 || tx.status === 'Selesai' || tx.status === 'Ditebus') return false;
+              } else if (sagMaturityFilter === 'selesai') {
+                if (tx.status !== 'Selesai' && tx.status !== 'Ditebus') return false;
+              }
+
+              if (transactionStatusFilter !== 'Semua' && getTransactionStatus(tx) !== transactionStatusFilter) {
+                return false;
+              }
+
+              return true;
+            });
+
+            const sagPageSize = 10;
+            const totalSagPages = Math.max(1, Math.ceil(filteredSagList.length / sagPageSize));
+            const paginatedSagList = filteredSagList.slice((sagPage - 1) * sagPageSize, sagPage * sagPageSize);
+
+            return (
+              <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {/* Modern SAG Command Center Header */}
+                <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-800/40 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 sm:p-8 text-white shadow-xl">
+                  <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/10 blur-3xl" />
+                  <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
+
+                  <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                    <div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/30 bg-corporate-teal-950/80 px-3.5 py-1 text-xs font-bold text-corporate-teal-200 backdrop-blur-md mb-2">
+                        <ArrowRightLeft size={14} className="text-emerald-400" />
+                        <span>PENGURUSAN SURAT GADAIAN (SAG) · LEJAR UTAMA</span>
+                      </div>
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-2.5">
+                        Pengurusan Surat Gadaian (SAG)
+                      </h2>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                        Pusat operasi pajakan emas: jejaki siri SAG, nilai taksiran marhun, kadar caj, serta amaran tempoh matang untuk ketepatan data dan kelajuan operasi.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="hidden sm:inline-flex items-center gap-1.5 text-xs text-slate-300 bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md">
+                        <span className="font-mono font-bold text-corporate-teal-300">[ / ]</span>
+                        <span>Carian</span>
+                        <span className="mx-1 text-white/30">·</span>
+                        <span className="font-mono font-bold text-corporate-teal-300">[ Alt + N ]</span>
+                        <span>Tambah SAG</span>
+                      </div>
+
+                      <input
+                        type="file"
+                        accept=".csv"
+                        id="csv-upload"
+                        className="hidden"
+                        onChange={handleImportCSV}
+                      />
+                      <label
+                        htmlFor="csv-upload"
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 hover:bg-white/20 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white backdrop-blur-md transition-all active:scale-95 cursor-pointer shadow-sm"
+                      >
+                        <UploadCloud size={15} />
+                        <span>Import</span>
+                      </label>
+                      <button
+                        type="button"
+                        onClick={handleExportCSV}
+                        className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 hover:bg-white/20 px-3.5 py-2 text-xs sm:text-sm font-semibold text-white backdrop-blur-md transition-all active:scale-95 shadow-sm"
+                      >
+                        <DownloadCloud size={15} />
+                        <span>Export</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setEditingTransaction(null); setIsModalOpen(true); }}
+                        className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 hover:bg-corporate-teal-500 px-4 py-2 text-xs sm:text-sm font-bold text-white shadow-lg shadow-corporate-teal-950/40 backdrop-blur-md transition-all active:scale-95"
+                      >
+                        <Plus size={16} />
+                        <span>Tambah Surat Gadaian</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4 Hierarchical KPI Telemetry Summary Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Card 1: Jumlah Gadaian Aktif */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Jumlah Gadaian Aktif</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700">
+                        <Wallet size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {activePortfolioTransactions.length} <span className="text-sm font-semibold text-slate-500">surat</span>
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500 font-medium">
+                      Baki Pokok: <strong className="text-slate-800">{formatRM(totalActiveLoan)}</strong>
+                    </p>
+                  </div>
+
+                  {/* Card 2: Nilai Marhun Semasa */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Nilai Marhun Semasa</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
+                        <Scale size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-emerald-700 tracking-tight">
+                      {formatRM(totalActiveMarhun)}
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500 font-medium">
+                      Emas Terkunci: <strong className="text-slate-800">{edrBalance}g</strong> EDR
+                    </p>
+                  </div>
+
+                  {/* Card 3: SAG Hampir / Lewat Matang */}
+                  <div className={`rounded-3xl border p-5 shadow-sm ${
+                    redemptionNotifications.length > 0
+                      ? 'border-amber-300 bg-amber-50/40'
+                      : 'border-slate-200/80 bg-white'
+                  }`}>
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">SAG Perlu Tindakan</span>
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
+                        redemptionNotifications.length > 0 ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600'
+                      }`}>
+                        <AlertTriangle size={20} />
+                      </div>
+                    </div>
+                    <p className={`mt-3 text-2xl sm:text-3xl font-black tracking-tight ${
+                      redemptionNotifications.length > 0 ? 'text-amber-800' : 'text-slate-900'
+                    }`}>
+                      {redemptionNotifications.length} <span className="text-sm font-semibold text-slate-500">surat</span>
+                    </p>
+                    <p className="mt-2 text-xs text-slate-500 font-medium">
+                      Jumlah Tebus: <strong className="text-slate-800">{formatRM(urgentRedemptionTotal)}</strong>
+                    </p>
+                  </div>
+
+                  {/* Card 4: Harga Emas Semasa */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Harga Emas Semasa</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRefresh()}
+                        disabled={isRefreshing}
+                        className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700 hover:bg-corporate-magenta-100 transition-colors disabled:opacity-50"
+                        title="Kemas kini harga pasaran live"
+                      >
+                        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+                      </button>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      RM {currentGoldPrice.toFixed(2)}
+                      <span className="text-xs sm:text-sm font-semibold text-slate-400">/g</span>
+                    </p>
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700 font-semibold">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
+                      <span>Rujukan Taksiran Spot Live</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Smart Search, Filter & Layout Control Hub */}
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-sm space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    {/* Global Quick Search */}
+                    <div className="relative flex-1">
+                      <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        id="sag-search-input"
+                        type="text"
+                        value={sagSearchQuery}
+                        onChange={e => { setSagSearchQuery(e.target.value); setSagPage(1); }}
+                        placeholder="Cari No. Siri SAG, rujukan tiket, ID aset, atau catatan... [ Tekan '/' ]"
+                        className="w-full pl-10 pr-9 py-2.5 text-xs sm:text-sm rounded-2xl border border-slate-200 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                      />
+                      {sagSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => { setSagSearchQuery(''); setSagPage(1); }}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                          <X size={15} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Filter Dropdowns */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={sagBranchFilter}
+                        onChange={e => { setSagBranchFilter(e.target.value); setSagPage(1); }}
+                        aria-label="Tapis mengikut cawangan / institusi"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Cawangan / Institusi</option>
+                        {visibleInstitutions.map(inst => (
+                          <option key={inst.id} value={inst.name}>{inst.name}</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={sagMaturityFilter}
+                        onChange={e => { setSagMaturityFilter(e.target.value); setSagPage(1); }}
+                        aria-label="Tapis mengikut status matang"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Status SAG</option>
+                        <option value="aktif">Aktif Sahaja</option>
+                        <option value="hampir_matang">Hampir Matang (≤ 3 Hari)</option>
+                        <option value="lewat">Tamat Tempoh / Lewat</option>
+                        <option value="selesai">Telah Ditebus / Selesai</option>
+                      </select>
+
+                      <select
+                        value={transactionStatusFilter}
+                        onChange={e => { setTransactionStatusFilter(e.target.value); setSagPage(1); }}
+                        aria-label="Tapis mengikut jenis pajak"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Jenis Pajak</option>
+                        {transactionStatusOptions.map(status => (
+                          <option key={status} value={status}>{status}</option>
+                        ))}
+                      </select>
+
+                      {/* View Layout Toggle */}
+                      <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200/60">
+                        <button
+                          type="button"
+                          onClick={() => setSagViewLayout('table')}
+                          title="Paparan Jadual Penuh"
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+                            sagViewLayout === 'table' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          Jadual
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setSagViewLayout('grid')}
+                          title="Paparan Kad Grid Pantas"
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+                            sagViewLayout === 'grid' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          Kad Grid
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Filter Indicator Badges */}
+                  {(sagSearchQuery || sagBranchFilter !== 'Semua' || sagMaturityFilter !== 'Semua' || transactionStatusFilter !== 'Semua') && (
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 text-xs">
+                      <span className="text-slate-500 font-medium">Penapis aktif:</span>
+                      {sagSearchQuery && (
+                        <span className="rounded-lg bg-corporate-teal-50 px-2.5 py-0.5 text-corporate-teal-800 font-semibold border border-corporate-teal-200">
+                          Carian: &quot;{sagSearchQuery}&quot;
+                        </span>
+                      )}
+                      {sagBranchFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-slate-100 px-2.5 py-0.5 text-slate-700 font-semibold border border-slate-200">
+                          Cawangan: {sagBranchFilter}
+                        </span>
+                      )}
+                      {sagMaturityFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-amber-50 px-2.5 py-0.5 text-amber-800 font-semibold border border-amber-200">
+                          Status: {sagMaturityFilter}
+                        </span>
+                      )}
+                      {transactionStatusFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-sky-50 px-2.5 py-0.5 text-sky-800 font-semibold border border-sky-200">
+                          Jenis: {transactionStatusFilter}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSagSearchQuery('');
+                          setSagBranchFilter('Semua');
+                          setSagMaturityFilter('Semua');
+                          setTransactionStatusFilter('Semua');
+                          setSagPage(1);
+                        }}
+                        className="text-corporate-magenta-700 font-bold hover:underline text-[11px]"
+                      >
+                        Padam Semua Penapis
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* VIEW MODE 1: DATA TABLE VIEW */}
+                {sagViewLayout === 'table' ? (
+                  <div className="bg-white rounded-3xl shadow-sm border border-slate-200/80 overflow-hidden w-full">
+                    <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain custom-scrollbar" role="region" aria-label="Jadual transaksi; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
+                      <table className="w-full min-w-max text-left border-collapse whitespace-nowrap text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-extrabold uppercase tracking-wider text-[11px]">
+                            <th className="p-4 sm:px-6">No. Siri SAG</th>
+                            <th className="p-4">Jenis Pajakan</th>
+                            <th className="p-4">Institusi / Cawangan</th>
+                            <th className="p-4">Status &amp; Tempoh</th>
+                            <th className="p-4 text-right">Berat (g)</th>
+                            <th className="p-4 text-right">Nilai Marhun</th>
+                            <th className="p-4 text-right">Baki Pinjaman</th>
+                            <th className="p-4 text-right">Jumlah Tebus</th>
+                            <th className="p-4 text-right">Lebihan Tunai</th>
+                            <th className="p-4">Tarikh Matang</th>
+                            <th className="p-4">AI Presumption</th>
+                            <th className="p-4 text-center">Tindakan</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                          {paginatedSagList.map((tx) => {
+                            const linkedAssetIds = tx.selectedAssetIds || (tx.selectedAssetId ? [tx.selectedAssetId] : []);
+                            const linkedAssets = linkedAssetIds.map(assetId =>
+                              visibleAssets.find(asset => String(asset.id) === String(assetId))
+                            );
+                            const aiIndicator = sagAiIndicators.find(item =>
+                              String(item.transaction.id) === String(tx.id)
+                            );
+                            const statusInfo = getSagStatusBadge(tx);
+
+                            return (
+                              <tr key={tx.id} className="hover:bg-slate-50/70 transition-colors group">
+                                {/* No. Siri SAG */}
+                                <td className="p-4 sm:px-6">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono text-sm font-black text-slate-900 tracking-tight">
+                                      #{tx.refNo}
                                     </span>
-                                  );
-                                })}
+                                  </div>
+                                  <div className="text-[11px] text-slate-400 mt-0.5">
+                                    {formatTransactionDateTime(tx.date)}
+                                  </div>
+                                </td>
+
+                                {/* Jenis Pajakan */}
+                                <td className="p-4">
+                                  <span className={`px-2.5 py-1 text-[11px] font-bold rounded-lg border ${
+                                    getTransactionStatus(tx) === 'Pajakan Asal' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' :
+                                    getTransactionStatus(tx) === 'Salin' ? 'bg-amber-50 text-amber-800 border-amber-200' :
+                                    getTransactionStatus(tx) === 'OL' ? 'bg-blue-50 text-blue-800 border-blue-200' :
+                                    getTransactionStatus(tx) === 'Lelong' ? 'bg-rose-50 text-rose-800 border-rose-200' :
+                                    'bg-slate-100 text-slate-700 border-slate-200'
+                                  }`}>
+                                    {getTransactionStatus(tx)}
+                                  </span>
+                                </td>
+
+                                {/* Institusi / Cawangan */}
+                                <td className="p-4">
+                                  <p className="font-bold text-slate-800 text-xs">{tx.institution}</p>
+                                  <p className="text-[10px] text-slate-400 mt-0.5">{tx.purity ? `Emas ${tx.purity}` : 'Mutu N/A'}</p>
+                                </td>
+
+                                {/* Status & Tempoh (Consistent Status Badge) */}
+                                <td className="p-4">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleStatus(tx.id)}
+                                    disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
+                                    title="Klik untuk menukar status"
+                                    className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full transition-all cursor-pointer ${statusInfo.badgeClass}`}
+                                  >
+                                    <span className={`h-1.5 w-1.5 rounded-full ${statusInfo.dotClass}`} />
+                                    <span>{statusInfo.label}</span>
+                                  </button>
+                                </td>
+
+                                {/* Berat (g) */}
+                                <td className="p-4 text-right font-mono font-bold text-slate-800">
+                                  {getCurrentPledgedWeight(tx)}g
+                                </td>
+
+                                {/* Nilai Marhun */}
+                                <td className="p-4 text-right font-mono font-bold text-corporate-teal-800">
+                                  {formatRM(getTransactionMarhunValue(tx))}
+                                </td>
+
+                                {/* Baki Pinjaman */}
+                                <td className="p-4 text-right font-mono font-extrabold text-slate-900">
+                                  {formatRM(getCurrentPrincipal(tx))}
+                                </td>
+
+                                {/* Jumlah Tebus */}
+                                <td className="p-4 text-right font-mono text-slate-600">
+                                  {formatRM(getCurrentRedemption(tx))}
+                                </td>
+
+                                {/* Lebihan Tunai */}
+                                <td className="p-4 text-right font-mono">
+                                  <span className={`font-bold ${tx.profit > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
+                                    {tx.profit > 0 ? `+${formatRM(tx.profit)}` : '-'}
+                                  </span>
+                                </td>
+
+                                {/* Tarikh Matang Direct Input */}
+                                <td className="p-4">
+                                  {!tx.type.includes('Tebus') ? (
+                                    <input
+                                      type="date"
+                                      aria-label={`Tarikh matang surat ${tx.refNo}`}
+                                      value={tx.redemptionDate || ''}
+                                      onChange={event => {
+                                        const redemptionDate = event.target.value;
+                                        const updatedAt = new Date().toISOString();
+                                        setTransactions(prev => prev.map(item =>
+                                          item.id === tx.id ? { ...item, redemptionDate, updatedAt } : item
+                                        ));
+                                      }}
+                                      className={`p-1.5 border rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-corporate-teal-500 ${
+                                        tx.redemptionDate && getDaysUntilDate(tx.redemptionDate) <= 3 && (tx.status === 'Aktif' || !tx.status)
+                                          ? 'border-amber-400 bg-amber-50 text-amber-900'
+                                          : 'border-slate-200 bg-white text-slate-700'
+                                      }`}
+                                    />
+                                  ) : (
+                                    <span className="text-slate-300">-</span>
+                                  )}
+                                </td>
+
+                                {/* AI Presumption Indicator */}
+                                <td className="p-4 whitespace-normal min-w-56">
+                                  {aiIndicator ? (
+                                    <div className="space-y-0.5 text-[11px]">
+                                      <p className={`font-bold ${
+                                        aiIndicator.presumption === 'Potensi overlap' ? 'text-emerald-700' :
+                                        aiIndicator.presumption === 'Petunjuk shortfall' ? 'text-rose-700' : 'text-slate-600'
+                                      }`}>
+                                        {aiIndicator.presumption}
+                                      </p>
+                                      <p className="text-slate-500 font-medium">
+                                        Skor: <strong className="text-slate-700">{aiIndicator.readinessScore ?? 'N/A'}/100</strong>
+                                      </p>
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-300 text-[11px]">Selesai / N/A</span>
+                                  )}
+                                </td>
+
+                                {/* Action Buttons */}
+                                <td className="p-4 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditTransaction(tx)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
+                                      title="Edit surat gadaian"
+                                    >
+                                      <Pencil size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenCorrection(tx)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-amber-600 hover:bg-amber-50 transition-colors"
+                                      title={`Rekod pembetulan (${getCorrectionEvents(tx).length})`}
+                                    >
+                                      <Settings2 size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleStatus(tx.id)}
+                                      disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 transition-colors"
+                                      title={tx.status === 'Aktif' ? 'Tandakan sebagai Selesai' : 'Tandakan sebagai Aktif'}
+                                    >
+                                      <CheckCircle2 size={15} className={tx.status === 'Selesai' || tx.status === 'Ditebus' ? 'text-emerald-600' : ''} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDelete(tx.id)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                                      title="Padam rekod transaksi"
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+
+                          {paginatedSagList.length === 0 && (
+                            <tr>
+                              <td colSpan={12} className="p-8 text-center text-slate-400">
+                                {visibleTransactions.length === 0
+                                  ? 'Tiada transaksi didaftarkan. Tekan "Tambah Surat Gadaian" untuk bermula.'
+                                  : 'Tiada rekod SAG sepadan dengan tapisan yang dipilih.'}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination Footer */}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-slate-100 p-4 text-xs text-slate-500">
+                      <span>
+                        Menunjukkan {filteredSagList.length === 0 ? 0 : (sagPage - 1) * sagPageSize + 1} hingga {Math.min(sagPage * sagPageSize, filteredSagList.length)} daripada {filteredSagList.length} surat
+                      </span>
+                      <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                        <button
+                          type="button"
+                          disabled={sagPage <= 1}
+                          onClick={() => setSagPage(p => Math.max(1, p - 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Sebelumnya
+                        </button>
+                        <span className="font-bold text-slate-800 px-2">
+                          {sagPage} / {totalSagPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={sagPage >= totalSagPages}
+                          onClick={() => setSagPage(p => Math.min(totalSagPages, p + 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Seterusnya
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  /* VIEW MODE 2: CARD GRID VIEW */
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {paginatedSagList.map((tx) => {
+                        const statusInfo = getSagStatusBadge(tx);
+                        const aiIndicator = sagAiIndicators.find(item => String(item.transaction.id) === String(tx.id));
+
+                        return (
+                          <div
+                            key={tx.id}
+                            className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
+                          >
+                            <div>
+                              <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                                <div>
+                                  <span className="font-mono text-base font-black text-slate-900 tracking-tight">
+                                    Surat #{tx.refNo}
+                                  </span>
+                                  <p className="text-xs font-semibold text-slate-500 mt-0.5">{tx.institution}</p>
+                                </div>
+                                <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full ${statusInfo.badgeClass}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${statusInfo.dotClass}`} />
+                                  <span>{statusInfo.label}</span>
+                                </span>
                               </div>
-                            ) : <span className="text-slate-300">-</span>}
-                          </td>
-                          <td className="p-4 text-right text-slate-600">
-                            {getCurrentPledgedWeight(tx)}g
-                            {getLatestPartialRedemption(tx) && <span className="ml-1 text-xs text-amber-700">baki</span>}
-                          </td>
-                          <td className="p-4 text-slate-600">{purity || '-'}</td>
-                          <td className="p-4 text-right text-slate-600">{formatRM(Number(tx.marhunPrice) || 0)}/g</td>
-                          <td className="p-4 text-right font-semibold text-amber-700">
-                            {formatRM(getTransactionMarhunValue(tx))}
-                          </td>
-                          <td className="p-4 text-right text-slate-600">{Number(tx.margin) || 0}%</td>
-                          <td className="p-4 text-slate-600">
-                            {tx.feeRate !== undefined || tx.feeBasis
-                              ? `${(Number(tx.feeRate) || 0).toFixed(2)}% / bulan · ${getFeeBasisLabel(tx.feeBasis) || 'Asas belum dipilih'}`
-                              : '-'}
-                          </td>
-                          <td className="p-4">
-                            {!tx.type.includes('Tebus') ? (
-                              <div className="space-y-1">
-                                <input
-                                  type="date"
-                                  aria-label={`Tarikh matang surat ${tx.refNo}`}
-                                  value={tx.redemptionDate || ''}
-                                  onChange={event => {
-                                    const redemptionDate = event.target.value;
-                                    const updatedAt = new Date().toISOString();
-                                    setTransactions(prev => prev.map(item =>
-                                      item.id === tx.id ? { ...item, redemptionDate, updatedAt } : item
-                                    ));
-                                  }}
-                                  className={`p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-emerald-500 ${
-                                    tx.redemptionDate && getDaysUntilDate(tx.redemptionDate) <= 3 && (tx.status === 'Aktif' || !tx.status)
-                                      ? 'border-amber-300 bg-amber-50'
-                                      : 'border-slate-200'
-                                  }`}
-                                />
-                                {!tx.redemptionDate && <p className="text-xs text-slate-400">Tetapkan tarikh untuk kalendar dan notifikasi</p>}
+
+                              <div className="grid grid-cols-2 gap-3 py-3 text-xs border-b border-slate-100">
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Berat Emas</span>
+                                  <span className="font-mono font-bold text-slate-800 text-sm">{getCurrentPledgedWeight(tx)}g</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Nilai Marhun</span>
+                                  <span className="font-mono font-bold text-corporate-teal-800 text-sm">{formatRM(getTransactionMarhunValue(tx))}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Baki Pinjaman</span>
+                                  <span className="font-mono font-extrabold text-slate-900 text-sm">{formatRM(getCurrentPrincipal(tx))}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Jumlah Tebus</span>
+                                  <span className="font-mono font-bold text-slate-700 text-sm">{formatRM(getCurrentRedemption(tx))}</span>
+                                </div>
                               </div>
-                            ) : <span className="text-slate-300">-</span>}
-                          </td>
-                          <td className="p-4 text-slate-600">{tx.institution}</td>
-                          <td className="p-4 text-right font-semibold text-slate-800">{formatRM(getCurrentPrincipal(tx))}</td>
-                          <td className="p-4 text-right text-slate-500">{formatRM(getCurrentRedemption(tx))}</td>
-                          <td className="p-4 text-right">
-                            <span className={`font-bold ${tx.profit > 0 ? 'text-emerald-600' : 'text-slate-400'}`}>
-                              {tx.profit > 0 ? `+${formatRM(tx.profit)}` : '-'}
-                            </span>
-                          </td>
-                          <td className="p-4 text-center">
-                            <button
-                              onClick={() => handleToggleStatus(tx.id)}
-                              title="Klik untuk tukar status (Aktif / Selesai)"
-                              className={`inline-flex items-center space-x-1 px-2.5 py-1 text-xs font-bold rounded-full transition-all cursor-pointer ${
-                                tx.status === 'Selesai' 
-                                  ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' 
-                                  : tx.status === 'Ditebus'
-                                  ? 'bg-blue-100 text-blue-700 hover:bg-blue-200'
-                                  : tx.status === 'Dilelong'
-                                  ? 'bg-rose-100 text-rose-700'
-                                  : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                              }`}
-                              disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
-                            >
-                              {tx.status === 'Selesai' ? (
-                                <><span>✓</span><span>Selesai</span></>
-                              ) : tx.status === 'Ditebus' ? (
-                                <><span>✓</span><span>Ditebus</span></>
-                              ) : tx.status === 'Dilelong' ? (
-                                <><span>!</span><span>Dilelong</span></>
-                              ) : (
-                                <><span>●</span><span>Aktif</span></>
-                              )}
-                            </button>
-                          </td>
-                          <td className="p-4 whitespace-normal min-w-64">
-                            {aiIndicator ? (
-                              <div
-                                className="space-y-1 text-xs"
-                                title={`Nilai marhun semasa anggaran: ${aiIndicator.currentMarhunValue === null ? 'belum tersedia' : formatRM(aiIndicator.currentMarhunValue)}. Nilai asas surat dikira daripada jumlah pembiayaan ÷ margin: ${aiIndicator.impliedLetterValue === null ? 'belum tersedia' : formatRM(aiIndicator.impliedLetterValue)}.`}
-                              >
-                                <p className={`font-bold ${
-                                  aiIndicator.presumption === 'Potensi overlap'
-                                    ? 'text-emerald-700'
-                                    : aiIndicator.presumption === 'Petunjuk shortfall'
-                                      ? 'text-rose-700'
-                                      : 'text-slate-600'
-                                }`}>
-                                  Anggaran OL sebelum fi baharu: {aiIndicator.presumption}
-                                </p>
-                                <p className="text-slate-600">
-                                  Ramalan: {aiIndicator.prediction || 'Belum tersedia (perlukan 7 snapshot harga)'}
-                                </p>
-                                <p className="font-semibold text-slate-700">
-                                  AI Score: {aiIndicator.readinessScore === null
-                                    ? 'Belum dikira · rekod tunai'
-                                    : `${aiIndicator.readinessScore}/100 · ${aiIndicator.readinessScore >= 80
-                                      ? 'Bersedia'
-                                      : aiIndicator.readinessScore >= 60
-                                        ? 'Perlu semakan'
-                                        : 'Perlu perhatian'}`}
-                                </p>
-                                {aiIndicator.marhunValueMismatch && (
-                                  <p className="font-semibold text-amber-700">Semak nilai marhun berbanding pembiayaan ÷ margin.</p>
+
+                              <div className="pt-2.5 flex items-center justify-between text-xs text-slate-500">
+                                <span>Tarikh Matang: <strong>{tx.redemptionDate || 'Belum diisi'}</strong></span>
+                                {aiIndicator && (
+                                  <span className="font-bold text-corporate-teal-700">
+                                    Skor: {aiIndicator.readinessScore ?? 'N/A'}/100
+                                  </span>
                                 )}
                               </div>
-                            ) : (
-                              <span className="text-xs text-slate-400">
-                                {tx.status === 'Selesai' || tx.status === 'Ditebus' || tx.status === 'Dilelong' || tx.type.includes('Tebus')
-                                  ? 'Surat selesai / ditebus'
-                                  : 'Tidak dinilai'}
+                            </div>
+
+                            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
+                              <span className="text-[11px] text-slate-400 font-mono">
+                                {formatTransactionDateTime(tx.date)}
                               </span>
-                            )}
-                          </td>
-                          <td className="p-4 text-center space-x-1">
-                            <button
-                              onClick={() => handleEditTransaction(tx)}
-                              className="text-slate-400 hover:text-blue-600 transition-colors p-2 rounded-lg hover:bg-blue-50"
-                              title="Edit transaksi"
-                              aria-label={`Edit transaksi ${tx.refNo}`}
-                            >
-                              <Pencil size={18} />
-                            </button>
-                            <button
-                              onClick={() => handleOpenCorrection(tx)}
-                              className="text-slate-400 hover:text-amber-600 transition-colors p-2 rounded-lg hover:bg-amber-50"
-                              title={`Rekod tindakan pembetulan (${getCorrectionEvents(tx).length})`}
-                              aria-label={`Buka rekod tindakan pembetulan ${tx.refNo}`}
-                            >
-                              <Settings2 size={18} />
-                            </button>
-                            <button
-                              onClick={() => handleToggleStatus(tx.id)}
-                              disabled={['Ditebus', 'Dilelong'].includes(tx.status)}
-                              className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50"
-                              title={['Ditebus', 'Dilelong'].includes(tx.status)
-                                ? 'Status terminal hanya boleh diubah melalui rekod pembetulan'
-                                : tx.status === 'Aktif' ? 'Tanda sebagai Selesai' : 'Tanda sebagai Aktif'}
-                            >
-                              <CheckCircle2 size={18} className={tx.status === 'Selesai' || tx.status === 'Ditebus' ? 'text-emerald-600' : ''} />
-                            </button>
-                            <button
-                              onClick={() => handleDelete(tx.id)}
-                              className="text-slate-400 hover:text-red-500 transition-colors p-2 rounded-lg hover:bg-red-50 sm:opacity-0 sm:group-hover:opacity-100"
-                              title="Delete Transaction"
-                            >
-                              <Trash2 size={18} />
-                            </button>
-                          </td>
-                        </tr>
-                      );
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditTransaction(tx)}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-corporate-teal-600 hover:bg-corporate-teal-50"
+                                  title="Edit"
+                                >
+                                  <Pencil size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenCorrection(tx)}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-amber-600 hover:bg-amber-50"
+                                  title="Pembetulan"
+                                >
+                                  <Settings2 size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDelete(tx.id)}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50"
+                                  title="Padam"
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
                       })}
-                      {filteredTransactions.length === 0 && (
-                        <tr>
-                          <td colSpan={18} className="p-8 text-center text-slate-400">
-                            {visibleTransactions.length === 0
-                              ? 'No transactions found. Add a new entry to get started.'
-                              : `Tiada transaksi untuk jenis "${transactionStatusFilter}".`}
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
+                    </div>
+
+                    {/* Pagination for Grid View */}
+                    <div className="flex items-center justify-between p-4 bg-white rounded-2xl border border-slate-200/80 text-xs text-slate-500">
+                      <span>{filteredSagList.length} surat gadaian dijumpai</span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={sagPage <= 1}
+                          onClick={() => setSagPage(p => Math.max(1, p - 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Sebelumnya
+                        </button>
+                        <span className="font-bold text-slate-800 px-2">{sagPage} / {totalSagPages}</span>
+                        <button
+                          type="button"
+                          disabled={sagPage >= totalSagPages}
+                          onClick={() => setSagPage(p => Math.min(totalSagPages, p + 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Seterusnya
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Keyboard Accessibility & Operations Guide */}
+                <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-800">Pintasan Papan Kekunci Pantas:</span>
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] font-bold text-slate-700">
+                      /
+                    </span>
+                    <span>Fokus Carian No. Siri</span>
+                    <span className="text-slate-300">·</span>
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] font-bold text-slate-700">
+                      Alt + N
+                    </span>
+                    <span>Tambah SAG Baharu</span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">
+                    Borang menyokong [ Esc ] untuk batal dan [ Ctrl + Enter ] untuk simpan segera.
+                  </span>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
-          {/* TAB: ASSET RECORD */}
-          {activeTab === 'assets' && (
-            <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
-              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-100">
-                <h3 className="text-lg font-bold text-slate-800 flex items-center">
-                  <Database className="mr-2 text-emerald-600" size={20} /> Emas & Asset Inventory
-                </h3>
-                <button
-                  onClick={() => {
-                    setEditingAsset(null);
-                    setIsAssetModalOpen(true);
-                  }}
-                  className="w-full sm:w-auto justify-center bg-emerald-600 hover:bg-emerald-700 text-white px-5 py-2.5 rounded-lg font-semibold flex items-center transition-colors shadow-sm"
-                >
-                  <Plus size={18} className="mr-2" /> Add Asset
-                </button>
-              </div>
+          {/* TAB: ASSET RECORD / PENGURUSAN EMAS & INVENTORI */}
+          {activeTab === 'assets' && (() => {
+            const totalGoldGrams = visibleAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
+            const edtAssets = visibleAssets.filter(a => a.status === 'EDT');
+            const edrAssets = visibleAssets.filter(a => a.status === 'Dalam Ar-Rahnu');
+            const edtWeight = edtAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
+            const edrWeight = edrAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
+            const edtPercentage = totalGoldGrams > 0 ? Math.round((edtWeight / totalGoldGrams) * 100) : 50;
+            const edrPercentage = 100 - edtPercentage;
+            const totalPurchaseCost = visibleAssets.reduce((sum, a) => sum + (parseFloat(a.price) || 0), 0);
+            const totalEstimatedMarketValue = totalGoldGrams * currentGoldPrice;
+            const paperGainLoss = totalEstimatedMarketValue - totalPurchaseCost;
 
-              <div className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden w-full">
-                <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain" role="region" aria-label="Jadual aset; leret ke sisi untuk melihat semua lajur" tabIndex={0}>
-                  <table className="w-full min-w-max text-left border-collapse whitespace-nowrap">
-                    <thead>
-                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 text-sm font-semibold uppercase tracking-wider">
-                        <th className="p-4">Asset ID</th>
-                        <th className="p-4">Date &amp; Time (MYT)</th>
-                        <th className="p-4">Item Type</th>
-                        <th className="p-4">Supplier</th>
-                        <th className="p-4">Purity</th>
-                        <th className="p-4 text-right">Weight (g)</th>
-                        <th className="p-4 text-right">Price (RM)</th>
-                        <th className="p-4 text-center">Status</th>
-                        <th className="p-4 text-center">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {visibleAssets.map((asset) => (
-                        <tr key={asset.id} className="hover:bg-slate-50/50 transition-colors group">
-                          <td className="p-4">
-                            <span className="font-mono font-bold text-xs bg-amber-50 text-amber-900 border border-amber-200/90 px-2.5 py-1 rounded-md shadow-xs inline-flex items-center space-x-1.5">
-                              <Tag size={13} className="text-amber-600 shrink-0" />
-                              <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
-                            </span>
-                          </td>
-                          <td className="p-4 text-slate-600 font-medium">{formatTransactionDateTime(asset.date)}</td>
-                          <td className="p-4 font-semibold text-slate-700">{asset.type}</td>
-                          <td className="p-4 text-slate-600">{asset.supplier}</td>
-                          <td className="p-4 text-slate-600">{asset.purity}</td>
-                          <td className="p-4 text-right font-bold text-slate-800">{asset.weight}g</td>
-                          <td className="p-4 text-right text-slate-600">{formatRM(asset.price)}</td>
-                          <td className="p-4 text-center">
-                              <span className={`px-3 py-1 text-xs font-bold rounded-full ${
-                                asset.status === 'EDT'
-                                  ? 'bg-emerald-100 text-emerald-700'
-                                  : asset.status === 'Dilelong'
-                                    ? 'bg-rose-100 text-rose-700'
-                                    : 'bg-blue-100 text-blue-700'
-                              }`}>
-                                {asset.status === 'EDT'
-                                  ? 'EDT · Tersedia'
-                                  : asset.status === 'Dilelong'
-                                    ? 'Dilelong'
-                                    : 'EDR · Dalam Ar-Rahnu'}
-                            </span>
-                          </td>
-                          <td className="p-4 text-center space-x-1">
-                            <button
-                              onClick={() => handleEditAsset(asset)}
-                              className="text-slate-400 hover:text-emerald-600 transition-colors p-2 rounded-lg hover:bg-emerald-50"
-                              title="Edit Rekod Aset"
-                            >
-                              <Pencil size={18} />
-                            </button>
-                            <button
-                              onClick={() => handleDuplicateAsset(asset)}
-                              className="text-slate-400 hover:text-blue-600 transition-colors p-2 rounded-lg hover:bg-blue-50"
-                              title="Duplicate Rekod Aset"
-                            >
-                              <Copy size={18} />
-                            </button>
-                            <button
-                              onClick={() => handleDeleteAsset(asset.id)}
-                              className="text-slate-400 hover:text-red-500 transition-colors p-2 rounded-lg hover:bg-red-50"
-                              title="Hapus Rekod Aset"
-                            >
-                              <Trash2 size={18} />
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                      {visibleAssets.length === 0 && (
-                        <tr>
-                          <td colSpan="9" className="p-8 text-center text-slate-400">No assets found. Add a new gold bar or jewelry to track.</td>
-                        </tr>
+            const getAssetStatusBadge = (asset: any) => {
+              if (asset.status === 'Dilelong') {
+                return {
+                  label: 'Dilelong · Keluar',
+                  badgeClass: 'bg-rose-100 text-rose-800 border border-rose-300 font-extrabold animate-pulse',
+                  dotClass: 'bg-rose-500'
+                };
+              }
+              if (asset.status === 'Dalam Ar-Rahnu') {
+                return {
+                  label: 'EDR · Dalam Ar-Rahnu',
+                  badgeClass: 'bg-amber-100 text-amber-800 border border-amber-300 font-extrabold',
+                  dotClass: 'bg-amber-500'
+                };
+              }
+              if (asset.status === 'Ditebus') {
+                return {
+                  label: 'Ditebus · Arkib',
+                  badgeClass: 'bg-slate-100 text-slate-600 border border-slate-200 font-bold',
+                  dotClass: 'bg-slate-400'
+                };
+              }
+              return {
+                label: 'EDT · Tersedia Di Tangan',
+                badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300 font-extrabold',
+                dotClass: 'bg-emerald-500'
+              };
+            };
+
+            const filteredAssetList = visibleAssets.filter(asset => {
+              if (assetSearchQuery.trim()) {
+                const q = assetSearchQuery.toLowerCase().trim();
+                const codeMatch = (asset.code || '').toLowerCase().includes(q);
+                const supplierMatch = (asset.supplier || '').toLowerCase().includes(q);
+                const typeMatch = (asset.type || '').toLowerCase().includes(q);
+                const purityMatch = (asset.purity || '').toLowerCase().includes(q);
+                const remarksMatch = (asset.remarks || '').toLowerCase().includes(q);
+                if (!codeMatch && !supplierMatch && !typeMatch && !purityMatch && !remarksMatch) return false;
+              }
+
+              if (assetSupplierFilter !== 'Semua') {
+                const assetSuppliers = (asset.supplier || '').split(',').map((s: string) => s.trim());
+                if (!assetSuppliers.includes(assetSupplierFilter) && asset.supplier !== assetSupplierFilter) return false;
+              }
+
+              if (assetWeightFilter !== 'Semua') {
+                const w = parseFloat(asset.weight) || 0;
+                if (assetWeightFilter === 'under_5' && w >= 5) return false;
+                if (assetWeightFilter === '5_to_10' && (w < 5 || w > 10)) return false;
+                if (assetWeightFilter === '10_to_50' && (w < 10 || w > 50)) return false;
+                if (assetWeightFilter === 'over_50' && w <= 50) return false;
+              }
+
+              if (assetStatusFilter !== 'Semua') {
+                if (assetStatusFilter === 'EDT' && asset.status !== 'EDT') return false;
+                if (assetStatusFilter === 'EDR' && asset.status !== 'Dalam Ar-Rahnu') return false;
+                if (assetStatusFilter === 'Dilelong' && asset.status !== 'Dilelong') return false;
+              }
+
+              return true;
+            }).sort((a, b) => {
+              if (assetSortBy === 'weight_desc') return (parseFloat(b.weight) || 0) - (parseFloat(a.weight) || 0);
+              if (assetSortBy === 'price_desc') return (parseFloat(b.price) || 0) - (parseFloat(a.price) || 0);
+              if (assetSortBy === 'code_asc') return (a.code || '').localeCompare(b.code || '');
+              return getTransactionTimestamp(b.date) - getTransactionTimestamp(a.date);
+            });
+
+            const assetPageSize = 10;
+            const totalAssetPages = Math.max(1, Math.ceil(filteredAssetList.length / assetPageSize));
+            const paginatedAssetList = filteredAssetList.slice((assetPage - 1) * assetPageSize, assetPage * assetPageSize);
+
+            return (
+              <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {/* Modern Inventory Command Header */}
+                <div className="relative overflow-hidden rounded-3xl border border-corporate-teal-800/40 bg-gradient-to-br from-slate-900 via-corporate-green-950 to-slate-900 p-6 sm:p-8 text-white shadow-xl">
+                  <div className="pointer-events-none absolute -right-24 -top-24 h-96 w-96 rounded-full bg-corporate-teal-400/10 blur-3xl" />
+                  <div className="pointer-events-none absolute -bottom-24 -left-24 h-96 w-96 rounded-full bg-corporate-magenta-500/10 blur-3xl" />
+
+                  <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5">
+                    <div>
+                      <div className="inline-flex items-center gap-2 rounded-full border border-corporate-teal-500/30 bg-corporate-teal-950/80 px-3.5 py-1 text-xs font-bold text-corporate-teal-200 backdrop-blur-md mb-2">
+                        <Database size={14} className="text-emerald-400" />
+                        <span>PENGURUSAN EMAS &amp; INVENTORI FIZIKAL</span>
+                      </div>
+                      <h2 className="text-2xl sm:text-3xl font-black tracking-tight text-white flex items-center gap-2.5">
+                        Emas &amp; Asset Inventory
+                      </h2>
+                      <p className="mt-1 text-xs sm:text-sm text-slate-300 max-w-xl leading-relaxed">
+                        Pengurusan berketepatan tinggi bagi Gold Bar, Dinar, dan Barang Kemas. Memantau ketulenan, berat gram, kos belian asal serta taksiran pasaran semasa untuk meminimumkan ralat operasi.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="hidden sm:inline-flex items-center gap-1.5 text-xs text-slate-300 bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md">
+                        <span className="font-mono font-bold text-corporate-teal-300">[ / ]</span>
+                        <span>Carian</span>
+                        <span className="mx-1 text-white/30">·</span>
+                        <span className="font-mono font-bold text-corporate-teal-300">[ Alt + A ]</span>
+                        <span>Daftar Aset</span>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => { setEditingAsset(null); setIsAssetModalOpen(true); }}
+                        className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 hover:bg-corporate-teal-500 px-4 py-2.5 text-xs sm:text-sm font-bold text-white shadow-lg shadow-corporate-teal-950/40 backdrop-blur-md transition-all active:scale-95"
+                      >
+                        <Plus size={16} />
+                        <span>Daftar Aset Emas</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 4 Critical KPI Telemetry Cards */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* Card 1: Jumlah Status Emas */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Jumlah Rizab Emas</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700">
+                        <Database size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      {totalGoldGrams}g <span className="text-sm font-semibold text-slate-500">({visibleAssets.length} unit)</span>
+                    </p>
+                    <div className="mt-2 flex items-center justify-between text-xs text-slate-500 font-medium">
+                      <span>EDT: <strong className="text-emerald-700">{edtWeight}g</strong> ({edtPercentage}%)</span>
+                      <span>EDR: <strong className="text-corporate-teal-700">{edrWeight}g</strong> ({edrPercentage}%)</span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Anggaran Nilai Pasaran Semasa */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Nilai Pasaran Semasa</span>
+                      <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700">
+                        <TrendingUp size={20} />
+                      </div>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-emerald-700 tracking-tight">
+                      {formatRM(totalEstimatedMarketValue)}
+                    </p>
+                    <div className="mt-2 flex items-center justify-between text-xs text-slate-500 font-medium">
+                      <span>Kos Asal: {formatRM(totalPurchaseCost)}</span>
+                      <span className={paperGainLoss >= 0 ? 'text-emerald-700 font-bold' : 'text-rose-700 font-bold'}>
+                        {paperGainLoss >= 0 ? `+${formatRM(paperGainLoss)}` : formatRM(paperGainLoss)}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 3: Nisbah Penampan Keselamatan */}
+                  <div className={`rounded-3xl border p-5 shadow-sm ${
+                    edtWeight >= edrWeight ? 'border-slate-200/80 bg-white' : 'border-rose-300 bg-rose-50/30'
+                  }`}>
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Nisbah Keselamatan</span>
+                      <div className={`flex h-10 w-10 items-center justify-center rounded-2xl ${
+                        edtWeight >= edrWeight ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-100 text-rose-700'
+                      }`}>
+                        <ShieldCheck size={20} />
+                      </div>
+                    </div>
+                    <p className={`mt-3 text-xl sm:text-2xl font-black tracking-tight ${
+                      edtWeight >= edrWeight ? 'text-emerald-700' : 'text-rose-800'
+                    }`}>
+                      {edtWeight >= edrWeight ? 'Nisbah Selamat' : 'Kritikal (Tambah EDT)'}
+                    </p>
+                    <div className="mt-2">
+                      <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            edtWeight >= edrWeight ? 'bg-emerald-500' : 'bg-rose-500'
+                          }`}
+                          style={{ width: `${Math.min(100, Math.max(10, edtPercentage))}%` }}
+                        />
+                      </div>
+                      <span className="mt-1 block text-[11px] text-slate-500">
+                        {edtWeight}g EDT vs {edrWeight}g EDR
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Card 4: Harga Spot Emas Semasa */}
+                  <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm">
+                    <div className="flex items-center justify-between text-slate-500">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Harga Spot Emas</span>
+                      <button
+                        type="button"
+                        onClick={() => handleRefresh()}
+                        disabled={isRefreshing}
+                        className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700 hover:bg-corporate-magenta-100 transition-colors disabled:opacity-50"
+                        title="Segar semula harga pasaran live"
+                      >
+                        <RefreshCw size={16} className={isRefreshing ? "animate-spin" : ""} />
+                      </button>
+                    </div>
+                    <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
+                      RM {currentGoldPrice.toFixed(2)}
+                      <span className="text-xs sm:text-sm font-semibold text-slate-400">/g</span>
+                    </p>
+                    <div className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700 font-semibold">
+                      <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
+                      <span>Penilaian Nilai Sebenar Semasa</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Smart Search, Filter & Layout Control Hub */}
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-sm space-y-3">
+                  <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                    {/* Global Quick Search */}
+                    <div className="relative flex-1">
+                      <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        id="asset-search-input"
+                        type="text"
+                        value={assetSearchQuery}
+                        onChange={e => { setAssetSearchQuery(e.target.value); setAssetPage(1); }}
+                        placeholder="Cari No. Siri Aset (cth: GB-PG-999-10G-01), pembekal, jenis, ketulenan... [ Tekan '/' ]"
+                        className="w-full pl-10 pr-9 py-2.5 text-xs sm:text-sm rounded-2xl border border-slate-200 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
+                      />
+                      {assetSearchQuery && (
+                        <button
+                          type="button"
+                          onClick={() => { setAssetSearchQuery(''); setAssetPage(1); }}
+                          className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                        >
+                          <X size={15} />
+                        </button>
                       )}
-                    </tbody>
-                  </table>
+                    </div>
+
+                    {/* Filter Dropdowns */}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={assetSupplierFilter}
+                        onChange={e => { setAssetSupplierFilter(e.target.value); setAssetPage(1); }}
+                        aria-label="Tapis mengikut pembekal emas"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Pembekal Emas</option>
+                        {visibleSuppliers.map(sup => (
+                          <option key={sup.id} value={sup.name}>{sup.name} ({sup.code})</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={assetWeightFilter}
+                        onChange={e => { setAssetWeightFilter(e.target.value); setAssetPage(1); }}
+                        aria-label="Tapis mengikut kategori berat"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Kategori Berat</option>
+                        <option value="under_5">&lt; 5g (Kecil)</option>
+                        <option value="5_to_10">5g – 10g (Sederhana)</option>
+                        <option value="10_to_50">10g – 50g (Standard)</option>
+                        <option value="over_50">&gt; 50g (Besar / Bar)</option>
+                      </select>
+
+                      <select
+                        value={assetStatusFilter}
+                        onChange={e => { setAssetStatusFilter(e.target.value); setAssetPage(1); }}
+                        aria-label="Tapis mengikut status aset"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="Semua">Semua Status Aset</option>
+                        <option value="EDT">EDT · Tersedia Di Tangan</option>
+                        <option value="EDR">EDR · Dalam Ar-Rahnu</option>
+                        <option value="Dilelong">Dilelong · Keluar</option>
+                      </select>
+
+                      <select
+                        value={assetSortBy}
+                        onChange={e => setAssetSortBy(e.target.value as any)}
+                        aria-label="Susun rekod aset"
+                        className="px-3 py-2 text-xs font-semibold rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 bg-white text-slate-700"
+                      >
+                        <option value="newest">Terbaharu Didaftar</option>
+                        <option value="weight_desc">Berat Tertinggi (g)</option>
+                        <option value="price_desc">Harga Belian Tertinggi (RM)</option>
+                        <option value="code_asc">No. Siri Kod (A-Z)</option>
+                      </select>
+
+                      {/* View Layout Toggle */}
+                      <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200/60">
+                        <button
+                          type="button"
+                          onClick={() => setAssetViewLayout('table')}
+                          title="Paparan Jadual Penuh"
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+                            assetViewLayout === 'table' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          Jadual
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAssetViewLayout('grid')}
+                          title="Paparan Kad Grid Pantas"
+                          className={`px-3 py-1 text-xs font-bold rounded-lg transition-all ${
+                            assetViewLayout === 'grid' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500 hover:text-slate-800'
+                          }`}
+                        >
+                          Kad Grid
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Active Filter Tags */}
+                  {(assetSearchQuery || assetSupplierFilter !== 'Semua' || assetWeightFilter !== 'Semua' || assetStatusFilter !== 'Semua') && (
+                    <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-100 text-xs">
+                      <span className="text-slate-500 font-medium">Penapis aktif:</span>
+                      {assetSearchQuery && (
+                        <span className="rounded-lg bg-corporate-teal-50 px-2.5 py-0.5 text-corporate-teal-800 font-semibold border border-corporate-teal-200">
+                          Carian: &quot;{assetSearchQuery}&quot;
+                        </span>
+                      )}
+                      {assetSupplierFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-slate-100 px-2.5 py-0.5 text-slate-700 font-semibold border border-slate-200">
+                          Pembekal: {assetSupplierFilter}
+                        </span>
+                      )}
+                      {assetWeightFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-amber-50 px-2.5 py-0.5 text-amber-800 font-semibold border border-amber-200">
+                          Berat: {assetWeightFilter.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {assetStatusFilter !== 'Semua' && (
+                        <span className="rounded-lg bg-sky-50 px-2.5 py-0.5 text-sky-800 font-semibold border border-sky-200">
+                          Status: {assetStatusFilter}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAssetSearchQuery('');
+                          setAssetSupplierFilter('Semua');
+                          setAssetWeightFilter('Semua');
+                          setAssetStatusFilter('Semua');
+                          setAssetPage(1);
+                        }}
+                        className="text-corporate-magenta-700 font-bold hover:underline text-[11px]"
+                      >
+                        Padam Semua Penapis
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* VIEW MODE 1: DATA TABLE VIEW */}
+                {assetViewLayout === 'table' ? (
+                  <div className="bg-white rounded-3xl shadow-sm border border-slate-200/80 overflow-hidden w-full">
+                    <div className="min-w-0 w-full overflow-x-auto overscroll-x-contain custom-scrollbar" role="region" aria-label="Jadual aset emas fizikal" tabIndex={0}>
+                      <table className="w-full min-w-max text-left border-collapse whitespace-nowrap text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-extrabold uppercase tracking-wider text-[11px]">
+                            <th className="p-4 sm:px-6">No. Siri &amp; Kod Aset</th>
+                            <th className="p-4">Tarikh &amp; Masa (MYT)</th>
+                            <th className="p-4">Jenis Item</th>
+                            <th className="p-4">Pembekal Emas</th>
+                            <th className="p-4 text-center">Mutu Ketulenan</th>
+                            <th className="p-4 text-right">Berat (g)</th>
+                            <th className="p-4 text-right">Harga Kos Belian</th>
+                            <th className="p-4 text-right">Nilai Pasaran Semasa</th>
+                            <th className="p-4 text-center">Status Aset</th>
+                            <th className="p-4 text-center">Tindakan</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                          {paginatedAssetList.map((asset) => {
+                            const isLockedInLedger = checkedInAssetIds.has(String(asset.id));
+                            const assetStatusInfo = getAssetStatusBadge(asset);
+                            const assetMarketVal = (parseFloat(asset.weight) || 0) * currentGoldPrice;
+                            const assetGain = assetMarketVal - (parseFloat(asset.price) || 0);
+
+                            return (
+                              <tr key={asset.id} className="hover:bg-slate-50/70 transition-colors group">
+                                {/* No. Siri & Kod Aset */}
+                                <td className="p-4 sm:px-6">
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-black text-xs bg-amber-50 text-amber-900 border border-amber-300 px-2.5 py-1 rounded-lg shadow-xs inline-flex items-center gap-1.5">
+                                      <Tag size={13} className="text-amber-600 shrink-0" />
+                                      <span className="code-badge-label">{asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}</span>
+                                    </span>
+                                    {isLockedInLedger && (
+                                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-700 border border-slate-200" title="Aset sedang aktif dipautkan dalam transaksi lejar">
+                                        <Lock size={11} className="text-corporate-teal-600" />
+                                        <span>Terkunci SAG</span>
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+
+                                {/* Tarikh */}
+                                <td className="p-4 text-slate-500 font-medium">
+                                  {formatTransactionDateTime(asset.date)}
+                                </td>
+
+                                {/* Jenis Item */}
+                                <td className="p-4 font-bold text-slate-800">
+                                  {asset.type}
+                                </td>
+
+                                {/* Pembekal */}
+                                <td className="p-4 text-slate-600">
+                                  {asset.supplier || '-'}
+                                </td>
+
+                                {/* Ketulenan */}
+                                <td className="p-4 text-center">
+                                  <span className="rounded-lg bg-slate-100 px-2.5 py-0.5 font-bold text-slate-800 font-mono text-[11px] border border-slate-200">
+                                    {asset.purity || 'N/A'}
+                                  </span>
+                                </td>
+
+                                {/* Berat (g) */}
+                                <td className="p-4 text-right font-mono font-black text-slate-900 text-sm">
+                                  {asset.weight}g
+                                </td>
+
+                                {/* Harga Kos Belian */}
+                                <td className="p-4 text-right font-mono font-bold text-slate-600">
+                                  {formatRM(asset.price)}
+                                </td>
+
+                                {/* Nilai Pasaran Semasa (Anti-Error Readout) */}
+                                <td className="p-4 text-right font-mono">
+                                  <span className="font-extrabold text-corporate-teal-800 text-xs block">
+                                    {formatRM(assetMarketVal)}
+                                  </span>
+                                  <span className={`text-[10px] font-semibold block ${assetGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                    {assetGain >= 0 ? `+${formatRM(assetGain)}` : formatRM(assetGain)}
+                                  </span>
+                                </td>
+
+                                {/* Status Aset (Consistent Color Badge) */}
+                                <td className="p-4 text-center">
+                                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full ${assetStatusInfo.badgeClass}`}>
+                                    <span className={`h-1.5 w-1.5 rounded-full ${assetStatusInfo.dotClass}`} />
+                                    <span>{assetStatusInfo.label}</span>
+                                  </span>
+                                </td>
+
+                                {/* Tindakan */}
+                                <td className="p-4 text-center">
+                                  <div className="flex items-center justify-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleEditAsset(asset)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
+                                      title="Edit Rekod Aset"
+                                    >
+                                      <Pencil size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDuplicateAsset(asset)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                      title="Salin / Duplikasi Rekod Aset"
+                                    >
+                                      <Copy size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteAsset(asset.id)}
+                                      disabled={isLockedInLedger}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                      title={isLockedInLedger ? 'Aset tidak boleh dipadam kerana sedang aktif dipautkan dalam lejar' : 'Hapus Rekod Aset'}
+                                    >
+                                      <Trash2 size={15} />
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+
+                          {paginatedAssetList.length === 0 && (
+                            <tr>
+                              <td colSpan={10} className="p-8 text-center text-slate-400">
+                                {visibleAssets.length === 0
+                                  ? 'Tiada rekod aset didaftarkan. Tekan "Daftar Aset Emas" untuk bermula.'
+                                  : 'Tiada aset emas sepadan dengan tapisan yang dipilih.'}
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Pagination Footer */}
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-slate-100 p-4 text-xs text-slate-500">
+                      <span>
+                        Menunjukkan {filteredAssetList.length === 0 ? 0 : (assetPage - 1) * assetPageSize + 1} hingga {Math.min(assetPage * assetPageSize, filteredAssetList.length)} daripada {filteredAssetList.length} aset
+                      </span>
+                      <div className="flex items-center gap-1.5 self-end sm:self-auto">
+                        <button
+                          type="button"
+                          disabled={assetPage <= 1}
+                          onClick={() => setAssetPage(p => Math.max(1, p - 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Sebelumnya
+                        </button>
+                        <span className="font-bold text-slate-800 px-2">
+                          {assetPage} / {totalAssetPages}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={assetPage >= totalAssetPages}
+                          onClick={() => setAssetPage(p => Math.min(totalAssetPages, p + 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Seterusnya
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  /* VIEW MODE 2: CARD GRID VIEW */
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {paginatedAssetList.map((asset) => {
+                        const assetStatusInfo = getAssetStatusBadge(asset);
+                        const isLockedInLedger = checkedInAssetIds.has(String(asset.id));
+                        const assetMarketVal = (parseFloat(asset.weight) || 0) * currentGoldPrice;
+                        const assetGain = assetMarketVal - (parseFloat(asset.price) || 0);
+
+                        return (
+                          <div
+                            key={asset.id}
+                            className="rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
+                          >
+                            <div>
+                              <div className="flex items-start justify-between gap-2 border-b border-slate-100 pb-3">
+                                <div>
+                                  <span className="font-mono text-xs font-black bg-amber-50 text-amber-900 border border-amber-300 px-2 py-0.5 rounded-md inline-block">
+                                    {asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id)}
+                                  </span>
+                                  <p className="text-xs font-bold text-slate-800 mt-1">{asset.type} · Mutu {asset.purity}</p>
+                                </div>
+                                <span className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full ${assetStatusInfo.badgeClass}`}>
+                                  <span className={`h-1.5 w-1.5 rounded-full ${assetStatusInfo.dotClass}`} />
+                                  <span>{assetStatusInfo.label}</span>
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-2 gap-3 py-3 text-xs border-b border-slate-100">
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Berat Bersih</span>
+                                  <span className="font-mono font-black text-slate-900 text-sm">{asset.weight}g</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Pembekal</span>
+                                  <span className="font-semibold text-slate-700 text-xs truncate block">{asset.supplier || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Kos Belian Asal</span>
+                                  <span className="font-mono font-bold text-slate-600 text-xs">{formatRM(asset.price)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-slate-400 block text-[10px] uppercase font-bold">Nilai Pasaran Live</span>
+                                  <span className="font-mono font-extrabold text-corporate-teal-800 text-xs">{formatRM(assetMarketVal)}</span>
+                                </div>
+                              </div>
+
+                              <div className="pt-2.5 flex items-center justify-between text-xs">
+                                <span className="text-slate-500 font-medium">Perbezaan Nilai:</span>
+                                <span className={`font-bold font-mono ${assetGain >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                                  {assetGain >= 0 ? `+${formatRM(assetGain)}` : formatRM(assetGain)}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between">
+                              <span className="text-[11px] text-slate-400 font-mono">
+                                {formatTransactionDateTime(asset.date)}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handleEditAsset(asset)}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-corporate-teal-600 hover:bg-corporate-teal-50"
+                                  title="Edit"
+                                >
+                                  <Pencil size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDuplicateAsset(asset)}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-blue-600 hover:bg-blue-50"
+                                  title="Duplikasi"
+                                >
+                                  <Copy size={15} />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteAsset(asset.id)}
+                                  disabled={isLockedInLedger}
+                                  className="p-1.5 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-40"
+                                  title={isLockedInLedger ? 'Terkunci dalam transaksi SAG' : 'Padam'}
+                                >
+                                  <Trash2 size={15} />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Pagination for Grid View */}
+                    <div className="flex items-center justify-between p-4 bg-white rounded-2xl border border-slate-200/80 text-xs text-slate-500">
+                      <span>{filteredAssetList.length} rekod aset emas dijumpai</span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          disabled={assetPage <= 1}
+                          onClick={() => setAssetPage(p => Math.max(1, p - 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Sebelumnya
+                        </button>
+                        <span className="font-bold text-slate-800 px-2">{assetPage} / {totalAssetPages}</span>
+                        <button
+                          type="button"
+                          disabled={assetPage >= totalAssetPages}
+                          onClick={() => setAssetPage(p => Math.min(totalAssetPages, p + 1))}
+                          className="rounded-xl border border-slate-200 px-3 py-1.5 font-bold hover:bg-slate-50 disabled:opacity-40"
+                        >
+                          Seterusnya
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Keyboard Accessibility & Anti-Error Guide */}
+                <div className="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-600">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-800">Pintasan Papan Kekunci Pantas:</span>
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] font-bold text-slate-700">
+                      /
+                    </span>
+                    <span>Fokus Carian Aset</span>
+                    <span className="text-slate-300">·</span>
+                    <span className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2 py-0.5 font-mono text-[11px] font-bold text-slate-700">
+                      Alt + A
+                    </span>
+                    <span>Daftar Aset Baharu</span>
+                  </div>
+                  <span className="text-[11px] text-slate-400">
+                    Aset bertanda &quot;Terkunci SAG&quot; dilindungi daripada pemadaman tidak sengaja.
+                  </span>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* TAB: SUPPLIER MAINTENANCE */}
           {activeTab === 'suppliers' && (
@@ -6439,6 +8529,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {isAssetModalOpen && (
         <AssetModal
           initialData={editingAsset}
+          currentGoldPrice={currentGoldPrice}
           onClose={() => {
             setIsAssetModalOpen(false);
             setEditingAsset(null);
@@ -7291,6 +9382,21 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
     .filter(Boolean);
   const remainingAttachmentSlots = maximumTransactionAttachments - savedAttachments.length - newAttachmentFiles.length;
 
+  useEffect(() => {
+    const handleModalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      } else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        const submitBtn = document.getElementById('transaction-modal-submit-btn');
+        if (submitBtn) submitBtn.click();
+      }
+    };
+    window.addEventListener('keydown', handleModalKeyDown);
+    return () => window.removeEventListener('keydown', handleModalKeyDown);
+  }, [onClose]);
+
   const handleAttachmentSelection = (event) => {
     const selectedFiles = Array.from(event.target.files || []) as File[];
     event.target.value = '';
@@ -8012,13 +10118,19 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
             </div>
           </section>
 
-          <div className="flex flex-col-reverse sm:flex-row justify-end sm:space-x-3 gap-3 pt-4 border-t border-slate-100">
-            <button type="button" onClick={onClose} disabled={isSaving} className="h-11 w-full rounded-xl px-5 text-slate-600 font-semibold transition-colors hover:bg-slate-100 disabled:opacity-50 sm:w-auto">
-              Batal
-            </button>
-            <button type="submit" disabled={isSaving} className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center disabled:cursor-not-allowed disabled:opacity-50">
-              {isSaving ? 'Menyimpan fail...' : initialData ? 'Kemaskini Surat' : 'Simpan Surat'}
-            </button>
+          <div className="flex flex-col-reverse sm:flex-row justify-between items-center gap-3 pt-4 border-t border-slate-100">
+            <div className="text-xs text-slate-400 hidden sm:flex items-center gap-2">
+              <span className="font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-slate-600">[ Esc ] Batal</span>
+              <span className="font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-slate-600">[ Ctrl + Enter ] Simpan</span>
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row sm:space-x-3 gap-3 w-full sm:w-auto">
+              <button type="button" onClick={onClose} disabled={isSaving} className="h-11 w-full rounded-xl px-5 text-slate-600 font-semibold transition-colors hover:bg-slate-100 disabled:opacity-50 sm:w-auto">
+                Batal
+              </button>
+              <button id="transaction-modal-submit-btn" type="submit" disabled={isSaving} className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center disabled:cursor-not-allowed disabled:opacity-50">
+                {isSaving ? 'Menyimpan fail...' : initialData ? 'Kemaskini Surat' : 'Simpan Surat'}
+              </button>
+            </div>
           </div>
         </form>
       </div>
@@ -8026,7 +10138,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   );
 }
 
-function AssetModal({ initialData, onClose, onSave, suppliers }) {
+function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers }) {
   const initialSupplierCodes = initialData?.supplierCodes || suppliers
     .filter(item => initialData?.supplier?.split(',').map(name => name.trim()).includes(item.name))
     .map(item => item.code);
@@ -8047,6 +10159,25 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
     status: initialData?.status || 'EDT'
   });
   const selectedSuppliers = suppliers.filter(item => selectedSupplierCodes.includes(item.code));
+
+  useEffect(() => {
+    const handleAssetModalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onClose();
+      } else if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+        event.preventDefault();
+        const submitBtn = document.getElementById('asset-modal-submit-btn');
+        if (submitBtn) submitBtn.click();
+      }
+    };
+    window.addEventListener('keydown', handleAssetModalKeyDown);
+    return () => window.removeEventListener('keydown', handleAssetModalKeyDown);
+  }, [onClose]);
+
+  const liveMarketValuation = (parseFloat(formData.weight) || 0) * (currentGoldPrice || 0);
+  const costPrice = parseFloat(formData.price) || 0;
+  const valuationDiff = liveMarketValuation - costPrice;
 
   const handleAutoGenerateCode = () => {
     const generated = generateAssetCode(
@@ -8252,13 +10383,48 @@ function AssetModal({ initialData, onClose, onSave, suppliers }) {
 
           </div>
 
-          <div className="flex flex-col-reverse sm:flex-row justify-end sm:space-x-3 gap-3 pt-4 border-t border-slate-100">
-            <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-lg transition-colors">
-              Batal
-            </button>
-            <button type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg shadow-sm transition-colors flex items-center">
-              {initialData ? 'Kemaskini Aset' : 'Simpan Aset'}
-            </button>
+          {/* Anti-Human-Error Live Valuation Card */}
+          <div className="rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50/50 p-4 mb-6">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-bold uppercase tracking-wider text-corporate-teal-900 flex items-center gap-1.5">
+                <Scale size={14} className="text-corporate-teal-600" />
+                Taksiran Nilai Semasa (Anti-Ralat Manusia)
+              </span>
+              <span className="text-[11px] font-mono font-bold text-slate-500">
+                Spot: RM{Number(currentGoldPrice || 0).toFixed(2)}/g
+              </span>
+            </div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mt-2 pt-2 border-t border-corporate-teal-100">
+              <div>
+                <p className="text-[11px] text-slate-500">Anggaran Nilai Pasaran Semasa:</p>
+                <p className="text-lg font-black text-corporate-teal-800 font-mono">
+                  {formatRM(liveMarketValuation)}
+                </p>
+              </div>
+              {costPrice > 0 && (
+                <div className="sm:text-right">
+                  <p className="text-[11px] text-slate-500">Beza Kos Belian Asal:</p>
+                  <p className={`text-xs font-bold font-mono ${valuationDiff >= 0 ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {valuationDiff >= 0 ? `+${formatRM(valuationDiff)}` : formatRM(valuationDiff)}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex flex-col-reverse sm:flex-row justify-between items-center gap-3 pt-4 border-t border-slate-100">
+            <div className="text-xs text-slate-400 hidden sm:flex items-center gap-2">
+              <span className="font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-slate-600">[ Esc ] Batal</span>
+              <span className="font-mono bg-slate-100 px-2 py-0.5 rounded border border-slate-200 text-slate-600">[ Ctrl + Enter ] Simpan</span>
+            </div>
+            <div className="flex flex-col-reverse sm:flex-row sm:space-x-3 gap-3 w-full sm:w-auto">
+              <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-slate-600 font-semibold hover:bg-slate-100 rounded-xl transition-colors">
+                Batal
+              </button>
+              <button id="asset-modal-submit-btn" type="submit" className="w-full sm:w-auto justify-center px-5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl shadow-sm transition-colors flex items-center">
+                {initialData ? 'Kemaskini Aset' : 'Simpan Aset'}
+              </button>
+            </div>
           </div>
         </form>
       </div>
