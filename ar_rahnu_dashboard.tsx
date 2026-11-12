@@ -9736,7 +9736,7 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
                       </div>
                       <div>
                         <p className={`text-[10px] font-bold uppercase tracking-wide ${secondaryTextClass}`}>Nombor Kad Pengenalan</p>
-                        <p className="font-mono text-sm font-semibold">{icNumber || 'Belum didaftarkan'}</p>
+                        <p className="font-mono text-sm font-semibold">{icNumber ? maskIcNumber(icNumber) : 'Belum didaftarkan'}</p>
                       </div>
                     </div>
                     <button
