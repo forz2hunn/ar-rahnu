@@ -16,36 +16,24 @@ create table if not exists public.ar_rahnu_audit_events (
 create index if not exists ar_rahnu_audit_events_scope_created
   on public.ar_rahnu_audit_events (chain_scope, created_at desc);
 
--- Kolum terjana: membolehkan senarai/RLS dibaca tanpa menyahmampat
+-- Kolum ringkasan: membolehkan senarai/RLS dibaca tanpa menyahmampat
 -- event_payload (payload sebelum/selepas boleh bersaiz megabait bagi peristiwa
 -- lama). Ini mengelakkan "canceling statement due to statement timeout".
+-- Nilainya diisi oleh trigger ar_rahnu_audit_events_summary.
 alter table public.ar_rahnu_audit_events
-  add column if not exists organization_id uuid
-    generated always as (nullif(event_payload ->> 'organization_id', '')::uuid) stored,
-  add column if not exists occurred_at_utc text
-    generated always as (event_payload ->> 'occurred_at_utc') stored,
-  add column if not exists actor_user_id uuid
-    generated always as (nullif(event_payload ->> 'actor_user_id', '')::uuid) stored,
-  add column if not exists actor_email text
-    generated always as (event_payload ->> 'actor_email') stored,
-  add column if not exists actor_display_name text
-    generated always as (event_payload ->> 'actor_display_name') stored,
-  add column if not exists action text
-    generated always as (event_payload ->> 'action') stored,
-  add column if not exists resource_type text
-    generated always as (event_payload ->> 'resource_type') stored,
-  add column if not exists resource_id text
-    generated always as (event_payload ->> 'resource_id') stored,
-  add column if not exists source_module text
-    generated always as (event_payload ->> 'source_module') stored,
-  add column if not exists context jsonb
-    generated always as (coalesce(event_payload -> 'context', '{}'::jsonb)) stored,
-  add column if not exists source_ip text
-    generated always as (event_payload ->> 'source_ip') stored,
-  add column if not exists user_agent text
-    generated always as (event_payload ->> 'user_agent') stored,
-  add column if not exists session_id text
-    generated always as (event_payload ->> 'session_id') stored;
+  add column if not exists organization_id uuid,
+  add column if not exists occurred_at_utc text,
+  add column if not exists actor_user_id uuid,
+  add column if not exists actor_email text,
+  add column if not exists actor_display_name text,
+  add column if not exists action text,
+  add column if not exists resource_type text,
+  add column if not exists resource_id text,
+  add column if not exists source_module text,
+  add column if not exists context jsonb,
+  add column if not exists source_ip text,
+  add column if not exists user_agent text,
+  add column if not exists session_id text;
 
 create or replace function public.ar_rahnu_collection_records(p_data jsonb, p_collection text)
 returns jsonb
@@ -87,6 +75,10 @@ language plpgsql
 set search_path = pg_catalog, public
 as $$
 begin
+  if tg_op = 'DELETE'
+     and current_setting('ar_rahnu.audit_retention', true) = 'on' then
+    return old;
+  end if;
   raise exception 'Audit events are append-only.';
 end;
 $$;
@@ -622,5 +614,132 @@ $$;
 
 revoke all on function public.ar_rahnu_record_activity(text, text, text, text, jsonb) from public, anon;
 grant execute on function public.ar_rahnu_record_activity(text, text, text, text, jsonb) to authenticated;
+
+-- Isi kolum ringkasan pada setiap peristiwa baharu supaya senarai audit tidak
+-- perlu menyahmampat event_payload.
+create or replace function public.ar_rahnu_set_audit_summary()
+returns trigger
+language plpgsql
+set search_path = pg_catalog
+as $$
+begin
+  new.organization_id := nullif(new.event_payload ->> 'organization_id', '')::uuid;
+  new.occurred_at_utc := new.event_payload ->> 'occurred_at_utc';
+  new.actor_user_id := nullif(new.event_payload ->> 'actor_user_id', '')::uuid;
+  new.actor_email := new.event_payload ->> 'actor_email';
+  new.actor_display_name := new.event_payload ->> 'actor_display_name';
+  new.action := new.event_payload ->> 'action';
+  new.resource_type := new.event_payload ->> 'resource_type';
+  new.resource_id := new.event_payload ->> 'resource_id';
+  new.source_module := new.event_payload ->> 'source_module';
+  new.context := coalesce(new.event_payload -> 'context', '{}'::jsonb);
+  new.source_ip := new.event_payload ->> 'source_ip';
+  new.user_agent := new.event_payload ->> 'user_agent';
+  new.session_id := new.event_payload ->> 'session_id';
+  return new;
+end;
+$$;
+
+revoke all on function public.ar_rahnu_set_audit_summary() from public, anon, authenticated;
+
+drop trigger if exists ar_rahnu_audit_events_summary on public.ar_rahnu_audit_events;
+create trigger ar_rahnu_audit_events_summary
+  before insert on public.ar_rahnu_audit_events
+  for each row execute function public.ar_rahnu_set_audit_summary();
+
+-- Backfill sekali untuk peristiwa sedia ada, dalam kelompok kecil supaya
+-- statement tidak tamat masa walaupun rantaian sudah panjang.
+alter table public.ar_rahnu_audit_events disable trigger ar_rahnu_audit_events_immutable;
+do $$
+declare
+  v_batch_start bigint := 0;
+  v_max_sequence bigint;
+begin
+  select coalesce(max(sequence_no), 0) into v_max_sequence
+  from public.ar_rahnu_audit_events;
+
+  while v_batch_start <= v_max_sequence loop
+    update public.ar_rahnu_audit_events event
+    set organization_id = nullif(event.event_payload ->> 'organization_id', '')::uuid,
+        occurred_at_utc = event.event_payload ->> 'occurred_at_utc',
+        actor_user_id = nullif(event.event_payload ->> 'actor_user_id', '')::uuid,
+        actor_email = event.event_payload ->> 'actor_email',
+        actor_display_name = event.event_payload ->> 'actor_display_name',
+        action = event.event_payload ->> 'action',
+        resource_type = event.event_payload ->> 'resource_type',
+        resource_id = event.event_payload ->> 'resource_id',
+        source_module = event.event_payload ->> 'source_module',
+        context = coalesce(event.event_payload -> 'context', '{}'::jsonb),
+        source_ip = event.event_payload ->> 'source_ip',
+        user_agent = event.event_payload ->> 'user_agent',
+        session_id = event.event_payload ->> 'session_id'
+    where event.sequence_no >= v_batch_start
+      and event.sequence_no < v_batch_start + 200;
+
+    v_batch_start := v_batch_start + 200;
+  end loop;
+end;
+$$;
+alter table public.ar_rahnu_audit_events enable trigger ar_rahnu_audit_events_immutable;
+
+-- Dasar simpanan: peristiwa audit dipadam selepas 24 jam. Pemadaman hanya
+-- dibenarkan melalui fungsi definer ini yang menetapkan bendera sesi untuk
+-- trigger append-only; peranan authenticated masih tidak boleh memadam baris.
+create or replace function public.ar_rahnu_prune_audit_events()
+returns bigint
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_deleted bigint;
+begin
+  perform set_config('ar_rahnu.audit_retention', 'on', true);
+  delete from public.ar_rahnu_audit_events
+  where created_at < clock_timestamp() - interval '24 hours';
+  get diagnostics v_deleted = row_count;
+  perform set_config('ar_rahnu.audit_retention', 'off', true);
+  return v_deleted;
+end;
+$$;
+
+revoke all on function public.ar_rahnu_prune_audit_events() from public, anon;
+grant execute on function public.ar_rahnu_prune_audit_events() to authenticated;
+
+do $$
+declare
+  v_cron_schema text;
+  v_job_id bigint;
+begin
+  begin
+    if not exists (select 1 from pg_extension where extname = 'pg_cron') then
+      execute 'create extension pg_cron';
+    end if;
+
+    select namespace.nspname into v_cron_schema
+      from pg_extension extension
+      join pg_namespace namespace on namespace.oid = extension.extnamespace
+      where extension.extname = 'pg_cron';
+    if v_cron_schema is null then
+      raise exception 'pg_cron schema is unavailable';
+    end if;
+
+    execute format('select jobid from %I.job where jobname = $1 limit 1', v_cron_schema)
+      into v_job_id using 'ar-rahnu-audit-retention';
+    if v_job_id is not null then
+      execute format('select %I.unschedule($1)', v_cron_schema) using v_job_id;
+    end if;
+    execute format(
+      'select %I.schedule($1, $2, $3)',
+      v_cron_schema
+    ) using
+      'ar-rahnu-audit-retention',
+      '*/15 * * * *',
+      'select public.ar_rahnu_prune_audit_events()';
+  exception when others then
+    raise notice 'Could not schedule 24-hour audit retention with pg_cron (%). Run select public.ar_rahnu_prune_audit_events(); manually or enable pg_cron and rerun this migration.', sqlerrm;
+  end;
+end
+$$;
 
 notify pgrst, 'reload schema';

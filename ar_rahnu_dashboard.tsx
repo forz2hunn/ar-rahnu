@@ -46,8 +46,6 @@ import {
   KeyRound,
   UserRound,
   FileSearch,
-  Pause,
-  Play,
   Paperclip,
   Activity,
   BarChart3,
@@ -73,7 +71,7 @@ import {
   PinOff
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
-import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
+import { supabaseClient } from './src/lib/supabase';
 import {
   LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
@@ -260,53 +258,6 @@ const recordOperationLabels: Record<string, string> = {
   CREATE: 'Rekod dicipta',
   UPDATE: 'Rekod dikemas kini',
   DELETE: 'Rekod dipadam'
-};
-type TrafficEvent = {
-  event_id: string;
-  organization_id: string;
-  actor_user_id: string | null;
-  session_id: string | null;
-  captured_at: string;
-  client_ip: string | null;
-  user_agent: string | null;
-  method: string;
-  request_path: string;
-  host: string;
-  status: number;
-  duration_ms: number;
-  request_payload: unknown;
-  response_payload: unknown;
-};
-const matchesTrafficFilter = (event: TrafficEvent, filter: string) => {
-  const terms = filter.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-  return terms.every(term => {
-    const [field, ...valueParts] = term.replace(/^"|"$/g, '').split(':');
-    const value = valueParts.join(':').replace(/^"|"$/g, '').toLowerCase();
-    if (!valueParts.length) {
-      return [
-        event.method,
-        event.request_path,
-        event.host,
-        event.status,
-        event.duration_ms,
-        event.client_ip,
-        event.user_agent
-      ].some(item => String(item || '').toLowerCase().includes(field.toLowerCase()));
-    }
-    if (field.toLowerCase() === 'status' && /^\dxx$/.test(value)) {
-      return Math.floor(event.status / 100) === Number(value[0]);
-    }
-    const values: Record<string, string> = {
-      method: event.method,
-      path: event.request_path,
-      host: event.host,
-      status: String(event.status),
-      ip: event.client_ip || '',
-      duration: String(event.duration_ms),
-      useragent: event.user_agent || ''
-    };
-    return (values[field.toLowerCase()] || '').toLowerCase().includes(value);
-  });
 };
 const normalizeAuditJson = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(normalizeAuditJson);
@@ -627,6 +578,8 @@ const formatAuditFieldList = (fields?: string[] | null): string => {
   const shown = fields.slice(0, 6).join(', ');
   return fields.length > 6 ? `${shown} +${fields.length - 6}` : shown;
 };
+const isMissingAuditSummaryColumnError = (message: string): boolean =>
+  /column .*(occurred_at_utc|actor_email|actor_display_name|source_module|session_id|context|action|resource_type|resource_id|source_ip|user_agent|organization_id).* does not exist/i.test(message);
 const parseTransactionDateTime = (value) => {
   const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
   return new Date(hasTimezone ? value : `${value}+08:00`);
@@ -1398,6 +1351,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       viewport: `${window.innerWidth}x${window.innerHeight}`
     });
+    // Pembersihan 24 jam: sandaran sekiranya pg_cron tidak tersedia.
+    Promise.resolve(supabaseClient.rpc('ar_rahnu_prune_audit_events'))
+      .then(({ error }) => {
+        if (error) console.warn('Pembersihan audit 24 jam tidak dapat dijalankan:', error.message);
+      })
+      .catch(() => undefined);
   }, [supabaseClient, user.id]);
 
   useEffect(() => {
@@ -1888,7 +1847,6 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         }).catch(error => console.error('No. Keahlian tidak dapat disegerakkan ke akaun ahli:', error));
       });
   };
-  const [auditView, setAuditView] = useState<'trail' | 'traffic'>('trail');
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [auditSearch, setAuditSearch] = useState('');
   const [auditModuleFilter, setAuditModuleFilter] = useState('');
@@ -1899,25 +1857,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [auditPageSize, setAuditPageSize] = useState(20);
   const [auditLoading, setAuditLoading] = useState(false);
   const [auditError, setAuditError] = useState('');
+  const [auditFeedWarning, setAuditFeedWarning] = useState('');
   const [auditVerification, setAuditVerification] = useState('');
   const [selectedAuditEvent, setSelectedAuditEvent] = useState<AuditEvent | null>(null);
-  const [trafficEvents, setTrafficEvents] = useState<TrafficEvent[]>([]);
-  const [trafficLoading, setTrafficLoading] = useState(false);
-  const trafficLoadingRef = useRef(false);
-  const [trafficError, setTrafficError] = useState('');
-  const [trafficSearch, setTrafficSearch] = useState('');
-  const [trafficPage, setTrafficPage] = useState(0);
-  const [trafficPageSize, setTrafficPageSize] = useState(20);
-  const [selectedTrafficEvent, setSelectedTrafficEvent] = useState<TrafficEvent | null>(null);
-  const [trafficSchemaReady, setTrafficSchemaReady] = useState<boolean | null>(null);
-  const [trafficPaused, setTrafficPaused] = useState(() => {
-    try {
-      return localStorage.getItem(`ar_rahnu_traffic_paused_${user.id}`) === 'true';
-    } catch (error) {
-      console.error('Pilihan rakaman trafik tidak dapat dibaca:', error);
-      return false;
-    }
-  });
   const auditChainScope = organizationMembership?.organization_id
     ? `organization:${organizationMembership.organization_id}`
     : `user:${user.id}`;
@@ -1947,110 +1889,24 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setAuditPage(page => Math.min(page, auditPageCount - 1));
   }, [auditPageCount]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(`ar_rahnu_traffic_paused_${user.id}`, String(trafficPaused));
-    } catch (error) {
-      console.error('Pilihan rakaman trafik tidak dapat disimpan:', error);
-    }
-  }, [trafficPaused, user.id]);
-
-  useEffect(() => {
-    setTrafficCaptureEnabled(false);
-    if (!auditChainScope) return;
-    let active = true;
-    setTrafficSchemaReady(null);
-    Promise.resolve(supabaseClient
-      .from('ar_rahnu_traffic_events')
-      .select('event_id')
-      .limit(1))
-      .then(({ error }) => {
-        if (!active) return;
-        if (error) {
-          setTrafficSchemaReady(false);
-          console.warn('Traffic inspector is unavailable until its database migration is installed:', error.message);
-          return;
-        }
-        setTrafficSchemaReady(true);
-        setTrafficCaptureEnabled(!trafficPaused);
-      })
-      .catch(error => {
-        if (!active) return;
-        setTrafficSchemaReady(false);
-        console.error('Traffic inspector availability could not be checked:', error);
-      });
-    return () => {
-      active = false;
-      setTrafficCaptureEnabled(false);
-    };
-  }, [auditChainScope, trafficPaused, user.id]);
-
-  const handleToggleTrafficCapture = () => {
-    if (!trafficSchemaReady) return;
-    setTrafficPaused(paused => {
-      const nextPaused = !paused;
-      setTrafficCaptureEnabled(!nextPaused);
-      return nextPaused;
-    });
-  };
-
-  const refreshTrafficEvents = async () => {
-    if (!auditChainScope || trafficLoadingRef.current) return;
-    trafficLoadingRef.current = true;
-    setTrafficLoading(true);
-    setTrafficError('');
-    try {
-      const { data, error } = await supabaseClient
-        .from('ar_rahnu_traffic_events')
-        .select('event_id, organization_id, actor_user_id, session_id, captured_at, client_ip, user_agent, method, request_path, host, status, duration_ms, request_payload, response_payload')
-        .eq('organization_id', organizationMembership.organization_id)
-        .gte('captured_at', new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString())
-        .order('captured_at', { ascending: false })
-        .limit(1000);
-      if (error) throw error;
-      setTrafficEvents((data || []) as TrafficEvent[]);
-    } catch (error) {
-      setTrafficError(error.message || 'Permintaan HTTP tidak dapat dimuatkan.');
-    } finally {
-      trafficLoadingRef.current = false;
-      setTrafficLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    if (activeTab !== 'audit' || auditView !== 'traffic' || !canManageOrganizationUsers) return;
-    void refreshTrafficEvents();
-    const timer = window.setInterval(() => void refreshTrafficEvents(), 5000);
-    return () => window.clearInterval(timer);
-  }, [activeTab, auditView, canManageOrganizationUsers, auditChainScope]);
-
-  const filteredTrafficEvents = useMemo(
-    () => trafficEvents.filter(event => matchesTrafficFilter(event, trafficSearch)),
-    [trafficEvents, trafficSearch]
-  );
-  const trafficPageCount = Math.max(1, Math.ceil(filteredTrafficEvents.length / trafficPageSize));
-  const visibleTrafficEvents = filteredTrafficEvents.slice(
-    trafficPage * trafficPageSize,
-    (trafficPage + 1) * trafficPageSize
-  );
-
-  useEffect(() => setTrafficPage(0), [trafficSearch, trafficPageSize]);
-
   const readAuditChain = async () => {
     if (!auditChainScope) throw new Error('Skop audit belum tersedia.');
     const events: AuditEvent[] = [];
     // Saiz halaman kecil: canonical_payload bagi peristiwa lama boleh bersaiz
     // megabait, dan halaman besar boleh mencetuskan statement timeout. Jika
     // satu halaman masih tamat masa, cuba semula satu baris demi satu.
+    // Penomboran menggunakan sequence_no (keyset) supaya pemadaman 24 jam yang
+    // berlaku serentak tidak menyebabkan baris terlangkau atau berulang.
     let pageSize = 10;
-    let offset = 0;
+    let lastSequence = 0;
     while (true) {
       const { data, error } = await supabaseClient
         .from('ar_rahnu_audit_events')
         .select('event_id, chain_scope, sequence_no, canonical_payload, previous_hash, event_hash, created_at')
         .eq('chain_scope', auditChainScope)
+        .gt('sequence_no', lastSequence)
         .order('sequence_no', { ascending: true })
-        .range(offset, offset + pageSize - 1);
+        .limit(pageSize);
       if (error) {
         if (pageSize > 1 && /statement timeout|canceling statement/i.test(error.message || '')) {
           pageSize = 1;
@@ -2061,7 +1917,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const page = (data || []) as AuditEvent[];
       events.push(...page);
       if (page.length < pageSize) return events;
-      offset += pageSize;
+      lastSequence = page[page.length - 1].sequence_no;
     }
   };
 
@@ -2099,6 +1955,51 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
   });
 
+  const toAuditFeedRow = (
+    event: { event_id: string; chain_scope: string; sequence_no: number; previous_hash: string; event_hash: string; created_at: string },
+    payload: AuditPayload
+  ): AuditFeedRow => ({
+    event_id: event.event_id,
+    chain_scope: event.chain_scope,
+    sequence_no: event.sequence_no,
+    occurred_at_utc: String(payload.occurred_at_utc || ''),
+    actor_user_id: payload.actor_user_id,
+    actor_email: payload.actor_email ?? null,
+    actor_display_name: payload.actor_display_name ?? null,
+    action: payload.action,
+    resource_type: payload.resource_type,
+    resource_id: payload.resource_id,
+    source_module: payload.source_module,
+    context: payload.context || {},
+    source_ip: payload.source_ip,
+    user_agent: payload.user_agent,
+    session_id: payload.session_id ?? null,
+    previous_hash: event.previous_hash,
+    event_hash: event.event_hash,
+    created_at: event.created_at
+  });
+
+  const fetchLegacyAuditFeed = async (): Promise<AuditEvent[]> => {
+    let limit = 25;
+    while (true) {
+      const { data, error } = await supabaseClient
+        .from('ar_rahnu_audit_events')
+        .select('event_id, chain_scope, sequence_no, event_payload, previous_hash, event_hash, created_at')
+        .eq('chain_scope', auditChainScope)
+        .order('sequence_no', { ascending: false })
+        .limit(limit);
+      if (!error) {
+        return ((data || []) as { event_id: string; chain_scope: string; sequence_no: number; event_payload: AuditPayload; previous_hash: string; event_hash: string; created_at: string }[])
+          .map(row => toAuditEvent(toAuditFeedRow(row, row.event_payload)));
+      }
+      if (limit > 1 && /statement timeout|canceling statement/i.test(error.message || '')) {
+        limit = 1;
+        continue;
+      }
+      throw error;
+    }
+  };
+
   const refreshAuditEvents = async () => {
     if (!auditChainScope) return;
     setAuditLoading(true);
@@ -2111,15 +2012,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         .eq('chain_scope', auditChainScope)
         .order('sequence_no', { ascending: false })
         .limit(250);
-      if (error) {
-        if (/column .*(occurred_at_utc|actor_email|context).* does not exist|schema cache/i.test(error.message || '')) {
-          throw new Error('Kolum ringkasan audit belum dipasang. Jalankan semula supabase/audit-trail.sql dalam Supabase SQL Editor.');
-        }
-        throw error;
+      if (error && isMissingAuditSummaryColumnError(error.message || '')) {
+        setAuditFeedWarning(`Kolum ringkasan audit belum dipasang. Jalankan semula supabase/audit-trail.sql dalam Supabase SQL Editor untuk senarai penuh. Sementara itu senarai dimuatkan dalam mod keserasian (terhad dan lebih perlahan). Butiran DB: ${error.message}`);
+        setAuditEvents(await fetchLegacyAuditFeed());
+        return;
       }
+      if (error) throw error;
+      setAuditFeedWarning('');
       setAuditEvents(((data || []) as AuditFeedRow[]).map(toAuditEvent));
     } catch (error) {
-      setAuditError(error.message || 'Rekod audit tidak dapat dimuatkan.');
+      setAuditError(error instanceof Error ? error.message : 'Rekod audit tidak dapat dimuatkan.');
     } finally {
       setAuditLoading(false);
     }
@@ -2152,12 +2054,18 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setAuditVerification('');
     try {
       const events = await readAuditChain();
-      let previousHash = '0'.repeat(64);
+      if (events.length === 0) {
+        setAuditVerification('Tiada peristiwa dalam tempoh simpanan 24 jam.');
+        return;
+      }
+      const firstSequence = events[0].sequence_no;
+      const hasPrunedHistory = firstSequence > 1;
+      let previousHash = events[0].previous_hash;
       for (let index = 0; index < events.length; index += 1) {
         const event = events[index];
         const payload = JSON.parse(event.canonical_payload);
         if (
-          event.sequence_no !== index + 1 ||
+          event.sequence_no !== firstSequence + index ||
           event.previous_hash !== previousHash ||
           event.chain_scope !== payload.chain_scope ||
           event.event_id !== payload.event_id ||
@@ -2189,7 +2097,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         }
         previousHash = event.event_hash;
       }
-      setAuditVerification(`Rantaian sah: ${events.length} peristiwa diperiksa dari urutan pertama.`);
+      setAuditVerification(
+        `Rantaian sah: ${events.length} peristiwa (urutan ${firstSequence}–${events[events.length - 1].sequence_no}) diperiksa.` +
+        (hasPrunedHistory
+          ? ` Peristiwa sebelum urutan ${firstSequence} telah dipadam mengikut dasar simpanan 24 jam; rantaian disahkan daripada hash sauh peristiwa terawal yang masih tersimpan.`
+          : '')
+      );
     } catch (error) {
       setAuditError(error.message || 'Pengesahan rantaian gagal.');
     } finally {
@@ -2206,6 +2119,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         format: 'ar-rahnu-audit-chain-v1',
         chain_scope: auditChainScope,
         exported_at_utc: new Date().toISOString(),
+        retention_hours: 24,
+        retention_note: 'Audit events older than 24 hours are deleted by ar_rahnu_prune_audit_events(). Export any evidence before it expires.',
+        first_retained_sequence: events[0]?.sequence_no ?? null,
+        last_retained_sequence: events[events.length - 1]?.sequence_no ?? null,
         timestamp_assurance: 'Supabase database UTC timestamps; no independent RFC 3161 attestation configured',
         worm_archive: 'Not configured; this export is not WORM-protected until stored in an independently controlled immutable archive',
         events
@@ -2229,7 +2146,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   useEffect(() => {
-    const shouldLoadUsers = activeTab === 'users' || activeTab === 'members' || (activeTab === 'audit' && auditView === 'trail');
+    const shouldLoadUsers = activeTab === 'users' || activeTab === 'members' || activeTab === 'audit';
     if (!shouldLoadUsers || !canManageOrganizationUsers) return;
     let active = true;
     setUserManagementError('');
@@ -2241,7 +2158,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         if (active) setUserManagementError(error.message || 'Senarai pengguna tidak dapat dimuatkan.');
       });
     return () => { active = false; };
-  }, [activeTab, auditView, organizationMembership?.role]);
+  }, [activeTab, organizationMembership?.role]);
 
   const runUserAdminAction = async (body, successMessage) => {
     setUserManagementBusy(true);
@@ -2605,7 +2522,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const isInput = target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName);
       if (isSupplierModalOpen || isInstitutionModalOpen) return;
 
-      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k' && activeTab === 'audit' && auditView === 'trail' && !selectedAuditEvent) {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'k' && activeTab === 'audit' && !selectedAuditEvent) {
         event.preventDefault();
         document.getElementById('audit-search-input')?.focus();
         return;
@@ -2666,7 +2583,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     window.addEventListener('keydown', handleGlobalShortcuts);
     return () => window.removeEventListener('keydown', handleGlobalShortcuts);
-  }, [activeTab, isSupplierModalOpen, isInstitutionModalOpen, auditView, selectedAuditEvent]);
+  }, [activeTab, isSupplierModalOpen, isInstitutionModalOpen, selectedAuditEvent]);
 
   const handleNotificationToggle = async () => {
     if (notificationsEnabled) {
@@ -4684,11 +4601,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       <FileSearch size={28} className="text-corporate-teal-300" /> Audit Trail
                     </h2>
                     <p className="mt-1 max-w-xl text-xs leading-relaxed text-slate-300 sm:text-sm">
-                      {organizationMembership.organization?.name || 'Organisasi'} · Pantau perubahan portfolio dan organisasi, termasuk metadata serta snapshot sebelum dan selepas.
+                      {organizationMembership.organization?.name || 'Organisasi'} · Pantau perubahan portfolio dan organisasi, termasuk metadata serta snapshot sebelum dan selepas. Data audit disimpan 24 jam sahaja.
                     </p>
-                    {auditView === 'trail' && <p className="mt-2 text-xs text-slate-300">Pintasan: Ctrl + K untuk carian peristiwa</p>}
+                    <p className="mt-2 text-xs text-slate-300">Pintasan: Ctrl + K untuk carian peristiwa</p>
                   </div>
-                  {auditView === 'trail' && <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2.5">
                     <button type="button" onClick={() => void verifyAuditChain()} disabled={auditLoading} className="inline-flex items-center gap-2 rounded-xl border border-corporate-teal-400/50 bg-corporate-teal-600 px-4 py-2 text-sm font-bold text-white shadow-lg transition-all hover:bg-corporate-teal-500 disabled:opacity-50">
                       <ShieldCheck size={16} /> Sahkan rantaian
                     </button>
@@ -4698,32 +4615,16 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     <button type="button" onClick={() => void refreshAuditEvents()} disabled={auditLoading} aria-label="Muat semula peristiwa audit" title="Muat semula peristiwa audit" className="inline-flex items-center justify-center rounded-xl border border-white/10 bg-white/5 p-2.5 text-slate-200 transition-all hover:bg-white/15 disabled:opacity-50">
                       <RefreshCw size={16} className={auditLoading ? 'animate-spin' : ''} />
                     </button>
-                  </div>}
+                  </div>
                 </div>
               </div>
-              <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-3">
-                <button
-                  type="button"
-                  aria-pressed={auditView === 'trail'}
-                  onClick={() => setAuditView('trail')}
-                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-extrabold transition-all ${auditView === 'trail' ? 'bg-corporate-teal-600 text-white shadow-md' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'}`}
-                >
-                  <FileSearch size={16} /> Audit Trail
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={auditView === 'traffic'}
-                  onClick={() => setAuditView('traffic')}
-                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2.5 text-sm font-extrabold transition-all ${auditView === 'traffic' ? 'bg-corporate-teal-600 text-white shadow-md' : 'border border-slate-200 bg-white text-slate-600 hover:bg-slate-100'}`}
-                >
-                  <Activity size={16} /> Traffic Inspector
-                </button>
-              </div>
-              {auditView === 'trail' && <>
               <details className="rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
                 <summary className="cursor-pointer font-bold">Hash chain aktif; WORM dan RFC 3161 belum dikonfigurasi. Lihat batasan pematuhan</summary>
                 <p className="mt-1">
                   Peristiwa menggunakan jam UTC pangkalan data Supabase dan SHA-256 berantai. Pemilik projek pangkalan data masih boleh memadam atau membina semula rekod; pengesahan ini mengesan kerosakan rantai tetapi bukan bukti WORM atau cap masa bebas. Eksport perlu disimpan di arkib Object Lock yang dikawal berasingan untuk perlindungan tersebut.
+                </p>
+                <p className="mt-1">
+                  <strong>Dasar simpanan: 24 jam.</strong> Peristiwa yang lebih lama dipadam secara berjadual. Eksport JSON jika bukti perlu disimpan. Selepas pembersihan, pengesahan bermula daripada hash sauh peristiwa terawal yang masih tersimpan; peristiwa sebelum itu tidak boleh diperiksa semula.
                 </p>
                 <p className="mt-1">
                   Aktiviti direkodkan oleh trigger pangkalan data (perubahan rekod) dan oleh aplikasi (log masuk/keluar, kata laluan, profil, eksport). Masa menggunakan jam UTC pangkalan data Supabase dan SHA-256 berantai. Alamat IP dan peranti diambil daripada header permintaan yang dihantar ke Supabase; nilai ini bergantung pada proksi dan tidak boleh dianggap bukti kukuh.
@@ -4731,11 +4632,12 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <p className="mt-1">Sejarah tidak diisi semula: rantaian bermula apabila migrasi dipasang dan hanya merekod aktiviti selepas itu. Aktiviti ahli organisasi dikumpulkan dalam rantaian organisasi supaya pengurus melihat satu jejak lengkap. Percubaan log masuk yang gagal kekal dalam Auth Audit Logs Supabase kerana tiada sesi untuk merekodnya di sini.</p>
               </details>
 
+              {auditFeedWarning && <p role="status" className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">{auditFeedWarning}</p>}
               {auditError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{auditError}</p>}
               {auditVerification && <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">{auditVerification}</p>}
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Peristiwa dimuatkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700"><FileSearch size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Maksimum 250 terkini</p></div>
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Peristiwa dimuatkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700"><FileSearch size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Maksimum 250 terkini · simpanan 24 jam</p></div>
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Hasil penapisan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Search size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-emerald-700">{auditError || auditLoading ? '—' : filteredAuditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Modul direkodkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700"><Activity size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditModules.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
               </div>
@@ -4744,7 +4646,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-5">
                   <div>
                     <h4 className="flex items-center gap-2 text-lg font-extrabold text-slate-800"><Activity size={19} className="text-corporate-teal-700" /> Peristiwa terkini</h4>
-                    <p className="mt-1 text-xs text-slate-600">Paparan terhad kepada 250 peristiwa terakhir. Pengesahan dan eksport merangkumi seluruh rantaian.</p>
+                    <p className="mt-1 text-xs text-slate-600">Paparan terhad kepada 250 peristiwa terakhir dalam tempoh simpanan 24 jam. Pengesahan dan eksport merangkumi keseluruhan rantaian yang masih tersimpan.</p>
                   </div>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700" aria-live="polite">{filteredAuditEvents.length} / {auditEvents.length} peristiwa</span>
                 </div>
@@ -4920,145 +4822,6 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       }, null, 2)}</pre>
                     </div>
                   </section>
-                </div>
-              )}
-              </>}
-
-              {auditView === 'traffic' && (
-                <div className="space-y-4">
-                  <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <h3 className="text-xl font-bold text-slate-900">Traffic Inspector</h3>
-                        <p className="mt-1 text-xs text-slate-500">
-                          Browser-observed outbound Supabase HTTP requests · {organizationMembership.organization?.name || 'Organisasi'}
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <button type="button" className="rounded-md border border-sky-300 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-800">HTTP</button>
-                        <button type="button" disabled title="TCP connections are not visible to a browser application" className="cursor-not-allowed rounded-md border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-400">TCP</button>
-                        <button
-                          type="button"
-                          onClick={handleToggleTrafficCapture}
-                          className={`inline-flex items-center gap-1 rounded-md border px-3 py-1.5 text-xs font-semibold ${trafficPaused ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-white text-slate-700'}`}
-                        >
-                          {trafficPaused ? <Play size={13} /> : <Pause size={13} />}
-                          {trafficPaused ? 'Resume capture' : 'Pause capture'}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="mt-3 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
-                      <p className="font-semibold">Traffic history is kept for up to 7 days, then deleted.</p>
-                      <p className="mt-0.5">Only Supabase HTTP calls made by signed-in app sessions are captured. Authentication endpoints and their bodies are excluded; common credentials, email and phone fields are redacted. Remaining JSON bodies can include financial portfolio data. Client IP is a best-effort proxy header, not verified attribution. No TCP, incoming static-asset requests, or external price-service calls are visible here.</p>
-                    </div>
-                    <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                      <label className="sr-only" htmlFor="traffic-inspector-filter">Filter HTTP requests</label>
-                      <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-slate-300 px-3 py-2">
-                        <Search size={16} className="shrink-0 text-slate-400" />
-                        <input
-                          id="traffic-inspector-filter"
-                          type="search"
-                          value={trafficSearch}
-                          onChange={event => setTrafficSearch(event.target.value)}
-                          placeholder="Filter requests, e.g. status:500 method:POST"
-                          className="min-w-0 flex-1 text-sm outline-none"
-                        />
-                      </div>
-                      <button type="button" onClick={() => void refreshTrafficEvents()} disabled={trafficLoading} className="rounded-md border border-slate-300 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-50">
-                        {trafficLoading ? 'Loading…' : 'Refresh'}
-                      </button>
-                      <span className="self-center whitespace-nowrap text-xs text-slate-500">{filteredTrafficEvents.length}{trafficEvents.length === 1000 ? '+' : ''} results · latest 7 days</span>
-                    </div>
-                    {trafficError && <p role="alert" className="mt-3 rounded-md bg-red-50 p-3 text-sm text-red-700">{trafficError} Run <code>supabase/traffic-inspector.sql</code> in the Supabase SQL Editor if the inspector schema has not been installed.</p>}
-                  </section>
-
-                  <section className="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[980px] text-left text-xs">
-                        <thead className="border-b border-slate-200 bg-slate-50 text-slate-600">
-                          <tr>
-                            <th className="px-3 py-3 font-semibold">Waktu Malaysia (MYT)</th>
-                            <th className="px-3 py-3 font-semibold">Client IP</th>
-                            <th className="px-3 py-3 font-semibold">Method</th>
-                            <th className="px-3 py-3 font-semibold">Path</th>
-                            <th className="px-3 py-3 font-semibold">Status</th>
-                            <th className="px-3 py-3 font-semibold">Duration</th>
-                            <th className="px-3 py-3 font-semibold">Host</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-100 font-mono text-slate-600">
-                          {visibleTrafficEvents.map(event => (
-                            <tr key={event.event_id} onClick={() => setSelectedTrafficEvent(event)} className="cursor-pointer hover:bg-sky-50">
-                              <td className="whitespace-nowrap px-3 py-2.5">
-                                <time dateTime={event.captured_at} title={`UTC asal: ${event.captured_at}`}>
-                                  {formatMalaysiaDateTime(event.captured_at)}
-                                </time>
-                              </td>
-                              <td className="max-w-40 truncate px-3 py-2.5" title={event.client_ip || 'Unavailable'}>{event.client_ip || '—'}</td>
-                              <td className="px-3 py-2.5">{event.method}</td>
-                              <td className="max-w-64 truncate px-3 py-2.5" title={event.request_path}>{event.request_path}</td>
-                              <td className="px-3 py-2.5">
-                                <span className={`rounded px-1.5 py-0.5 text-[10px] font-bold ${
-                                  event.status >= 500 ? 'bg-red-100 text-red-800' :
-                                  event.status >= 400 ? 'bg-amber-100 text-amber-800' :
-                                  event.status >= 300 ? 'bg-indigo-100 text-indigo-800' :
-                                  event.status >= 200 ? 'bg-emerald-100 text-emerald-800' :
-                                  'bg-slate-100 text-slate-600'
-                                }`}>{event.status || 'N/A'}</span>
-                              </td>
-                              <td className="whitespace-nowrap px-3 py-2.5">{event.duration_ms}ms</td>
-                              <td className="max-w-48 truncate px-3 py-2.5" title={event.host}>{event.host}</td>
-                            </tr>
-                          ))}
-                          {!trafficLoading && visibleTrafficEvents.length === 0 && (
-                            <tr><td colSpan={7} className="px-3 py-10 text-center font-sans text-slate-500">{trafficError ? 'Traffic events could not be loaded.' : trafficPaused ? 'Capture is paused on this browser.' : trafficSearch ? 'No requests match this filter.' : 'No captured requests yet. Save app data; Traffic Inspector polling is excluded.'}</td></tr>
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                    <div className="flex flex-col gap-3 border-t border-slate-200 px-3 py-3 sm:flex-row sm:items-center sm:justify-end">
-                      <label className="flex items-center gap-2 text-xs text-slate-600">
-                        <span>Rows per page</span>
-                        <select value={trafficPageSize} onChange={event => setTrafficPageSize(Number(event.target.value))} className="rounded-md border border-slate-300 bg-white px-2 py-1">
-                          {[20, 50, 100].map(size => <option key={size} value={size}>{size}</option>)}
-                        </select>
-                      </label>
-                      <span className="text-xs text-slate-500">{filteredTrafficEvents.length === 0 ? 0 : trafficPage * trafficPageSize + 1}–{Math.min((trafficPage + 1) * trafficPageSize, filteredTrafficEvents.length)} of {filteredTrafficEvents.length}</span>
-                      <div className="flex gap-1">
-                        <button type="button" disabled={trafficPage === 0} onClick={() => setTrafficPage(page => Math.max(0, page - 1))} aria-label="Previous page" className="rounded-md border border-slate-300 p-1.5 text-slate-600 disabled:opacity-40"><ChevronLeft size={16} /></button>
-                        <button type="button" disabled={trafficPage >= trafficPageCount - 1} onClick={() => setTrafficPage(page => Math.min(trafficPageCount - 1, page + 1))} aria-label="Next page" className="rounded-md border border-slate-300 p-1.5 text-slate-600 disabled:opacity-40"><ChevronRight size={16} /></button>
-                      </div>
-                    </div>
-                  </section>
-
-                  {selectedTrafficEvent && (
-                    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 p-3 sm:p-6" role="dialog" aria-modal="true" aria-labelledby="traffic-event-title">
-                      <section className="flex max-h-[90dvh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-                        <div className="flex items-center justify-between border-b border-slate-200 p-4 sm:p-5">
-                          <div>
-                            <h3 id="traffic-event-title" className="font-bold text-slate-800">{selectedTrafficEvent.method} {selectedTrafficEvent.request_path} · {selectedTrafficEvent.status || 'N/A'}</h3>
-                            <p className="mt-1 text-xs text-slate-500">
-                              <time dateTime={selectedTrafficEvent.captured_at} title={`UTC asal: ${selectedTrafficEvent.captured_at}`}>
-                                {formatMalaysiaDateTime(selectedTrafficEvent.captured_at)}
-                              </time>
-                              {' · '}{selectedTrafficEvent.duration_ms}ms · {selectedTrafficEvent.host}
-                            </p>
-                          </div>
-                          <button type="button" onClick={() => setSelectedTrafficEvent(null)} aria-label="Close request details" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={20} /></button>
-                        </div>
-                        <div className="grid gap-4 overflow-auto p-4 sm:grid-cols-2 sm:p-5">
-                          <div><h4 className="mb-2 text-sm font-bold text-slate-700">Request body (redacted)</h4><pre className="max-h-96 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-emerald-100">{JSON.stringify(selectedTrafficEvent.request_payload, null, 2) || 'No body captured'}</pre></div>
-                          <div><h4 className="mb-2 text-sm font-bold text-slate-700">Response body (redacted)</h4><pre className="max-h-96 overflow-auto rounded-xl bg-slate-950 p-3 text-xs text-emerald-100">{JSON.stringify(selectedTrafficEvent.response_payload, null, 2) || 'No body captured'}</pre></div>
-                          <dl className="space-y-2 text-xs sm:col-span-2">
-                            <div><dt className="inline font-bold">Actor: </dt><dd className="inline font-mono">{selectedTrafficEvent.actor_user_id || 'Unknown'}</dd></div>
-                            <div><dt className="inline font-bold">Session: </dt><dd className="inline font-mono">{selectedTrafficEvent.session_id || 'Unavailable'}</dd></div>
-                            <div><dt className="inline font-bold">Client IP (proxy-observed): </dt><dd className="inline font-mono">{selectedTrafficEvent.client_ip || 'Unavailable'}</dd></div>
-                            <div><dt className="inline font-bold">User-Agent: </dt><dd className="inline break-all font-mono">{selectedTrafficEvent.user_agent || 'Unavailable'}</dd></div>
-                          </dl>
-                        </div>
-                      </section>
-                    </div>
-                  )}
                 </div>
               )}
             </section>
@@ -5705,7 +5468,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             { category: 'Pentadbiran & Keselamatan' },
                             { id: 'users_manage', label: 'Tambah, gantung, edit & reset kata laluan pengguna', roles: ['Admin'] },
                             { id: 'roles_manage', label: 'Ubah suai peranan & kebenaran akses', roles: ['Admin'] },
-                            { id: 'audit_inspect', label: 'Akses Audit Trail & HTTP Inspector', roles: ['Manager', 'Admin'] },
+                            { id: 'audit_inspect', label: 'Akses Audit Trail', roles: ['Manager', 'Admin'] },
                           ].map((item, idx) => {
                             if ('category' in item) {
                               return (
