@@ -127,6 +127,12 @@ begin
     'timestamp_source', 'supabase_database_clock_unattested',
     'organization_id', p_organization_id,
     'actor_user_id', v_actor_user_id,
+    'actor_email', nullif(v_claims ->> 'email', ''),
+    'actor_display_name', coalesce(
+      nullif(v_claims #>> '{user_metadata,full_name}', ''),
+      nullif(v_claims #>> '{user_metadata,name}', ''),
+      nullif(v_claims ->> 'email', '')
+    ),
     'subject_user_id', p_subject_user_id,
     'session_id', coalesce(v_claims ->> 'session_id', v_headers ->> 'x-audit-session-id'),
     'user_agent', coalesce(v_headers ->> 'user-agent', v_headers ->> 'x-audit-user-agent'),
@@ -294,5 +300,163 @@ drop trigger if exists ar_rahnu_organizations_audit on public.ar_rahnu_organizat
 create trigger ar_rahnu_organizations_audit
   after insert or update or delete on public.ar_rahnu_organizations
   for each row execute function public.ar_rahnu_capture_audit_event();
+
+-- Rekod audit per rekod portfolio (transaksi, aset, institusi, pembekal).
+-- Setiap perubahan rekod menghasilkan satu peristiwa audit berasingan yang
+-- menyimpan siapa (actor_user_id/actor_email), waktu (database clock) dan
+-- jenis rekod/transaksi dalam context.
+create or replace function public.ar_rahnu_collection_records(p_data jsonb, p_collection text)
+returns jsonb
+language sql
+immutable
+set search_path = pg_catalog
+as $$
+  select case
+    when jsonb_typeof(p_data -> p_collection) = 'array' then p_data -> p_collection
+    else '[]'::jsonb
+  end;
+$$;
+
+revoke all on function public.ar_rahnu_collection_records(jsonb, text) from public, anon, authenticated;
+
+create or replace function public.ar_rahnu_capture_portfolio_record_events()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+  v_collections constant text[] := array['transactions', 'assets', 'institutions', 'suppliers'];
+  v_collection text;
+  v_before_records jsonb;
+  v_after_records jsonb;
+  v_old_map jsonb;
+  v_new_map jsonb;
+  v_key text;
+  v_before jsonb;
+  v_after jsonb;
+  v_action text;
+  v_label text;
+  v_category text;
+begin
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+
+  foreach v_collection in array v_collections loop
+    v_before_records := case
+      when tg_op = 'INSERT' then '[]'::jsonb
+      else public.ar_rahnu_collection_records(old.data, v_collection)
+    end;
+    v_after_records := public.ar_rahnu_collection_records(new.data, v_collection);
+
+    select coalesce(jsonb_object_agg(records.record_key, records.record_value), '{}'::jsonb)
+      into v_old_map
+      from (
+        select
+          coalesce(nullif(item.value ->> 'id', ''), md5(item.value::text)) as record_key,
+          (array_agg(item.value))[1] as record_value
+        from jsonb_array_elements(v_before_records) as item(value)
+        group by 1
+      ) as records;
+
+    select coalesce(jsonb_object_agg(records.record_key, records.record_value), '{}'::jsonb)
+      into v_new_map
+      from (
+        select
+          coalesce(nullif(item.value ->> 'id', ''), md5(item.value::text)) as record_key,
+          (array_agg(item.value))[1] as record_value
+        from jsonb_array_elements(v_after_records) as item(value)
+        group by 1
+      ) as records;
+
+    for v_key, v_after in select entry.key, entry.value from jsonb_each(v_new_map) as entry loop
+      v_before := v_old_map -> v_key;
+      if v_before is null then
+        v_action := 'CREATE';
+      elsif v_before is distinct from v_after then
+        v_action := 'UPDATE';
+      else
+        continue;
+      end if;
+
+      if v_action = 'UPDATE' and v_after ->> 'lastAction' = 'DELETE' then
+        v_action := 'DELETE';
+      end if;
+
+      v_label := coalesce(
+        nullif(v_after ->> 'refNo', ''),
+        nullif(v_after ->> 'code', ''),
+        nullif(v_after ->> 'name', ''),
+        v_key
+      );
+      v_category := coalesce(nullif(v_after ->> 'type', ''), nullif(v_after ->> 'category', ''));
+
+      perform public.ar_rahnu_append_audit_event(
+        v_action,
+        v_collection,
+        v_key,
+        new.organization_id,
+        new.user_id,
+        'Portfolio',
+        jsonb_build_object(
+          'database_table', 'ar_rahnu_user_data',
+          'database_operation', tg_op,
+          'collection', v_collection,
+          'record_label', v_label,
+          'record_category', v_category,
+          'record_action', v_after ->> 'lastAction',
+          'changed_by', coalesce(v_after -> 'updatedBy', v_after -> 'createdBy'),
+          'changed_at', coalesce(v_after ->> 'updatedAt', v_after ->> 'createdAt')
+        ),
+        v_before,
+        v_after
+      );
+    end loop;
+
+    for v_key, v_before in select entry.key, entry.value from jsonb_each(v_old_map) as entry loop
+      if v_new_map ? v_key then
+        continue;
+      end if;
+
+      v_label := coalesce(
+        nullif(v_before ->> 'refNo', ''),
+        nullif(v_before ->> 'code', ''),
+        nullif(v_before ->> 'name', ''),
+        v_key
+      );
+      v_category := coalesce(nullif(v_before ->> 'type', ''), nullif(v_before ->> 'category', ''));
+
+      perform public.ar_rahnu_append_audit_event(
+        'DELETE',
+        v_collection,
+        v_key,
+        new.organization_id,
+        new.user_id,
+        'Portfolio',
+        jsonb_build_object(
+          'database_table', 'ar_rahnu_user_data',
+          'database_operation', tg_op,
+          'collection', v_collection,
+          'record_label', v_label,
+          'record_category', v_category,
+          'deleted_by', v_before -> 'deletedBy'
+        ),
+        v_before,
+        null
+      );
+    end loop;
+  end loop;
+
+  return new;
+end;
+$$;
+
+revoke all on function public.ar_rahnu_capture_portfolio_record_events() from public, anon, authenticated;
+
+drop trigger if exists ar_rahnu_user_data_record_audit on public.ar_rahnu_user_data;
+create trigger ar_rahnu_user_data_record_audit
+  after insert or update on public.ar_rahnu_user_data
+  for each row execute function public.ar_rahnu_capture_portfolio_record_events();
 
 notify pgrst, 'reload schema';

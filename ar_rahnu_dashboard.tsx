@@ -68,7 +68,9 @@ import {
   UserX,
   Lock,
   Landmark,
-  Smartphone
+  Smartphone,
+  Pin,
+  PinOff
 } from 'lucide-react';
 import type { Session, SupabaseClient, User } from '@supabase/supabase-js';
 import { setTrafficCaptureEnabled, supabaseClient } from './src/lib/supabase';
@@ -113,6 +115,8 @@ const transactionStatusOptions = [
   'TS', 'TKS', 'US', 'Pusing', 'Lelong'
 ];
 const transactionAttachmentsBucket = 'ar-rahnu-transaction-attachments';
+const profilePhotoBucket = 'ar-rahnu-profile-photos';
+const maximumProfilePhotoSize = 2 * 1024 * 1024;
 const maximumAssetImageSize = 5 * 1024 * 1024;
 const allowedAssetImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
 const maximumTransactionAttachments = 7;
@@ -124,12 +128,43 @@ type OrganizationMembership = {
   active: boolean;
   organization?: { name: string } | null;
 };
+/** Identiti pengguna yang melakukan CRUD pada satu rekod. */
+type RecordAuditActor = {
+  id: string;
+  name: string;
+  email: string;
+};
+/** Jenis operasi CRUD yang direkodkan pada setiap rekod. */
+type RecordOperation = 'CREATE' | 'UPDATE' | 'DELETE';
+/** Metadata audit yang disimpan bersama setiap rekod portfolio. */
+type RecordAuditFields = {
+  recordType: string;
+  lastAction: RecordOperation;
+  createdBy?: RecordAuditActor;
+  createdAt?: string;
+  updatedBy?: RecordAuditActor;
+  updatedAt?: string;
+  deletedBy?: RecordAuditActor;
+};
+type AuditContext = {
+  database_table?: string;
+  database_operation?: string;
+  collection?: string;
+  record_label?: string;
+  record_category?: string | null;
+  record_action?: string | null;
+  changed_by?: RecordAuditActor | null;
+  changed_at?: string | null;
+  [key: string]: unknown;
+};
 type AuditPayload = {
   event_id: string;
   chain_scope: string;
   sequence_no: number;
   occurred_at_utc: string;
   actor_user_id: string | null;
+  actor_email?: string | null;
+  actor_display_name?: string | null;
   subject_user_id: string | null;
   action: string;
   resource_type: string;
@@ -139,6 +174,7 @@ type AuditPayload = {
   device_id: string | null;
   source_ip: string | null;
   proxy_ip: string | null;
+  context?: AuditContext;
   payload_before: unknown;
   payload_before_sha256: string | null;
   payload_after: unknown;
@@ -174,7 +210,16 @@ const auditResourceLabels: Record<string, string> = {
   ar_rahnu_user_data: 'Data portfolio',
   ar_rahnu_organization_members: 'Keahlian organisasi',
   ar_rahnu_organizations: 'Maklumat organisasi',
-  'auth.users': 'Akaun pengguna'
+  'auth.users': 'Akaun pengguna',
+  transactions: 'Rekod SAG (transaksi)',
+  assets: 'Aset emas',
+  institutions: 'Institusi',
+  suppliers: 'Pembekal'
+};
+const recordOperationLabels: Record<string, string> = {
+  CREATE: 'Rekod dicipta',
+  UPDATE: 'Rekod dikemas kini',
+  DELETE: 'Rekod dipadam'
 };
 type TrafficEvent = {
   event_id: string;
@@ -492,6 +537,10 @@ const formatMalaysiaDateTime = (timestamp: string) => {
     hourCycle: 'h23',
     timeZone: 'Asia/Kuala_Lumpur'
   }).format(date)} MYT`;
+};
+const describeRecordActor = (actor?: RecordAuditActor | null): string => {
+  if (!actor) return 'Tidak direkod';
+  return actor.name || actor.email || actor.id || 'Tidak direkod';
 };
 const parseTransactionDateTime = (value) => {
   const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
@@ -1168,7 +1217,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     };
   });
 
-  const [memberRegistry, setMemberRegistry] = useState<{ userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string }[]>([]);
+  const [memberRegistry, setMemberRegistry] = useState<{ userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string; updatedBy?: RecordAuditActor }[]>([]);
 
   const appData = useMemo(
     () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry }),
@@ -1190,10 +1239,67 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const [hydrationRetry, setHydrationRetry] = useState(0);
   const [saveRetry, setSaveRetry] = useState(0);
+  const [profilePhotoPath, setProfilePhotoPath] = useState(() => String(user.user_metadata?.avatar_photo_path || ''));
+  const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null);
+
+  const recordActor = useMemo<RecordAuditActor>(() => ({
+    id: user.id,
+    name: String(user.user_metadata?.full_name || user.user_metadata?.name || '').trim() || user.email || 'Pengguna',
+    email: user.email || ''
+  }), [user]);
+
+  const auditCreate = (recordType: string, at: string): RecordAuditFields => ({
+    recordType,
+    lastAction: 'CREATE',
+    createdBy: recordActor,
+    createdAt: at,
+    updatedBy: recordActor,
+    updatedAt: at
+  });
+
+  const auditUpdate = (recordType: string, at: string): RecordAuditFields => ({
+    recordType,
+    lastAction: 'UPDATE',
+    updatedBy: recordActor,
+    updatedAt: at
+  });
+
+  const auditDelete = (recordType: string, at: string): RecordAuditFields => ({
+    recordType,
+    lastAction: 'DELETE',
+    updatedBy: recordActor,
+    updatedAt: at,
+    deletedBy: recordActor
+  });
 
   useEffect(() => {
     setAssets(currentAssets => syncAssetStatuses(currentAssets, transactions));
   }, [assets, transactions]);
+
+  useEffect(() => {
+    setProfilePhotoPath(String(user.user_metadata?.avatar_photo_path || ''));
+  }, [user.user_metadata?.avatar_photo_path]);
+
+  useEffect(() => {
+    let active = true;
+    if (!profilePhotoPath) {
+      setProfilePhotoUrl(null);
+      return;
+    }
+    supabaseClient.storage
+      .from(profilePhotoBucket)
+      .createSignedUrl(profilePhotoPath, 3600)
+      .then(({ data, error }) => {
+        if (!active) return;
+        setProfilePhotoUrl(error ? null : data?.signedUrl || null);
+      })
+      .catch(() => {
+        if (active) setProfilePhotoUrl(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [profilePhotoPath, supabaseClient]);
 
   useEffect(() => {
     let active = true;
@@ -1591,7 +1697,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const handleSaveMemberProfile = async (member, payload) => {
     setMemberRegistry(previous => [
       ...previous.filter(entry => entry.userId !== member.id),
-      { userId: member.id, ...payload, updatedAt: new Date().toISOString() }
+      { userId: member.id, ...payload, updatedAt: new Date().toISOString(), updatedBy: recordActor }
     ]);
     setEditingMember(null);
     let syncWarning = '';
@@ -1612,7 +1718,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleGenerateAllMemberNumbers = () => {
     const usedNumbers: string[] = memberRegistry.map(entry => entry.memberNo).filter(Boolean);
-    const additions: { userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string }[] = [];
+    const additions: { userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string; updatedBy?: RecordAuditActor }[] = [];
     organizationUsers.forEach(member => {
       const current = memberRegistry.find(entry => entry.userId === member.id);
       if (current?.memberNo) return;
@@ -1623,7 +1729,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         fullName: current?.fullName || '',
         icNumber: current?.icNumber || '',
         memberNo,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        updatedBy: recordActor
       });
     });
     if (!additions.length) {
@@ -1691,7 +1798,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const timestamp = new Date(payload.occurred_at_utc);
     const date = Number.isNaN(timestamp.getTime()) ? '' : getMalaysiaDateKey(timestamp);
     const query = auditSearch.trim().toLowerCase();
-    return (!query || [event.sequence_no, event.event_id, payload.actor_user_id, actor?.email, payload.action, auditActionLabels[payload.action.toUpperCase()], payload.source_module, auditModuleLabels[payload.source_module], payload.resource_id, payload.source_ip].some(value => String(value || '').toLowerCase().includes(query))) &&
+    return (!query || [event.sequence_no, event.event_id, payload.actor_user_id, actor?.email, payload.actor_display_name, payload.actor_email, payload.action, auditActionLabels[payload.action.toUpperCase()], payload.source_module, auditModuleLabels[payload.source_module], payload.resource_id, payload.source_ip, payload.context?.record_label, payload.context?.record_category].some(value => String(value || '').toLowerCase().includes(query))) &&
       (!auditModuleFilter || payload.source_module === auditModuleFilter) &&
       (!auditActionFilter || payload.action === auditActionFilter) &&
       (!(auditDateFrom || auditDateTo) || !!date) &&
@@ -2198,6 +2305,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isSidebarExpanded, setIsSidebarExpanded] = useState(false);
+  const [isSidebarPinned, setIsSidebarPinned] = useState(false);
   const [isMaintenanceMenuOpen, setIsMaintenanceMenuOpen] = useState(true);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
   const notifiedRedemptionsThisSessionRef = useRef(new Set<string>());
@@ -2211,7 +2319,30 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return false;
     }
   });
-  const isSidebarCompact = !isSidebarExpanded && !isSidebarOpen;
+  const isSidebarCompact = !isSidebarExpanded && !isSidebarOpen && !isSidebarPinned;
+  const isSidebarWide = isSidebarExpanded || isSidebarPinned;
+
+  const canAutoAdjustSidebar = (): boolean =>
+    !isSidebarPinned && window.matchMedia('(min-width: 1024px)').matches;
+
+  const handleToggleSidebarPin = () => {
+    if (isSidebarPinned) {
+      setIsSidebarPinned(false);
+      return;
+    }
+    setIsSidebarPinned(true);
+    setIsSidebarExpanded(true);
+  };
+
+  const sidebarPinButtonClass = `hidden lg:inline-flex items-center justify-center rounded-lg border p-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500 ${
+    isSidebarPinned
+      ? theme === 'dark'
+        ? 'border-corporate-magenta-500/60 bg-corporate-magenta-500/15 text-corporate-magenta-200'
+        : 'border-corporate-magenta-300 bg-corporate-magenta-50 text-corporate-magenta-700'
+      : theme === 'dark'
+        ? 'border-corporate-teal-700 text-slate-300 hover:bg-corporate-teal-900 hover:text-white'
+        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+  }`;
 
   useEffect(() => {
     if (!isNotificationListOpen) return;
@@ -2922,11 +3053,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleToggleStatus = (id) => {
     const updatedAt = new Date().toISOString();
+    const audit = auditUpdate('transaction', updatedAt);
     setTransactions(prev => prev.map(t => {
       if (isRecordVisible(t) && String(t.id) === String(id) &&
           !['Ditebus', 'Dilelong'].includes(t.status)) {
         const nextStatus = t.status === 'Aktif' ? 'Selesai' : 'Aktif';
-        return { ...t, status: nextStatus, updatedAt };
+        return { ...t, status: nextStatus, ...audit };
       }
       return t;
     }));
@@ -2948,8 +3080,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleDeleteAsset = (id) => {
     const deletedAt = new Date().toISOString();
+    const audit = auditDelete('asset', deletedAt);
     setAssets(prev => prev.map(asset =>
-      asset.id === id ? { ...asset, deletedAt, updatedAt: deletedAt } : asset
+      asset.id === id ? { ...asset, deletedAt, ...audit } : asset
     ));
     setToastMessage('Rekod aset ditandakan sebagai dipadam dan disorokkan.');
     setTimeout(() => setToastMessage(null), 3000);
@@ -2957,8 +3090,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleDelete = (id) => {
     const deletedAt = new Date().toISOString();
+    const audit = auditDelete('transaction', deletedAt);
     setTransactions(prev => prev.map(transaction =>
-      transaction.id === id ? { ...transaction, deletedAt, updatedAt: deletedAt } : transaction
+      transaction.id === id ? { ...transaction, deletedAt, ...audit } : transaction
     ));
     setToastMessage('Rekod transaksi ditandakan sebagai dipadam dan disorokkan.');
     setTimeout(() => setToastMessage(null), 3000);
@@ -3208,6 +3342,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
       const importedTx = [];
       const importedAt = new Date().toISOString();
+      const importedAudit = auditCreate('transaction', importedAt);
       for (let i = 1; i < lines.length; i++) {
         // Regex to split by comma but ignore commas inside quotes
         const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
@@ -3216,8 +3351,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           importedTx.push({
             id: Date.now() + i,
             date: normalizeTransactionDateTime({ date: cols[0] }, importedAt).date,
-            createdAt: importedAt,
-            updatedAt: importedAt,
+            ...importedAudit,
             type: cols[1],
             transactionStatus: getTransactionStatus({ type: cols[1] }),
             institution: cols[2],
@@ -3260,11 +3394,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleAddTransaction = (newTx) => {
     const createdAt = new Date().toISOString();
+    const audit = auditCreate('transaction', createdAt);
+    const assetAudit = auditUpdate('asset', createdAt);
     const selectedAssetIds = !newTx.type.includes('Tebus') ? (newTx.selectedAssetIds || []) : [];
     if (selectedAssetIds.length) {
       setAssets(prev => prev.map(asset =>
         isRecordVisible(asset) && selectedAssetIds.map(String).includes(String(asset.id))
-          ? { ...asset, status: 'Dalam Ar-Rahnu', updatedAt: createdAt }
+          ? { ...asset, status: 'Dalam Ar-Rahnu', ...assetAudit }
           : asset
       ));
     }
@@ -3273,8 +3409,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       ...transactionData,
       transactionStatus: getTransactionStatus(transactionData),
       selectedAssetIds,
-      createdAt,
-      updatedAt: createdAt,
+      ...audit,
       id
     }]);
     setIsModalOpen(false);
@@ -3383,6 +3518,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       );
     }
     const updatedAt = new Date().toISOString();
+    const correctionAudit = auditCreate('correction', updatedAt);
+    const transactionAudit = auditUpdate('transaction', updatedAt);
+    const assetAudit = auditUpdate('asset', updatedAt);
     const remainingAssetIds = sourceAssetIds.filter(assetId => !selectedAssetIds.includes(assetId));
     const releasedWeight = selectedAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
     const remainingWeight = visibleAssets
@@ -3400,6 +3538,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         : correction.totalPaid,
       id: `${Date.now()}`,
       recordedAt: updatedAt,
+      ...correctionAudit,
       date: parseTransactionDateTime(correction.date).toISOString(),
       linkedRefNo: linkedTransaction?.refNo,
       newFinancing: linkedNewFinancing,
@@ -3426,7 +3565,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           selectedAssetId: undefined,
           weight: remainingWeight,
           status,
-          updatedAt
+          ...transactionAudit
         };
       }
       if (linkedTransactionId && String(transaction.id) === String(linkedTransactionId)) {
@@ -3434,7 +3573,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           ...transaction,
           parentTransactionId: actionTransaction.id,
           parentRefNo: actionTransaction.refNo,
-          updatedAt
+          ...transactionAudit
         };
       }
       return transaction;
@@ -3442,7 +3581,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     setAssets(previous => previous.map(asset =>
       isRecordVisible(asset) && selectedAssetIds.includes(String(asset.id))
-        ? { ...asset, status: 'EDT', updatedAt }
+        ? { ...asset, status: 'EDT', ...assetAudit }
         : asset
     ));
 
@@ -3468,6 +3607,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleSaveTransaction = (updatedTx) => {
     const updatedAt = new Date().toISOString();
+    const audit = auditUpdate('transaction', updatedAt);
     const selectedAssetIds = !updatedTx.type.includes('Tebus') ? (updatedTx.selectedAssetIds || []) : [];
     const { selectedAssetId, ...transactionData } = updatedTx;
     const transactionStatus = getTransactionStatus({ ...transactionData, transactionStatus: undefined });
@@ -3479,7 +3619,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             ...transactionData,
             id: transaction.id,
             status: transaction.status,
-            updatedAt,
+            ...audit,
             transactionStatus,
             selectedAssetIds
           }
@@ -3512,8 +3652,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       code: newCode,
       supplier: `${asset.supplier} (Salinan)`,
       date: createdAt,
-      createdAt,
-      updatedAt: createdAt
+      ...auditCreate('asset', createdAt)
     };
     setAssets(prev => [...prev, duplicated]);
     setToastMessage(`Aset [${newCode}] berjaya diduplikasi!`);
@@ -3535,7 +3674,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             code,
             id: editingAsset.id,
             status: assetData.status || editingAsset.status,
-            updatedAt
+            ...auditUpdate('asset', updatedAt)
           }
         : asset
       ));
@@ -3546,8 +3685,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         code,
         id: Date.now(),
         status: assetData.status || 'EDT',
-        createdAt: updatedAt,
-        updatedAt
+        ...auditCreate('asset', updatedAt)
       }]);
       setToastMessage(`Aset [${code}] berjaya didaftarkan!`);
     }
@@ -3570,7 +3708,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const inst = institutions.find(i => i.id === id);
     const deletedAt = new Date().toISOString();
     setInstitutions(prev => prev.map(item =>
-      item.id === id ? { ...item, deletedAt, updatedAt: deletedAt } : item
+      item.id === id ? { ...item, deletedAt, ...auditDelete('institution', deletedAt) } : item
     ));
     setToastMessage(`Institusi "${inst?.name || ''}" ditandakan sebagai dipadam dan disorokkan.`);
     setTimeout(() => setToastMessage(null), 3000);
@@ -3590,10 +3728,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         setTimeout(() => setToastMessage(null), 4000);
         return;
       }
-      setInstitutions(prev => prev.map(i => i.id === editingInstitution.id ? { ...i, ...savedInstitution, id: editingInstitution.id } : i));
+      setInstitutions(prev => prev.map(i => i.id === editingInstitution.id
+        ? { ...i, ...savedInstitution, id: editingInstitution.id, ...auditUpdate('institution', new Date().toISOString()) }
+        : i));
       setToastMessage(`Institusi "${savedInstitution.name}" berjaya dikemaskini!`);
     } else {
-      setInstitutions(prev => [...prev, { ...savedInstitution, id: Date.now() }]);
+      setInstitutions(prev => [...prev, { ...savedInstitution, id: Date.now(), ...auditCreate('institution', new Date().toISOString()) }]);
       setToastMessage(`Institusi baharu "${savedInstitution.name}" berjaya ditambah!`);
     }
     setIsInstitutionModalOpen(false);
@@ -3616,7 +3756,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const supplier = suppliers.find(item => item.id === id);
     const deletedAt = new Date().toISOString();
     setSuppliers(prev => prev.map(item =>
-      item.id === id ? { ...item, deletedAt, updatedAt: deletedAt } : item
+      item.id === id ? { ...item, deletedAt, ...auditDelete('supplier', deletedAt) } : item
     ));
     setToastMessage(`Pembekal "${supplier?.name || ''}" ditandakan sebagai dipadam dan disorokkan.`);
     setTimeout(() => setToastMessage(null), 3000);
@@ -3643,7 +3783,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
     if (editingSupplier) {
       const assetUpdatedAt = new Date().toISOString();
-      setSuppliers(prev => prev.map(item => item.id === editingSupplier.id ? { ...item, ...updatedSupplier, id: editingSupplier.id } : item));
+      const supplierAudit = auditUpdate('supplier', assetUpdatedAt);
+      const assetAudit = auditUpdate('asset', assetUpdatedAt);
+      setSuppliers(prev => prev.map(item =>
+        item.id === editingSupplier.id ? { ...item, ...updatedSupplier, id: editingSupplier.id, ...supplierAudit } : item
+      ));
       setAssets(prev => prev.map(asset => {
         const codes = asset.supplierCodes || suppliers
           .filter(item => item.name === asset.supplier || asset.supplier?.split(',').map(name => name.trim()).includes(item.name))
@@ -3655,12 +3799,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           ...asset,
           supplierCodes: updatedCodes,
           supplier: updatedNames.join(', '),
-          updatedAt: assetUpdatedAt
+          ...assetAudit
         };
       }));
       setToastMessage(`Maklumat pembekal "${updatedSupplier.name}" berjaya dikemaskini!`);
     } else {
-      setSuppliers(prev => [...prev, { ...updatedSupplier, id: Date.now() }]);
+      setSuppliers(prev => [...prev, { ...updatedSupplier, id: Date.now(), ...auditCreate('supplier', new Date().toISOString()) }]);
       setToastMessage(`Pembekal "${updatedSupplier.name}" berjaya didaftarkan!`);
     }
     setIsSupplierModalOpen(false);
@@ -3764,22 +3908,24 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
       {/* SIDEBAR */}
       <aside
         onMouseEnter={() => {
-          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(true);
+          if (canAutoAdjustSidebar()) setIsSidebarExpanded(true);
         }}
         onMouseLeave={() => {
-          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(false);
+          if (canAutoAdjustSidebar()) setIsSidebarExpanded(false);
         }}
         onFocusCapture={() => {
-          if (window.matchMedia('(min-width: 1024px)').matches) setIsSidebarExpanded(true);
+          if (canAutoAdjustSidebar()) setIsSidebarExpanded(true);
         }}
         onBlurCapture={event => {
-          if (!event.currentTarget.contains(event.relatedTarget) && window.matchMedia('(min-width: 1024px)').matches) {
+          if (!canAutoAdjustSidebar()) return;
+          const nextFocus = event.relatedTarget;
+          if (!(nextFocus instanceof Node) || !event.currentTarget.contains(nextFocus)) {
             setIsSidebarExpanded(false);
           }
         }}
-        className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-[width,transform] duration-300 ease-in-out w-64 max-w-[85vw] ${isSidebarExpanded ? 'lg:w-64' : 'lg:w-20'} ${theme === 'dark' ? 'bg-corporate-teal-950 text-slate-100 border-corporate-teal-800' : 'bg-[#F8F3EA] text-slate-800 border-slate-200'} border-r flex flex-col shadow-2xl z-50 shrink-0`}
+        className={`fixed lg:relative inset-y-0 left-0 transform ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'} lg:translate-x-0 transition-[width,transform] duration-300 ease-in-out w-64 max-w-[85vw] ${isSidebarWide ? 'lg:w-64' : 'lg:w-20'} ${theme === 'dark' ? 'bg-corporate-teal-950 text-slate-100 border-corporate-teal-800' : 'bg-[#F8F3EA] text-slate-800 border-slate-200'} border-r flex flex-col shadow-2xl z-50 shrink-0`}
       >
-        <div className={`flex items-center border-b ${isSidebarCompact ? 'justify-center px-3 py-5 lg:justify-center' : 'justify-between p-6'} ${theme === 'dark' ? 'border-corporate-teal-800/50' : 'border-slate-200'}`}>
+        <div className={`flex items-center border-b ${isSidebarCompact ? 'flex-col gap-2 px-3 py-4' : 'justify-between p-6'} ${theme === 'dark' ? 'border-corporate-teal-800/50' : 'border-slate-200'}`}>
           <div className="flex items-center space-x-3">
             <div className="relative flex h-12 w-12 shrink-0 items-center justify-center">
               <span aria-hidden="true" className={`absolute inset-0 rounded-full blur-md ${theme === 'dark' ? 'bg-gradient-to-br from-corporate-magenta-400/40 via-corporate-teal-400/20 to-transparent' : ''}`} />
@@ -3798,9 +3944,21 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               }`}>Refinance System</p>
             </div>
           </div>
-          <button aria-label="Tutup menu" className={`lg:hidden transition-colors ${theme === 'dark' ? 'text-slate-300 hover:text-white' : 'text-slate-500 hover:text-slate-900'}`} onClick={() => setIsSidebarOpen(false)}>
-            <X size={24} />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleToggleSidebarPin}
+              aria-pressed={isSidebarPinned}
+              aria-label={isSidebarPinned ? 'Lepaskan sematan sidebar' : 'Semat sidebar supaya sentiasa terbuka'}
+              title={isSidebarPinned ? 'Lepaskan sematan — sidebar mengecil automatik semula' : 'Semat sidebar supaya sentiasa terbuka'}
+              className={sidebarPinButtonClass}
+            >
+              {isSidebarPinned ? <PinOff size={18} /> : <Pin size={18} />}
+            </button>
+            <button aria-label="Tutup menu" className={`lg:hidden transition-colors ${theme === 'dark' ? 'text-slate-300 hover:text-white' : 'text-slate-500 hover:text-slate-900'}`} onClick={() => setIsSidebarOpen(false)}>
+              <X size={24} />
+            </button>
+          </div>
         </div>
 
         <nav className={`flex-1 py-6 space-y-2 overflow-y-auto custom-scrollbar ${isSidebarCompact ? 'px-3' : 'px-4'}`}>
@@ -4049,16 +4207,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               onClick={() => setIsProfileModalOpen(true)}
               title="Pengurusan profil"
               aria-label="Buka pengurusan profil"
-              className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold border-2 border-emerald-500 shrink-0 hover:ring-2 hover:ring-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+              className="w-9 h-9 md:w-10 md:h-10 rounded-full overflow-hidden bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold border-2 border-emerald-500 shrink-0 hover:ring-2 hover:ring-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
             >
-              {String(user.user_metadata?.full_name || user.user_metadata?.name || '')
-                .trim()
-                .split(/\s+/)
-                .filter(Boolean)
-                .slice(0, 2)
-                .map(part => part[0])
-                .join('')
-                .toUpperCase() || (user.email || 'AR').slice(0, 2).toUpperCase()}
+              {profilePhotoUrl ? (
+                <img src={profilePhotoUrl} alt="Gambar profil" className="h-full w-full object-cover" />
+              ) : (
+                String(user.user_metadata?.full_name || user.user_metadata?.name || '')
+                  .trim()
+                  .split(/\s+/)
+                  .filter(Boolean)
+                  .slice(0, 2)
+                  .map(part => part[0])
+                  .join('')
+                  .toUpperCase() || (user.email || 'AR').slice(0, 2).toUpperCase()
+              )}
             </button>
             <button onClick={onSignOut} title="Log keluar" aria-label="Log keluar" className={`rounded-lg p-2 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'text-white/80 hover:bg-white/15 hover:text-white'}`}>
               <LogOut size={18} />
@@ -4365,7 +4527,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         const actor = organizationUsers.find(member => member.id === payload.actor_user_id);
                         const actorName = actor?.email ||
                           (payload.actor_user_id === user.id ? user.email : null) ||
+                          payload.actor_display_name ||
+                          payload.actor_email ||
                           (payload.actor_user_id ? 'Ahli organisasi' : 'Sistem');
+                        const recordLabel = payload.context?.record_label;
+                        const recordCategory = payload.context?.record_category;
                         const actionLabel = auditActionLabels[payload.action.toUpperCase()] || payload.action;
                         const moduleLabel = auditModuleLabels[payload.source_module] || payload.source_module;
                         const resourceLabel = auditResourceLabels[payload.resource_type] || payload.resource_type;
@@ -4386,6 +4552,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             <td className="px-4 py-3" title={`ID rekod berkaitan: ${payload.resource_id}`}>
                               <p className={`inline-block rounded-full border px-2.5 py-1 text-xs font-bold ${supplierCategoryColor(payload.action)}`}>{actionLabel}</p>
                               <p className="text-xs text-slate-500">{moduleLabel} · {resourceLabel}</p>
+                              {recordLabel && <p className="mt-0.5 text-xs text-slate-600">Rekod: {recordLabel}{recordCategory ? ` · ${recordCategory}` : ''}</p>}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-600">{String(payload.source_ip || '—')}</td>
                             <td className="px-4 py-3">
@@ -6664,8 +6831,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                       onChange={event => {
                                         const redemptionDate = event.target.value;
                                         const updatedAt = new Date().toISOString();
+                                        const audit = auditUpdate('transaction', updatedAt);
                                         setTransactions(prev => prev.map(item =>
-                                          item.id === tx.id ? { ...item, redemptionDate, updatedAt } : item
+                                          item.id === tx.id ? { ...item, redemptionDate, ...audit } : item
                                         ));
                                       }}
                                       className={`p-1.5 border rounded-xl text-xs font-semibold outline-none focus:ring-2 focus:ring-corporate-teal-500 ${
@@ -9142,6 +9310,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             activeLetters: transactions.filter(transaction => !['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status)).length
           }}
           onClose={() => setIsProfileModalOpen(false)}
+          profilePhotoUrl={profilePhotoUrl}
+          onProfilePhotoChange={next => {
+            setProfilePhotoUrl(next?.url || null);
+            setProfilePhotoPath(next?.path || '');
+          }}
         />
       )}
 
@@ -9319,11 +9492,13 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
 
 type ProfileSectionId = 'personal' | 'heir' | 'bank' | 'security' | 'pdpa';
 
-function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
+function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUrl, onProfilePhotoChange, onClose }: {
   user: User;
   supabaseClient: SupabaseClient;
   theme: 'light' | 'dark';
   eligibility?: { portfolioValue: number; maxMargin: number; activeLetters: number };
+  profilePhotoUrl: string | null;
+  onProfilePhotoChange: (next: { path: string; url: string | null } | null) => void;
   onClose: () => void;
 }) {
   const metadata = (user.user_metadata || {}) as Record<string, string>;
@@ -9358,6 +9533,10 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [profileBusy, setProfileBusy] = useState(false);
   const [passwordBusy, setPasswordBusy] = useState(false);
+  const [avatarPath, setAvatarPath] = useState(String(metadata.avatar_photo_path || ''));
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(profilePhotoUrl);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [profileError, setProfileError] = useState('');
   const [profileNotice, setProfileNotice] = useState('');
   const [passwordError, setPasswordError] = useState('');
@@ -9392,6 +9571,15 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
     };
   }, [supabaseClient]);
 
+  useEffect(() => {
+    setAvatarPath(String(user.user_metadata?.avatar_photo_path || ''));
+  }, [user.user_metadata?.avatar_photo_path]);
+
+  useEffect(() => {
+    if (avatarBusy) return;
+    setAvatarPreview(profilePhotoUrl);
+  }, [profilePhotoUrl, avatarBusy]);
+
   const requiredProfileFields = [fullName, icNumber, profileForm.phone, profileForm.addressLine, profileForm.postcode, heirForm.name, heirForm.relationship, bankForm.accountNumber];
   const completedProfileFields = requiredProfileFields.filter(value => String(value || '').trim().length > 0).length;
   const isProfileComplete = completedProfileFields === requiredProfileFields.length;
@@ -9403,6 +9591,81 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
     const { error } = await supabaseClient.auth.updateUser({ data: { ...user.user_metadata, ...patch } });
     if (error) throw error;
     setProfileNotice(successMessage);
+  };
+
+  const handleAvatarSelection = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!allowedAssetImageTypes.includes(file.type) || file.size === 0 || file.size > maximumProfilePhotoSize) {
+      setProfileError('Pilih gambar JPEG, PNG atau WebP yang tidak melebihi 2 MB.');
+      setProfileNotice('');
+      return;
+    }
+    setAvatarBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+    const previousPath = avatarPath;
+    const path = `${user.id}/avatar/${Date.now()}-${crypto.randomUUID()}`;
+    try {
+      const { error: uploadError } = await supabaseClient.storage
+        .from(profilePhotoBucket)
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (uploadError) {
+        if (/bucket not found/i.test(uploadError.message)) {
+          throw new Error('Storan gambar profil belum disediakan. Pentadbir perlu menjalankan supabase/profile-photos.sql dalam Supabase SQL Editor, kemudian cuba lagi.');
+        }
+        throw uploadError;
+      }
+      try {
+        await saveMetadata({ avatar_photo_path: path }, 'Gambar profil berjaya dikemas kini.');
+      } catch (metadataError) {
+        try {
+          await supabaseClient.storage.from(profilePhotoBucket).remove([path]);
+        } catch {
+          // fail senyap: fail baharu akan dibuang secara manual jika perlu
+        }
+        throw metadataError;
+      }
+      const { data } = await supabaseClient.storage.from(profilePhotoBucket).createSignedUrl(path, 3600);
+      const signedUrl = data?.signedUrl || null;
+      setAvatarPath(path);
+      setAvatarPreview(signedUrl);
+      onProfilePhotoChange({ path, url: signedUrl });
+      if (previousPath && previousPath !== path) {
+        try {
+          await supabaseClient.storage.from(profilePhotoBucket).remove([previousPath]);
+        } catch {
+          // fail lama tidak kritikal
+        }
+      }
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : 'Gambar profil tidak dapat disimpan.');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleAvatarRemove = async () => {
+    if (avatarBusy) return;
+    setAvatarBusy(true);
+    setProfileError('');
+    setProfileNotice('');
+    const previousPath = avatarPath;
+    try {
+      await saveMetadata({ avatar_photo_path: null }, 'Gambar profil dibuang.');
+      setAvatarPath('');
+      setAvatarPreview(null);
+      onProfilePhotoChange({ path: '', url: null });
+      if (previousPath) {
+        const { error } = await supabaseClient.storage.from(profilePhotoBucket).remove([previousPath]);
+        if (error) console.warn('Gambar profil lama tidak dapat dibuang:', error.message);
+      }
+    } catch (error) {
+      setProfileError(error instanceof Error ? error.message : 'Gambar profil tidak dapat dibuang.');
+    } finally {
+      setAvatarBusy(false);
+    }
   };
 
   const handleProfileSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -9614,8 +9877,12 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
         <div className="shrink-0 border-b border-slate-200/70 bg-gradient-to-br from-corporate-teal-700 via-corporate-teal-800 to-corporate-green-900 px-4 pb-4 pt-4 text-white sm:px-6 sm:pb-5 sm:pt-5">
           <div className="flex items-start justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-white/15 text-white">
-                <UserRound size={22} />
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white/15 text-white">
+                {avatarPreview ? (
+                  <img src={avatarPreview} alt="Gambar profil" className="h-full w-full object-cover" />
+                ) : (
+                  <UserRound size={22} />
+                )}
               </div>
               <div>
                 <h2 id="profile-modal-title" className="text-lg font-bold sm:text-xl">Profil Saya</h2>
@@ -9723,6 +9990,48 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, onClose }: {
                   <div>
                     <h3 className={`text-base font-bold ${headingClass}`}>Butiran Peribadi & Alamat</h3>
                     <p className={`mt-1 text-xs leading-relaxed ${secondaryTextClass}`}>Maklumat ini digunakan untuk pengesahan identiti dan surat-menyurat rasmi.</p>
+                  </div>
+
+                  <div className={`flex flex-col items-center gap-3 rounded-xl border p-3.5 sm:flex-row ${isDark ? 'border-corporate-teal-800 bg-corporate-teal-900/40' : 'border-slate-200 bg-slate-50'}`}>
+                    <div className={`flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-full border-2 ${isDark ? 'border-corporate-teal-600 bg-corporate-teal-800' : 'border-corporate-teal-200 bg-white'}`}>
+                      {avatarPreview ? (
+                        <img src={avatarPreview} alt="Gambar profil" className="h-full w-full object-cover" />
+                      ) : (
+                        <UserRound size={30} className={isDark ? 'text-corporate-teal-300' : 'text-corporate-teal-600'} />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1 text-center sm:text-left">
+                      <p className={`text-sm font-semibold ${headingClass}`}>Gambar Profil</p>
+                      <p className={`mt-0.5 text-xs leading-relaxed ${secondaryTextClass}`}>Format JPEG, PNG atau WebP, maksimum 2 MB. Gambar ini dipaparkan pada butang profil anda.</p>
+                      <div className="mt-2 flex flex-wrap items-center justify-center gap-2 sm:justify-start">
+                        <button
+                          type="button"
+                          onClick={() => avatarInputRef.current?.click()}
+                          disabled={avatarBusy}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-corporate-teal-600 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-corporate-teal-700 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          <UploadCloud size={14} /> {avatarBusy ? 'Memproses...' : avatarPreview ? 'Tukar Gambar' : 'Muat Naik Gambar'}
+                        </button>
+                        {avatarPreview && (
+                          <button
+                            type="button"
+                            onClick={handleAvatarRemove}
+                            disabled={avatarBusy}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-bold text-rose-700 transition-colors hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          >
+                            <Trash2 size={14} /> Buang Gambar
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        ref={avatarInputRef}
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        aria-label="Muat naik gambar profil"
+                        className="hidden"
+                        onChange={handleAvatarSelection}
+                      />
+                    </div>
                   </div>
 
                   <div className={`rounded-xl border p-3.5 ${isDark ? 'border-[#78350f] bg-[#3b1d05]' : 'border-[#fcd34d] bg-[#fffbeb]'}`}>
@@ -11678,7 +11987,12 @@ function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGol
     { label: 'Mutu Ketulenan', value: transaction.purity || 'N/A' },
     { label: 'Berat Diikat', value: `${getCurrentPledgedWeight(transaction)}g` },
     { label: 'Bil. Rekod Pembetulan', value: String(getCorrectionEvents(transaction).length) },
-    { label: 'Status Rekod', value: transaction.status || 'Aktif' }
+    { label: 'Status Rekod', value: transaction.status || 'Aktif' },
+    { label: 'Didaftar Oleh', value: describeRecordActor(transaction.createdBy) },
+    { label: 'Tarikh Didaftar', value: formatTransactionDateTime(transaction.createdAt || transaction.date) },
+    { label: 'Dikemas Kini Oleh', value: describeRecordActor(transaction.updatedBy) },
+    { label: 'Kemas Kini Terakhir', value: formatTransactionDateTime(transaction.updatedAt) },
+    { label: 'Operasi Terakhir', value: recordOperationLabels[transaction.lastAction] || 'Tidak direkod' }
   ];
 
   return (
@@ -11834,7 +12148,9 @@ function AssetDetailModal({ asset, statusInfo, currentGoldPrice, relatedTransact
     { label: 'Pembekal Emas', value: asset.supplier || '-' },
     { label: 'Kod Pembekal', value: (asset.supplierCodes || []).join(', ') || '-' },
     { label: 'Tarikh Didaftar', value: formatTransactionDateTime(asset.createdAt || asset.date) },
-    { label: 'Kemas Kini Terakhir', value: formatTransactionDateTime(asset.updatedAt) }
+    { label: 'Didaftar Oleh', value: describeRecordActor(asset.createdBy) },
+    { label: 'Kemas Kini Terakhir', value: formatTransactionDateTime(asset.updatedAt) },
+    { label: 'Dikemas Kini Oleh', value: describeRecordActor(asset.updatedBy) }
   ];
 
   return (
