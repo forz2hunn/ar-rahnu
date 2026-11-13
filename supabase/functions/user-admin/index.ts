@@ -2,7 +2,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-audit-device-id',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
@@ -74,6 +74,7 @@ Deno.serve(async (request) => {
         'x-audit-user-agent': request.headers.get('user-agent') || '',
         'x-audit-forwarded-for': request.headers.get('x-forwarded-for') || '',
         'x-audit-proxy-ip': request.headers.get('x-real-ip') || '',
+        'x-audit-device-id': request.headers.get('x-audit-device-id') || '',
       },
     },
     auth: { persistSession: false, autoRefreshToken: false },
@@ -201,10 +202,17 @@ Deno.serve(async (request) => {
         .order('created_at', { ascending: true });
       if (error) throw error;
 
-      const users = await Promise.all((members || []).map(async (member) => {
+      const users = [];
+      for (const member of members || []) {
         const { data, error: userLookupError } = await adminClient.auth.admin.getUserById(member.user_id);
-        if (userLookupError) throw userLookupError;
-        return {
+        if (userLookupError) {
+          console.warn('Member account could not be loaded:', {
+            userId: member.user_id,
+            error: userLookupError.message,
+          });
+          continue;
+        }
+        users.push({
           id: member.user_id,
           email: data.user?.email || '',
           role: member.role,
@@ -213,8 +221,8 @@ Deno.serve(async (request) => {
           createdAt: member.created_at,
           lastSignInAt: data.user?.last_sign_in_at || null,
           emailConfirmedAt: data.user?.email_confirmed_at || null,
-        };
-      }));
+        });
+      }
       return jsonResponse({ users });
     }
 

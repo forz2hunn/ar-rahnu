@@ -150,11 +150,14 @@ type AuditContext = {
   database_table?: string;
   database_operation?: string;
   collection?: string;
+  changed_collections?: string[] | null;
   record_label?: string;
   record_category?: string | null;
   record_action?: string | null;
+  changed_fields?: string[] | null;
   changed_by?: RecordAuditActor | null;
   changed_at?: string | null;
+  recorded_from?: string;
   [key: string]: unknown;
 };
 type AuditPayload = {
@@ -170,6 +173,7 @@ type AuditPayload = {
   resource_type: string;
   resource_id: string;
   source_module: string;
+  session_id?: string | null;
   user_agent: string | null;
   device_id: string | null;
   source_ip: string | null;
@@ -191,10 +195,41 @@ type AuditEvent = {
   event_hash: string;
   created_at: string;
 };
+type AuditFeedRow = {
+  event_id: string;
+  chain_scope: string;
+  sequence_no: number;
+  occurred_at_utc: string;
+  actor_user_id: string | null;
+  actor_email: string | null;
+  actor_display_name: string | null;
+  action: string;
+  resource_type: string;
+  resource_id: string;
+  source_module: string;
+  context: AuditContext | null;
+  source_ip: string | null;
+  user_agent: string | null;
+  session_id: string | null;
+  previous_hash: string;
+  event_hash: string;
+  created_at: string;
+};
 const auditActionLabels: Record<string, string> = {
   CREATE: 'Rekod baharu ditambah',
   UPDATE: 'Maklumat dikemas kini',
   DELETE: 'Rekod dipadam',
+  SESSION_START: 'Sesi bermula (log masuk)',
+  SESSION_END: 'Sesi tamat (log keluar)',
+  PASSWORD_CHANGED: 'Kata laluan ditukar',
+  PROFILE_UPDATED: 'Butiran peribadi dikemas kini',
+  HEIR_UPDATED: 'Maklumat waris dikemas kini',
+  BANK_UPDATED: 'Akaun bank dikemas kini',
+  PDPA_CONSENT: 'Persetujuan PDPA direkodkan',
+  AVATAR_UPDATED: 'Gambar profil dikemas kini',
+  AVATAR_REMOVED: 'Gambar profil dibuang',
+  DATA_EXPORTED: 'Data dieksport',
+  AUDIT_EXPORTED: 'Jejak audit dieksport',
   INVITE_USER: 'Jemputan pengguna dihantar',
   CREATE_USER: 'Akaun pengguna diwujudkan',
   UPDATE_USER_AUTH: 'Maklumat akaun dikemas kini',
@@ -203,6 +238,9 @@ const auditActionLabels: Record<string, string> = {
 };
 const auditModuleLabels: Record<string, string> = {
   Portfolio: 'Portfolio',
+  Keselamatan: 'Keselamatan & sesi',
+  Profil: 'Profil ahli',
+  Pelaporan: 'Pelaporan & eksport',
   'User Management': 'Pengurusan pengguna',
   'Organization Management': 'Pengurusan organisasi'
 };
@@ -211,6 +249,8 @@ const auditResourceLabels: Record<string, string> = {
   ar_rahnu_organization_members: 'Keahlian organisasi',
   ar_rahnu_organizations: 'Maklumat organisasi',
   'auth.users': 'Akaun pengguna',
+  user_activity: 'Aktiviti pengguna',
+  portfolio_export: 'Eksport data portfolio',
   transactions: 'Rekod SAG (transaksi)',
   assets: 'Aset emas',
   institutions: 'Institusi',
@@ -541,6 +581,51 @@ const formatMalaysiaDateTime = (timestamp: string) => {
 const describeRecordActor = (actor?: RecordAuditActor | null): string => {
   if (!actor) return 'Tidak direkod';
   return actor.name || actor.email || actor.id || 'Tidak direkod';
+};
+const recordAuditActivity = async (
+  client: SupabaseClient,
+  action: string,
+  sourceModule: string,
+  resourceType: string,
+  resourceId: string,
+  context: Record<string, unknown> = {}
+): Promise<void> => {
+  try {
+    const { error } = await client.rpc('ar_rahnu_record_activity', {
+      p_action: action,
+      p_source_module: sourceModule,
+      p_resource_type: resourceType,
+      p_resource_id: resourceId,
+      p_context: context
+    });
+    if (error) console.warn('Aktiviti audit tidak dapat direkodkan:', error.message);
+  } catch (error) {
+    console.warn('Aktiviti audit tidak dapat direkodkan:', error);
+  }
+};
+const describeAuditDevice = (userAgent?: string | null): string => {
+  if (!userAgent) return 'Tidak direkod';
+  const browser = /Edg\//.test(userAgent) ? 'Edge'
+    : /OPR\//.test(userAgent) ? 'Opera'
+      : /Chrome\//.test(userAgent) ? 'Chrome'
+        : /Firefox\//.test(userAgent) ? 'Firefox'
+          : /Safari\//.test(userAgent) ? 'Safari'
+            : 'Pelayar lain';
+  const platform = /Windows NT/.test(userAgent) ? 'Windows'
+    : /Android/.test(userAgent) ? 'Android'
+      : /iPhone|iPad|iPod/.test(userAgent) ? 'iOS'
+        : /Mac OS X/.test(userAgent) ? 'macOS'
+          : /Linux/.test(userAgent) ? 'Linux'
+            : 'OS lain';
+  const form = /Mobile|Android|iPhone|iPod/.test(userAgent)
+    ? 'Telefon'
+    : /iPad|Tablet/.test(userAgent) ? 'Tablet' : 'Komputer';
+  return `${browser} · ${platform} · ${form}`;
+};
+const formatAuditFieldList = (fields?: string[] | null): string => {
+  if (!fields || fields.length === 0) return '';
+  const shown = fields.slice(0, 6).join(', ');
+  return fields.length > 6 ? `${shown} +${fields.length - 6}` : shown;
 };
 const parseTransactionDateTime = (value) => {
   const hasTimezone = /(?:Z|[+-]\d{2}:\d{2})$/i.test(value);
@@ -885,6 +970,12 @@ function AuthenticationGate({ supabaseClient }: { supabaseClient: SupabaseClient
     try {
       const { error } = await supabaseClient.auth.updateUser({ password: newPassword });
       if (error) throw error;
+      if (session?.user) {
+        void recordAuditActivity(supabaseClient, 'PASSWORD_CHANGED', 'Keselamatan', 'auth.users', session.user.id, {
+          changed_fields: ['password'],
+          source: 'invite_or_recovery'
+        });
+      }
       window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
       setRequiresPasswordUpdate(false);
       setNewPassword('');
@@ -984,6 +1075,22 @@ function ThemeToggle({ theme, onToggle }: { theme: 'light' | 'dark'; onToggle: (
       <span role="tooltip" className="pointer-events-none absolute right-0 top-full z-[90] mt-2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
         {isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
       </span>
+    </button>
+  );
+}
+
+function PageRefreshButton({ onRefresh, busy }: { onRefresh: () => void; busy: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onRefresh}
+      disabled={busy}
+      aria-label="Muat semula rekod daripada Supabase"
+      title="Muat semula rekod terkini daripada Supabase"
+      className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3 py-2 text-xs font-semibold text-white backdrop-blur-md transition-all hover:bg-white/20 active:scale-95 disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm"
+    >
+      <RefreshCw size={15} className={busy ? 'animate-spin' : ''} />
+      <span className="hidden sm:inline">{busy ? 'Memuat semula…' : 'Muat Semula'}</span>
     </button>
   );
 }
@@ -1239,6 +1346,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isRealtimeConnected, setIsRealtimeConnected] = useState(false);
   const [hydrationRetry, setHydrationRetry] = useState(0);
   const [saveRetry, setSaveRetry] = useState(0);
+  const [isRefreshingRecords, setIsRefreshingRecords] = useState(false);
   const [profilePhotoPath, setProfilePhotoPath] = useState(() => String(user.user_metadata?.avatar_photo_path || ''));
   const [profilePhotoUrl, setProfilePhotoUrl] = useState<string | null>(null);
 
@@ -1271,6 +1379,26 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     updatedAt: at,
     deletedBy: recordActor
   });
+
+  const sessionAuditLoggedRef = useRef(false);
+
+  useEffect(() => {
+    if (sessionAuditLoggedRef.current) return;
+    sessionAuditLoggedRef.current = true;
+    try {
+      const sessionKey = `ar_rahnu_session_audit_${user.id}`;
+      if (sessionStorage.getItem(sessionKey)) return;
+      sessionStorage.setItem(sessionKey, '1');
+    } catch {
+      // storan sesi tidak tersedia; rekod tetap dihantar
+    }
+    void recordAuditActivity(supabaseClient, 'SESSION_START', 'Keselamatan', 'auth.users', user.id, {
+      path: window.location.pathname,
+      locale: navigator.language,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      viewport: `${window.innerWidth}x${window.innerHeight}`
+    });
+  }, [supabaseClient, user.id]);
 
   useEffect(() => {
     setAssets(currentAssets => syncAssetStatuses(currentAssets, transactions));
@@ -1671,6 +1799,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       ) {
         throw new Error('Fungsi pengurusan pengguna di Supabase belum dikemas kini. Deploy semula fungsi user-admin, kemudian cuba lagi.');
       }
+      if (!responseError && /failed to send a request|failed to fetch|networkerror|load failed/i.test(error.message || '')) {
+        throw new Error('Panggilan ke fungsi user-admin gagal pada peringkat rangkaian (CORS atau fungsi belum di-deploy). Semak Supabase → Edge Functions, kemudian cuba lagi.');
+      }
       throw new Error(responseError || error.message);
     }
     if (data?.error) {
@@ -1789,7 +1920,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   });
   const auditChainScope = organizationMembership?.organization_id
     ? `organization:${organizationMembership.organization_id}`
-    : null;
+    : `user:${user.id}`;
   const auditModules = [...new Set(auditEvents.map(event => event.event_payload.source_module))].sort();
   const auditActions = [...new Set(auditEvents.map(event => event.event_payload.action))].sort();
   const filteredAuditEvents = auditEvents.filter(event => {
@@ -1798,7 +1929,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const timestamp = new Date(payload.occurred_at_utc);
     const date = Number.isNaN(timestamp.getTime()) ? '' : getMalaysiaDateKey(timestamp);
     const query = auditSearch.trim().toLowerCase();
-    return (!query || [event.sequence_no, event.event_id, payload.actor_user_id, actor?.email, payload.actor_display_name, payload.actor_email, payload.action, auditActionLabels[payload.action.toUpperCase()], payload.source_module, auditModuleLabels[payload.source_module], payload.resource_id, payload.source_ip, payload.context?.record_label, payload.context?.record_category].some(value => String(value || '').toLowerCase().includes(query))) &&
+    return (!query || [event.sequence_no, event.event_id, payload.actor_user_id, actor?.email, payload.actor_display_name, payload.actor_email, payload.action, auditActionLabels[payload.action.toUpperCase()], payload.source_module, auditModuleLabels[payload.source_module], payload.resource_id, payload.source_ip, payload.context?.record_label, payload.context?.record_category, (payload.context?.changed_fields || []).join(' '), describeAuditDevice(payload.user_agent)].some(value => String(value || '').toLowerCase().includes(query))) &&
       (!auditModuleFilter || payload.source_module === auditModuleFilter) &&
       (!auditActionFilter || payload.action === auditActionFilter) &&
       (!(auditDateFrom || auditDateTo) || !!date) &&
@@ -1906,22 +2037,67 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   useEffect(() => setTrafficPage(0), [trafficSearch, trafficPageSize]);
 
   const readAuditChain = async () => {
-    if (!auditChainScope) throw new Error('Skop organisasi audit belum tersedia.');
+    if (!auditChainScope) throw new Error('Skop audit belum tersedia.');
     const events: AuditEvent[] = [];
-    const pageSize = 500;
-    for (let offset = 0; ; offset += pageSize) {
+    // Saiz halaman kecil: canonical_payload bagi peristiwa lama boleh bersaiz
+    // megabait, dan halaman besar boleh mencetuskan statement timeout. Jika
+    // satu halaman masih tamat masa, cuba semula satu baris demi satu.
+    let pageSize = 10;
+    let offset = 0;
+    while (true) {
       const { data, error } = await supabaseClient
         .from('ar_rahnu_audit_events')
-        .select('event_id, chain_scope, sequence_no, event_payload, canonical_payload, previous_hash, event_hash, created_at')
+        .select('event_id, chain_scope, sequence_no, canonical_payload, previous_hash, event_hash, created_at')
         .eq('chain_scope', auditChainScope)
         .order('sequence_no', { ascending: true })
         .range(offset, offset + pageSize - 1);
-      if (error) throw error;
+      if (error) {
+        if (pageSize > 1 && /statement timeout|canceling statement/i.test(error.message || '')) {
+          pageSize = 1;
+          continue;
+        }
+        throw error;
+      }
       const page = (data || []) as AuditEvent[];
       events.push(...page);
       if (page.length < pageSize) return events;
+      offset += pageSize;
     }
   };
+
+  const toAuditEvent = (row: AuditFeedRow): AuditEvent => ({
+    event_id: row.event_id,
+    chain_scope: row.chain_scope,
+    sequence_no: row.sequence_no,
+    canonical_payload: '',
+    previous_hash: row.previous_hash,
+    event_hash: row.event_hash,
+    created_at: row.created_at,
+    event_payload: {
+      event_id: row.event_id,
+      chain_scope: row.chain_scope,
+      sequence_no: row.sequence_no,
+      occurred_at_utc: row.occurred_at_utc,
+      actor_user_id: row.actor_user_id,
+      actor_email: row.actor_email,
+      actor_display_name: row.actor_display_name,
+      subject_user_id: null,
+      action: row.action,
+      resource_type: row.resource_type,
+      resource_id: row.resource_id,
+      source_module: row.source_module,
+      session_id: row.session_id,
+      user_agent: row.user_agent,
+      device_id: null,
+      source_ip: row.source_ip,
+      proxy_ip: null,
+      context: row.context || {},
+      payload_before: null,
+      payload_before_sha256: null,
+      payload_after: null,
+      payload_after_sha256: null
+    }
+  });
 
   const refreshAuditEvents = async () => {
     if (!auditChainScope) return;
@@ -1931,16 +2107,37 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     try {
       const { data, error } = await supabaseClient
         .from('ar_rahnu_audit_events')
-        .select('event_id, chain_scope, sequence_no, event_payload, canonical_payload, previous_hash, event_hash, created_at')
+        .select('event_id, chain_scope, sequence_no, occurred_at_utc, actor_user_id, actor_email, actor_display_name, action, resource_type, resource_id, source_module, context, source_ip, user_agent, session_id, previous_hash, event_hash, created_at')
         .eq('chain_scope', auditChainScope)
         .order('sequence_no', { ascending: false })
-        .limit(100);
-      if (error) throw error;
-      setAuditEvents((data || []) as AuditEvent[]);
+        .limit(250);
+      if (error) {
+        if (/column .*(occurred_at_utc|actor_email|context).* does not exist|schema cache/i.test(error.message || '')) {
+          throw new Error('Kolum ringkasan audit belum dipasang. Jalankan semula supabase/audit-trail.sql dalam Supabase SQL Editor.');
+        }
+        throw error;
+      }
+      setAuditEvents(((data || []) as AuditFeedRow[]).map(toAuditEvent));
     } catch (error) {
       setAuditError(error.message || 'Rekod audit tidak dapat dimuatkan.');
     } finally {
       setAuditLoading(false);
+    }
+  };
+
+  const openAuditEvent = async (event: AuditEvent) => {
+    setSelectedAuditEvent(event);
+    if (event.canonical_payload) return;
+    try {
+      const { data, error } = await supabaseClient
+        .from('ar_rahnu_audit_events')
+        .select('event_id, chain_scope, sequence_no, event_payload, canonical_payload, previous_hash, event_hash, created_at')
+        .eq('event_id', event.event_id)
+        .single();
+      if (error) throw error;
+      if (data) setSelectedAuditEvent(data as AuditEvent);
+    } catch (error) {
+      console.warn('Butiran penuh peristiwa audit tidak dapat dimuatkan:', error);
     }
   };
 
@@ -1959,15 +2156,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       for (let index = 0; index < events.length; index += 1) {
         const event = events[index];
         const payload = JSON.parse(event.canonical_payload);
-        const matchesStoredPayload = JSON.stringify(normalizeAuditJson(payload)) ===
-          JSON.stringify(normalizeAuditJson(event.event_payload));
         if (
           event.sequence_no !== index + 1 ||
           event.previous_hash !== previousHash ||
           event.chain_scope !== payload.chain_scope ||
           event.event_id !== payload.event_id ||
-          event.sequence_no !== payload.sequence_no ||
-          !matchesStoredPayload
+          event.sequence_no !== payload.sequence_no
         ) {
           throw new Error(`Rantaian tidak sepadan pada urutan ${event.sequence_no}.`);
         }
@@ -2023,6 +2217,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       link.download = `ar-rahnu-audit-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
+      void recordAuditActivity(supabaseClient, 'AUDIT_EXPORTED', 'Pelaporan', 'portfolio_export', auditChainScope, {
+        format: exportData.format,
+        event_count: events.length
+      });
     } catch (error) {
       setAuditError(error.message || 'Eksport rantaian audit gagal.');
     } finally {
@@ -2332,6 +2530,45 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }
     setIsSidebarPinned(true);
     setIsSidebarExpanded(true);
+  };
+
+  const handleSignOutWithAudit = () => {
+    void recordAuditActivity(supabaseClient, 'SESSION_END', 'Keselamatan', 'auth.users', user.id, {
+      path: window.location.pathname
+    });
+    try {
+      sessionStorage.removeItem(`ar_rahnu_session_audit_${user.id}`);
+    } catch {
+      // storan sesi tidak tersedia
+    }
+    onSignOut();
+  };
+
+  const refreshPageRecords = async () => {
+    if (isRefreshingRecords) return;
+    setIsRefreshingRecords(true);
+    setSyncError('');
+    try {
+      // Pastikan autosave 500ms selesai supaya muat semula tidak memadam perubahan terkini.
+      if (JSON.stringify(localSnapshotRef.current) !== cloudSnapshotRef.current) {
+        await new Promise(resolve => window.setTimeout(resolve, 800));
+      }
+      await saveQueueRef.current.catch(() => undefined);
+      setHydrationRetry(value => value + 1);
+      if (canManageOrganizationUsers) {
+        try {
+          await refreshOrganizationUsers();
+        } catch (error) {
+          console.warn('Senarai pengguna tidak dapat dimuat semula:', error);
+        }
+      }
+      setToastMessage('Rekod terkini dimuat semula dari Supabase.');
+    } catch (error) {
+      setToastMessage(error instanceof Error ? error.message : 'Rekod tidak dapat dimuat semula.');
+    } finally {
+      setIsRefreshingRecords(false);
+      window.setTimeout(() => setToastMessage(null), 3500);
+    }
   };
 
   const sidebarPinButtonClass = `hidden lg:inline-flex items-center justify-center rounded-lg border p-2 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500 ${
@@ -3137,6 +3374,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     });
 
     downloadCsv('Template_Gameplay_Ar-Rahnu_Kop.csv', headers, rows);
+    void recordAuditActivity(supabaseClient, 'DATA_EXPORTED', 'Pelaporan', 'portfolio_export', 'transactions.csv', {
+      dataset: 'transaksi_sag',
+      row_count: rows.length
+    });
   };
 
   const handleExportAnalyticsCSV = () => {
@@ -3320,6 +3561,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       headers,
       [...transactionRows, ...assetRows, ...institutionRows, ...supplierRows, ...priceRows, ...scenarioRows]
     );
+    void recordAuditActivity(supabaseClient, 'DATA_EXPORTED', 'Pelaporan', 'portfolio_export', 'analitik.csv', {
+      dataset: 'laporan_analitik',
+      row_count: transactionRows.length + assetRows.length + institutionRows.length + supplierRows.length + priceRows.length + scenarioRows.length
+    });
     setToastMessage('Laporan analitik CSV telah dimuat turun.');
     setTimeout(() => setToastMessage(null), 4000);
   };
@@ -4222,7 +4467,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   .toUpperCase() || (user.email || 'AR').slice(0, 2).toUpperCase()
               )}
             </button>
-            <button onClick={onSignOut} title="Log keluar" aria-label="Log keluar" className={`rounded-lg p-2 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'text-white/80 hover:bg-white/15 hover:text-white'}`}>
+            <button onClick={handleSignOutWithAudit} title="Log keluar" aria-label="Log keluar" className={`rounded-lg p-2 transition-colors ${theme === 'dark' ? 'text-slate-500 hover:bg-slate-100 hover:text-slate-800' : 'text-white/80 hover:bg-white/15 hover:text-white'}`}>
               <LogOut size={18} />
             </button>
           </div>
@@ -4278,13 +4523,16 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         Kemas kini nama penuh dan No. Kad Pengenalan ahli, serta jana No. Keahlian unik bagi setiap ahli.
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleGenerateAllMemberNumbers}
-                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm transition-colors hover:bg-teal-50"
-                    >
-                      <RefreshCw size={16} /> Jana Semua No. Keahlian
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
+                      <button
+                        type="button"
+                        onClick={handleGenerateAllMemberNumbers}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm transition-colors hover:bg-teal-50"
+                      >
+                        <RefreshCw size={16} /> Jana Semua No. Keahlian
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -4478,16 +4726,16 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   Peristiwa menggunakan jam UTC pangkalan data Supabase dan SHA-256 berantai. Pemilik projek pangkalan data masih boleh memadam atau membina semula rekod; pengesahan ini mengesan kerosakan rantai tetapi bukan bukti WORM atau cap masa bebas. Eksport perlu disimpan di arkib Object Lock yang dikawal berasingan untuk perlindungan tersebut.
                 </p>
                 <p className="mt-1">
-                  Peristiwa log masuk/log keluar berautoriti kekal dalam Auth Audit Logs Supabase dan belum digabungkan ke rantaian ini. Alamat IP dan User-Agent bergantung pada header proksi; Device ID mungkin tiada.
+                  Aktiviti direkodkan oleh trigger pangkalan data (perubahan rekod) dan oleh aplikasi (log masuk/keluar, kata laluan, profil, eksport). Masa menggunakan jam UTC pangkalan data Supabase dan SHA-256 berantai. Alamat IP dan peranti diambil daripada header permintaan yang dihantar ke Supabase; nilai ini bergantung pada proksi dan tidak boleh dianggap bukti kukuh.
                 </p>
-                <p className="mt-1">Sejarah tidak diisi semula: rantaian bermula apabila migrasi dipasang dan hanya merekod perubahan selepas itu.</p>
+                <p className="mt-1">Sejarah tidak diisi semula: rantaian bermula apabila migrasi dipasang dan hanya merekod aktiviti selepas itu. Aktiviti ahli organisasi dikumpulkan dalam rantaian organisasi supaya pengurus melihat satu jejak lengkap. Percubaan log masuk yang gagal kekal dalam Auth Audit Logs Supabase kerana tiada sesi untuk merekodnya di sini.</p>
               </details>
 
               {auditError && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-700">{auditError}</p>}
               {auditVerification && <p role="status" className="rounded-lg bg-emerald-50 p-3 text-sm font-semibold text-emerald-800">{auditVerification}</p>}
 
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Peristiwa dimuatkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700"><FileSearch size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Maksimum 100 terkini</p></div>
+                <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Peristiwa dimuatkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-teal-50 text-corporate-teal-700"><FileSearch size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Maksimum 250 terkini</p></div>
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Hasil penapisan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-700"><Search size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-emerald-700">{auditError || auditLoading ? '—' : filteredAuditEvents.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><span className="text-xs font-bold uppercase tracking-wider text-slate-600">Modul direkodkan</span><span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-corporate-magenta-50 text-corporate-magenta-700"><Activity size={20} /></span></div><p className="mt-3 text-3xl font-black tracking-tight text-slate-900">{auditError || auditLoading ? '—' : auditModules.length}</p><p className="mt-2 text-xs text-slate-600">Dalam rekod yang dimuatkan</p></div>
               </div>
@@ -4496,12 +4744,12 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-5">
                   <div>
                     <h4 className="flex items-center gap-2 text-lg font-extrabold text-slate-800"><Activity size={19} className="text-corporate-teal-700" /> Peristiwa terkini</h4>
-                    <p className="mt-1 text-xs text-slate-600">Paparan terhad kepada 100 peristiwa terakhir. Pengesahan dan eksport merangkumi seluruh rantaian.</p>
+                    <p className="mt-1 text-xs text-slate-600">Paparan terhad kepada 250 peristiwa terakhir. Pengesahan dan eksport merangkumi seluruh rantaian.</p>
                   </div>
                   <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-700" aria-live="polite">{filteredAuditEvents.length} / {auditEvents.length} peristiwa</span>
                 </div>
                 <div className="grid grid-cols-1 gap-3 border-b border-slate-200 p-4 sm:grid-cols-2 xl:grid-cols-6">
-                  <label className="relative xl:col-span-2"><span className="sr-only">Cari peristiwa audit</span><Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input id="audit-search-input" type="search" value={auditSearch} onChange={event => setAuditSearch(event.target.value)} placeholder="Cari pengguna, tindakan, ID atau IP" className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm focus:ring-2 focus:ring-teal-600 outline-none" /></label>
+                  <label className="relative xl:col-span-2"><span className="sr-only">Cari peristiwa audit</span><Search size={17} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" /><input id="audit-search-input" type="search" value={auditSearch} onChange={event => setAuditSearch(event.target.value)} placeholder="Cari pengguna, tindakan, rujukan rekod, medan, peranti atau IP" className="w-full rounded-xl border border-slate-300 py-2.5 pl-10 pr-3 text-sm focus:ring-2 focus:ring-teal-600 outline-none" /></label>
                   <select aria-label="Tapis modul audit" value={auditModuleFilter} onChange={event => setAuditModuleFilter(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700"><option value="">Semua modul</option>{auditModules.map(module => <option key={module} value={module}>{auditModuleLabels[module] || module}</option>)}</select>
                   <select aria-label="Tapis tindakan audit" value={auditActionFilter} onChange={event => setAuditActionFilter(event.target.value)} className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-700"><option value="">Semua tindakan</option>{auditActions.map(action => <option key={action} value={action}>{auditActionLabels[action.toUpperCase()] || action}</option>)}</select>
                   <label className="text-xs font-semibold text-slate-700">Dari (MYT)<input aria-label="Tarikh audit dari" type="date" value={auditDateFrom} onChange={event => setAuditDateFrom(event.target.value)} className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2 text-sm" /></label>
@@ -4516,8 +4764,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <th className="px-4 py-3">Waktu Malaysia / Seq</th>
                         <th className="px-4 py-3">Siapa</th>
                         <th className="px-4 py-3">Perubahan</th>
-                        <th className="px-4 py-3">Source IP</th>
-                        <th className="px-4 py-3">Rujukan rekod</th>
+                        <th className="px-4 py-3">IP Sumber</th>
+                        <th className="px-4 py-3">Rujukan rekod & perubahan</th>
                         <th className="px-4 py-3">SHA-256</th>
                       </tr>
                     </thead>
@@ -4532,6 +4780,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           (payload.actor_user_id ? 'Ahli organisasi' : 'Sistem');
                         const recordLabel = payload.context?.record_label;
                         const recordCategory = payload.context?.record_category;
+                        const changedFields = formatAuditFieldList(payload.context?.changed_fields);
+                        const changedCollections = (payload.context?.changed_collections || [])
+                          .map(collection => auditResourceLabels[collection] || collection)
+                          .join(', ');
+                        const deviceLabel = describeAuditDevice(payload.user_agent);
                         const actionLabel = auditActionLabels[payload.action.toUpperCase()] || payload.action;
                         const moduleLabel = auditModuleLabels[payload.source_module] || payload.source_module;
                         const resourceLabel = auditResourceLabels[payload.resource_type] || payload.resource_type;
@@ -4548,20 +4801,23 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             <td className="max-w-48 truncate px-4 py-3 text-sm text-slate-700" title={String(payload.actor_user_id || 'Tiada akaun pengguna dikaitkan')}>
                               <p className="truncate font-medium">{actorName}</p>
                               {actor?.role && <p className="text-xs text-slate-500">{({ Admin: 'Pentadbir', Manager: 'Pengurus', Staff: 'Kakitangan' })[actor.role] || actor.role}</p>}
+                              <p className="truncate text-xs text-slate-500" title={payload.user_agent || 'User-agent tidak tersedia'}>{deviceLabel}</p>
                             </td>
                             <td className="px-4 py-3" title={`ID rekod berkaitan: ${payload.resource_id}`}>
                               <p className={`inline-block rounded-full border px-2.5 py-1 text-xs font-bold ${supplierCategoryColor(payload.action)}`}>{actionLabel}</p>
                               <p className="text-xs text-slate-500">{moduleLabel} · {resourceLabel}</p>
-                              {recordLabel && <p className="mt-0.5 text-xs text-slate-600">Rekod: {recordLabel}{recordCategory ? ` · ${recordCategory}` : ''}</p>}
                             </td>
                             <td className="px-4 py-3 font-mono text-xs text-slate-600">{String(payload.source_ip || '—')}</td>
                             <td className="px-4 py-3">
-                              <button type="button" onClick={() => setSelectedAuditEvent(event)} className="text-sm font-semibold text-corporate-teal-700 underline decoration-dotted underline-offset-2" title={`ID teknikal: ${event.event_id}`}>
-                                Rekod #{event.sequence_no}
+                              <button type="button" onClick={() => void openAuditEvent(event)} className="text-left text-sm font-semibold text-corporate-teal-700 underline decoration-dotted underline-offset-2" title={`ID teknikal: ${event.event_id}`}>
+                                {recordLabel ? `#${recordLabel}` : resourceLabel}
                               </button>
+                              {recordCategory && <p className="text-xs text-slate-500">Jenis: {recordCategory}</p>}
+                              {changedFields && <p className="text-xs text-slate-500">Medan: {changedFields}</p>}
+                              {!changedFields && changedCollections && <p className="text-xs text-slate-500">Koleksi: {changedCollections}</p>}
                             </td>
                             <td className="px-4 py-3">
-                              <button type="button" onClick={() => setSelectedAuditEvent(event)} className="font-mono text-xs text-slate-600" title={event.event_hash}>
+                              <button type="button" onClick={() => void openAuditEvent(event)} className="font-mono text-xs text-slate-600" title={event.event_hash}>
                                 {event.event_hash.slice(0, 16)}…
                               </button>
                             </td>
@@ -4599,7 +4855,64 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       <button type="button" onClick={() => setSelectedAuditEvent(null)} aria-label="Tutup butiran audit" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><X size={20} /></button>
                     </div>
                     <div className="overflow-auto p-4 sm:p-5">
-                      <p className="mb-2 text-sm font-bold text-slate-700">Payload sebelum / selepas, metadata dan hash chain</p>
+                      {(() => {
+                        const payload = selectedAuditEvent.event_payload;
+                        const context = payload.context || {};
+                        const changedFields = Array.isArray(context.changed_fields) ? context.changed_fields : [];
+                        const changedCollections = Array.isArray(context.changed_collections) ? context.changed_collections : [];
+                        const before = (payload.payload_before || null) as Record<string, unknown> | null;
+                        const after = (payload.payload_after || null) as Record<string, unknown> | null;
+                        const formatValue = (value: unknown): string => {
+                          if (value === null || value === undefined || value === '') return '—';
+                          if (typeof value === 'object') return `${JSON.stringify(value).slice(0, 120)}${JSON.stringify(value).length > 120 ? '…' : ''}`;
+                          const text = String(value);
+                          return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+                        };
+                        const summary = [
+                          { label: 'Waktu (MYT)', value: formatMalaysiaDateTime(payload.occurred_at_utc) },
+                          { label: 'Pelaku', value: payload.actor_display_name || payload.actor_email || payload.actor_user_id || 'Sistem' },
+                          { label: 'E-mel pelaku', value: payload.actor_email || 'Tidak direkod' },
+                          { label: 'Modul · Tindakan', value: `${auditModuleLabels[payload.source_module] || payload.source_module} · ${auditActionLabels[payload.action.toUpperCase()] || payload.action}` },
+                          { label: 'Jenis rekod', value: auditResourceLabels[payload.resource_type] || payload.resource_type },
+                          { label: 'Rujukan rekod', value: context.record_label ? `#${context.record_label}` : payload.resource_id },
+                          { label: 'Jenis / kategori', value: context.record_category || 'Tidak direkod' },
+                          { label: 'Koleksi berubah', value: changedCollections.length ? changedCollections.map(collection => auditResourceLabels[collection] || collection).join(', ') : 'Tidak berkenaan' },
+                          { label: 'Alamat IP', value: payload.source_ip || 'Tidak tersedia daripada proksi' },
+                          { label: 'Peranti', value: describeAuditDevice(payload.user_agent) },
+                          { label: 'User-Agent', value: payload.user_agent || 'Tidak direkod' },
+                          { label: 'Peranti (ID)', value: payload.device_id || 'Tidak direkod' },
+                          { label: 'Sesi', value: payload.session_id || 'Tidak direkod' }
+                        ];
+                        return (
+                          <div className="space-y-4">
+                            <dl className="grid grid-cols-1 gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-2">
+                              {summary.map(item => (
+                                <div key={item.label} className="min-w-0">
+                                  <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-500">{item.label}</dt>
+                                  <dd className="break-words text-sm font-semibold text-slate-800">{item.value}</dd>
+                                </div>
+                              ))}
+                            </dl>
+                            {changedFields.length > 0 && (
+                              <div className="rounded-xl border border-corporate-teal-200 bg-corporate-teal-50/60 p-4">
+                                <p className="text-[11px] font-bold uppercase tracking-wider text-corporate-teal-900">Perubahan medan ({changedFields.length})</p>
+                                <ul className="mt-2 space-y-1 text-xs text-slate-700">
+                                  {changedFields.map(field => (
+                                    <li key={field} className="break-words">
+                                      <code className="font-mono font-bold text-slate-900">{field}</code>
+                                      {': '}
+                                      <span className="text-rose-700 line-through decoration-rose-400">{formatValue(before ? before[field] : null)}</span>
+                                      {' → '}
+                                      <span className="font-semibold text-emerald-800">{formatValue(after ? after[field] : null)}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+                      <p className="mb-2 mt-4 text-sm font-bold text-slate-700">Payload sebelum / selepas, metadata dan hash chain</p>
                       <pre className="overflow-auto rounded-xl bg-slate-950 p-4 text-xs leading-relaxed text-emerald-100">{JSON.stringify({
                         event: selectedAuditEvent.event_payload,
                         previous_hash: selectedAuditEvent.previous_hash,
@@ -4826,15 +5139,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         </>
                       )}
 
-                      <button
-                        type="button"
-                        onClick={() => void refreshOrganizationUsers()}
-                        disabled={userManagementBusy}
-                        className="inline-flex items-center justify-center p-2 rounded-xl border border-white/10 bg-white/5 hover:bg-white/15 text-slate-200 backdrop-blur-md transition-all disabled:opacity-50"
-                        title="Segar semula senarai pengguna"
-                      >
-                        <RefreshCw size={16} className={userManagementBusy ? "animate-spin" : ""} />
-                      </button>
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords || userManagementBusy} />
                     </div>
                   </div>
                 </div>
@@ -5768,6 +6073,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <span>Spot Emas:</span>
                         <span className="text-white font-black">RM {currentGoldPrice.toFixed(2)}/g</span>
                       </div>
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                       <button
                         type="button"
                         onClick={() => setIsModalOpen(true)}
@@ -6447,6 +6753,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5">
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                       <div className="hidden sm:inline-flex items-center gap-1.5 text-xs text-slate-300 bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md">
                         <span className="font-mono font-bold text-corporate-teal-300">[ / ]</span>
                         <span>Carian</span>
@@ -7189,6 +7496,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2.5">
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                       <div className="hidden sm:inline-flex items-center gap-1.5 text-xs text-slate-300 bg-white/5 border border-white/10 px-3 py-2 rounded-xl backdrop-blur-md">
                         <span className="font-mono font-bold text-corporate-teal-300">[ / ]</span>
                         <span>Carian</span>
@@ -7805,9 +8113,12 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     <h3 className="mt-2 text-2xl sm:text-3xl font-bold tracking-tight">Penyelenggaraan Pembekal Emas</h3>
                     <p className="mt-2 text-sm text-teal-100 max-w-2xl">Urus maklumat rujukan pembekal dengan tepat untuk rekod aset yang lebih diyakini.</p>
                   </div>
-                  <button type="button" onClick={() => { setEditingSupplier(null); setIsSupplierModalOpen(true); }} className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm hover:bg-teal-50 focus-visible:ring-2 focus-visible:ring-white">
-                    <Plus size={18} className="mr-2" /> Tambah Pembekal
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
+                    <button type="button" onClick={() => { setEditingSupplier(null); setIsSupplierModalOpen(true); }} className="inline-flex items-center justify-center rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm hover:bg-teal-50 focus-visible:ring-2 focus-visible:ring-white">
+                      <Plus size={18} className="mr-2" /> Tambah Pembekal
+                    </button>
+                  </div>
                 </div>
                 <p className="mt-5 text-xs text-teal-100">Pintasan: Ctrl + K untuk carian · Alt + N untuk pembekal baharu</p>
               </div>
@@ -7933,6 +8244,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                   <button
                     onClick={() => handleRefresh()}
                     disabled={isRefreshing || visibleInstitutions.length === 0}
@@ -8218,6 +8530,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         <RefreshCw size={14} className={isRefreshing ? "animate-spin" : ""} />
                         <span>{isRefreshing ? 'Mengemas kini...' : 'Kemas kini harga'}</span>
                       </button>
+                      <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                       <button
                         type="button"
                         onClick={handleExportAnalyticsCSV}
@@ -9632,6 +9945,10 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       setAvatarPath(path);
       setAvatarPreview(signedUrl);
       onProfilePhotoChange({ path, url: signedUrl });
+      void recordAuditActivity(supabaseClient, 'AVATAR_UPDATED', 'Profil', 'user_activity', user.id, {
+        changed_fields: ['avatar_photo_path'],
+        replaced_previous: Boolean(previousPath)
+      });
       if (previousPath && previousPath !== path) {
         try {
           await supabaseClient.storage.from(profilePhotoBucket).remove([previousPath]);
@@ -9657,6 +9974,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       setAvatarPath('');
       setAvatarPreview(null);
       onProfilePhotoChange({ path: '', url: null });
+      void recordAuditActivity(supabaseClient, 'AVATAR_REMOVED', 'Profil', 'user_activity', user.id, {
+        changed_fields: ['avatar_photo_path']
+      });
       if (previousPath) {
         const { error } = await supabaseClient.storage.from(profilePhotoBucket).remove([previousPath]);
         if (error) console.warn('Gambar profil lama tidak dapat dibuang:', error.message);
@@ -9708,6 +10028,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       setProfileNotice(emailChanged
         ? 'Maklumat peribadi disimpan. Pautan pengesahan e-mel dihantar ke alamat baharu; alamat akaun akan berubah selepas pengesahan.'
         : 'Maklumat peribadi & alamat berjaya disimpan.');
+      void recordAuditActivity(supabaseClient, 'PROFILE_UPDATED', 'Profil', 'auth.users', user.id, {
+        changed_fields: ['full_name', 'phone', 'address_line', 'city', 'postcode', 'state', ...(emailChanged ? ['email'] : [])]
+      });
     } catch (error) {
       setProfileError(error.message || 'Profil tidak dapat dikemas kini.');
     } finally {
@@ -9731,6 +10054,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
         heir_relationship: heirForm.relationship,
         heir_phone: heirForm.phone.trim()
       }, 'Maklumat waris (penama) berjaya disimpan.');
+      void recordAuditActivity(supabaseClient, 'HEIR_UPDATED', 'Profil', 'auth.users', user.id, {
+        changed_fields: ['heir_name', 'heir_relationship', 'heir_phone']
+      });
     } catch (error) {
       setProfileError(error.message || 'Maklumat waris tidak dapat disimpan.');
     } finally {
@@ -9754,6 +10080,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
         bank_account_name: bankForm.accountName.trim(),
         bank_account_number: bankForm.accountNumber.trim()
       }, 'Akaun bank untuk pengkreditan berjaya disimpan.');
+      void recordAuditActivity(supabaseClient, 'BANK_UPDATED', 'Profil', 'auth.users', user.id, {
+        changed_fields: ['bank_name', 'bank_account_name', 'bank_account_number']
+      });
     } catch (error) {
       setProfileError(error.message || 'Akaun bank tidak dapat disimpan.');
     } finally {
@@ -9775,6 +10104,10 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       const consentAt = pdpaConsentAt || new Date().toISOString();
       await saveMetadata({ pdpa_consent_at: consentAt }, 'Persetujuan PDPA direkodkan.');
       setPdpaConsentAt(consentAt);
+      void recordAuditActivity(supabaseClient, 'PDPA_CONSENT', 'Profil', 'auth.users', user.id, {
+        changed_fields: ['pdpa_consent_at'],
+        consent_at: consentAt
+      });
     } catch (error) {
       setProfileError(error.message || 'Persetujuan tidak dapat disimpan.');
     } finally {
@@ -9818,6 +10151,9 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       setNewPassword('');
       setConfirmPassword('');
       setPasswordNotice('Kata laluan berjaya ditukar.');
+      void recordAuditActivity(supabaseClient, 'PASSWORD_CHANGED', 'Keselamatan', 'auth.users', user.id, {
+        changed_fields: ['password']
+      });
     } catch (error) {
       setPasswordError(error.message || 'Kata laluan tidak dapat ditukar.');
     } finally {
