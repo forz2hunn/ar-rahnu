@@ -33,6 +33,7 @@ import {
   normalizeSagFeeBasis,
   resolveSagPledgeStatus,
   resolveSagPledgeType,
+  resolveSagKaratFineness,
   roundMoney,
   summarizeSagMarhunItems,
   toDateOnly,
@@ -394,7 +395,29 @@ export function SagDocumentForm({
   const updateItem = (id: string, patch: Partial<SagMarhunItem>) => {
     setForm(previous => ({
       ...previous,
-      marhunItems: previous.marhunItems.map(item => (item.id === id ? { ...item, ...patch } : item))
+      marhunItems: previous.marhunItems.map(item => {
+        if (item.id !== id) return item;
+        // Menukar karat mesti menukar kadar efektif mengikut faktor ketulenan
+        // supaya nilai marhun tidak terlebih nilai (mis. 18K dikira kadar 999).
+        if (patch.karat && !('ratePerGram' in patch)) {
+          const oldFineness = Number(item.fineness) > 0
+            ? Number(item.fineness)
+            : resolveSagKaratFineness(item.karat);
+          const nextFineness = resolveSagKaratFineness(patch.karat);
+          if (oldFineness && nextFineness) {
+            const baseRate = item.ratePerGram / oldFineness;
+            const nextRate = roundMoney(baseRate * nextFineness);
+            return {
+              ...item,
+              ...patch,
+              fineness: nextFineness,
+              ratePerGram: nextRate,
+              marhunValue: roundMoney(item.quantity * item.weight * nextRate)
+            };
+          }
+        }
+        return { ...item, ...patch };
+      })
     }));
   };
 
@@ -416,6 +439,10 @@ export function SagDocumentForm({
   };
 
   const addManualItem = () => {
+    // Item manual juga mesti mengambil kira ketulenan: kadar institusi ialah
+    // kadar emas tulen, jadi kadar efektif = kadar tulen × fineness karat.
+    const fineness = resolveSagKaratFineness('22.0K') ?? 0.916;
+    const effectiveRate = roundMoney(defaultMarhunRate * fineness);
     setForm(previous => ({
       ...previous,
       marhunItems: [
@@ -426,9 +453,10 @@ export function SagDocumentForm({
           description: '',
           quantity: 1,
           karat: '22.0K',
-          ratePerGram: defaultMarhunRate,
+          ratePerGram: effectiveRate,
           weight: 0,
-          marhunValue: 0
+          marhunValue: 0,
+          fineness
         }
       ]
     }));

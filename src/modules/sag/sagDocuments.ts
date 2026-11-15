@@ -6,6 +6,7 @@
 
 import { resolveGoldFineness } from '../../lib/gold-valuation';
 import { roundMoney as roundMoneyPrecise } from '../../lib/money';
+import { evaluateCustomerKyc } from '../../lib/kyc';
 
 export type SagDocumentStatus = 'Draf' | 'Dikeluarkan' | 'Batal';
 export type SagCopyType = 'Salinan Pelanggan' | 'Salinan Ar-Rahnu';
@@ -161,6 +162,13 @@ export type SagDocument = SagAuditFields & {
   tawarruq: SagTawarruqAgreement;
   /** Versi kontrak Shariah yang dipaparkan pada surat ini. */
   contractVersion: string;
+  /** Snapshot semakan KYC/AML (umur & identiti) semasa surat disimpan. */
+  kycSnapshot?: {
+    age: number | null;
+    birthDate: string;
+    identityVerified: boolean;
+    evaluatedAt: string;
+  } | null;
   /** Jejak penerimaan Ijab & Qabul (timestamp + versi kontrak + pelaku). */
   consent: SagContractConsent | null;
   marhunItems: SagMarhunItem[];
@@ -204,6 +212,26 @@ export const SAG_PRODUCT_DEFAULT = 'PEMBIAYAAN AR-RAHNU';
 export const SAG_DEFAULT_PAYMENT_TERM_MONTHS = 6;
 
 export const SAG_KARAT_OPTIONS = ['24.0K', '23.0K', '22.0K', '21.0K', '20.0K', '18.0K', '14.0K', '9.0K'];
+
+/** Faktor ketulenan bagi label karat yang digunakan dalam borang surat. */
+export const SAG_KARAT_FINENESS: Record<string, number> = {
+  '24.0K': 0.9999,
+  '23.0K': 0.95,
+  '22.0K': 0.916,
+  '21.0K': 0.875,
+  '20.0K': 0.833,
+  '18.0K': 0.75,
+  '14.0K': 0.585,
+  '9.0K': 0.375
+};
+
+export const resolveSagKaratFineness = (karat: unknown): number | null => {
+  const key = String(karat ?? '').trim().toUpperCase();
+  if (SAG_KARAT_FINENESS[key]) return SAG_KARAT_FINENESS[key];
+  const numeric = parseFloat(key);
+  if (Number.isFinite(numeric) && numeric > 0) return Math.min(0.9999, numeric / 24);
+  return null;
+};
 
 export const SAG_DEFAULT_SETTINGS: SagModuleSettings = {
   letterhead: {
@@ -794,6 +822,13 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
   const documentNo = String(document.documentNo || '').trim().toUpperCase();
   const contractVersion = String(document.contractVersion || SAG_CONTRACT_VERSION);
   const tawarruq = normalizeSagTawarruq(document.tawarruq);
+  const kyc = evaluateCustomerKyc({
+    name: document.member?.name,
+    icNumber: document.member?.icNumber,
+    phone: document.member?.phone,
+    address: document.member?.address,
+    memberUserId: document.member?.userId
+  });
   const marhunValue = marhunItems.length ? marhunSummary.value : roundMoney(document.marhunValue);
   const sellingPrice = roundMoney(purchasePrice + totalProfit);
   const ujrahFixedMonthly = Math.max(0, roundMoney(document.ujrahFixedMonthly));
@@ -847,6 +882,12 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
       paymentTermMonths
     }),
     contractVersion,
+    kycSnapshot: {
+      age: kyc.age,
+      birthDate: kyc.birthDate,
+      identityVerified: kyc.identityVerified,
+      evaluatedAt: document.kycSnapshot?.evaluatedAt || document.createdAt || document.updatedAt || ''
+    },
     tawarruq,
     consent: normalizeSagContractConsent(document.consent, documentNo, contractVersion, tawarruq)
   };
@@ -1236,9 +1277,15 @@ export const SAG_UJRAH_EXEMPT_PLEDGE_TYPES = ['Tebus Cash', 'Tebus EDT', 'TS', '
 export const validateSagDocument = (document: SagDocument): string[] => {
   const errors: string[] = [];
   if (!String(document.documentNo || '').trim()) errors.push('No. SAG wajib diisi.');
-  if (!String(document.member?.name || '').trim()) errors.push('Nama ahli wajib diisi.');
-  const icDigits = String(document.member?.icNumber || '').replace(/\D/g, '');
-  if (icDigits.length !== 12) errors.push('No. MyKad ahli mesti 12 digit.');
+  // KYC/AML: identiti (nama + No. KP sah) dan umur minimum 18 tahun.
+  evaluateCustomerKyc({
+    name: document.member?.name,
+    icNumber: document.member?.icNumber,
+    phone: document.member?.phone,
+    address: document.member?.address,
+    memberUserId: document.member?.userId
+  }).violations.forEach(violation => errors.push(violation));
+  // Maklumat hubungan diperlukan untuk pengesahan identiti & notifikasi.
   if (!String(document.member?.address || '').trim()) errors.push('Alamat ahli wajib diisi.');
   if (!String(document.member?.phone || '').trim()) errors.push('No. telefon ahli wajib diisi.');
   if (!String(document.pledgeType || '').trim()) errors.push('Jenis pajakan mesti dipilih mengikut transaksi surat ini.');

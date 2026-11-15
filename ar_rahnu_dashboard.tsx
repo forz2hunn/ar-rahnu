@@ -86,6 +86,8 @@ import {
 } from './src/lib/gold-valuation';
 import { roundMoney } from './src/lib/money';
 import { calculateAuctionSettlement } from './src/lib/auction-settlement';
+import { evaluateCustomerKyc } from './src/lib/kyc';
+import { CUSTODY_ACTION_LABELS, evaluateDualCustody, requiresCustodyApproval } from './src/lib/dual-control';
 import {
   SAG_CONTRACT_VERSION,
   SAG_DEFAULT_SETTINGS,
@@ -1588,18 +1590,21 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       Admin: {
         sag_view: true, sag_create: true, sag_overlap: true, sag_delete: true,
         assets_view: true, assets_manage: true, assets_delete: true,
+        institutions_manage: true, suppliers_manage: true,
         analytics_view: true, ai_predictions: true, export_data: true,
         users_manage: true, roles_manage: true, audit_inspect: true,
       },
       Manager: {
         sag_view: true, sag_create: true, sag_overlap: true, sag_delete: false,
         assets_view: true, assets_manage: true, assets_delete: false,
+        institutions_manage: true, suppliers_manage: true,
         analytics_view: true, ai_predictions: true, export_data: true,
         users_manage: false, roles_manage: false, audit_inspect: true,
       },
       Staff: {
         sag_view: true, sag_create: true, sag_overlap: false, sag_delete: false,
         assets_view: true, assets_manage: false, assets_delete: false,
+        institutions_manage: false, suppliers_manage: false,
         analytics_view: true, ai_predictions: false, export_data: false,
         users_manage: false, roles_manage: false, audit_inspect: false,
       }
@@ -2183,6 +2188,21 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const canManageOrganizationUsers = ['Admin', 'Manager'].includes(organizationMembership?.role);
   const isOrganizationAdmin = organizationMembership?.role === 'Admin';
+
+  /**
+   * Kebenaran peranan (pertahanan lapisan aplikasi). Admin sentiasa dibenarkan;
+   * peranan lain mesti mempunyai flag `true` dalam matriks kebenaran.
+   * NOTA: RLS Supabase hanya menyekat baris, bukan tindakan perniagaan.
+   */
+  const hasPermission = (permissionId: string): boolean => {
+    const role = organizationMembership?.role;
+    if (!role || role === 'Admin') return true;
+    return rolePermissions?.[role]?.[permissionId] === true;
+  };
+  const denyPermission = (permissionId: string, label?: string) => {
+    setToastMessage(`Akses ditolak: peranan anda tidak mempunyai kebenaran ${label || permissionId}.`);
+    setTimeout(() => setToastMessage(null), 5000);
+  };
 
   const handleSaveMemberProfile = async (member, payload) => {
     const previousEntry = memberRegistry.find(entry => entry.userId === member.id);
@@ -3257,6 +3277,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleRefresh = async (institutionId = null, callback = null) => {
+    if (!hasPermission('institutions_manage')) {
+      denyPermission('institutions_manage', 'untuk mengemas kini harga asas emas / kadar marhun');
+      return;
+    }
     if (isRefreshing) return;
     setIsRefreshing(true);
     try {
@@ -3289,6 +3313,14 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const refreshedInstitution = institutionId === null
         ? null
         : visibleInstitutions.find(inst => inst.id === institutionId);
+      // Harga asas emas & kadar marhun ialah parameter kritikal: catat pelaku + timestamp.
+      void recordAuditActivity(supabaseClient, 'PARAMETER_CHANGED', 'Vault Management', 'institutions', institutionId === null ? 'all' : String(institutionId), {
+        parameter: 'marhunRate',
+        spotPrice: liveSpot.price,
+        priceCapturedAt: updatedAt,
+        updatedInstitutions: institutionId === null ? visibleInstitutions.length : 1,
+        changedBy: describeRecordActor(recordActor)
+      });
       if (typeof callback === 'function') {
         const spread = Number(refreshedInstitution?.marhunSpread ??
           (Number(refreshedInstitution?.marhunRate) - INITIAL_GOLD_SPOT_MYR_PER_GRAM));
@@ -3840,8 +3872,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleToggleStatus = (id) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk mengubah status pajakan');
+      return;
+    }
     const updatedAt = new Date().toISOString();
     const audit = auditUpdate('transaction', updatedAt);
+    const target = visibleTransactions.find(item => String(item.id) === String(id)) || null;
     setTransactions(prev => prev.map(t => {
       if (isRecordVisible(t) && String(t.id) === String(id) &&
           !['Ditebus', 'Dilelong'].includes(t.status)) {
@@ -3850,6 +3887,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       }
       return t;
     }));
+    // Status pajakan ialah parameter kritikal: catat pelaku & timestamp.
+    void recordAuditActivity(supabaseClient, 'STATUS_CHANGED', 'Pengurusan Surat Gadaian', 'transactions', String(id), {
+      refNo: target?.refNo || '',
+      previousStatus: target?.status || 'Aktif',
+      nextStatus: target?.status === 'Aktif' ? 'Selesai' : 'Aktif',
+      changedBy: describeRecordActor(recordActor)
+    });
   };
 
   const handleResolveIndicator = (indicator) => {
@@ -3867,21 +3911,45 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteAsset = (id) => {
+    if (!hasPermission('assets_delete')) {
+      denyPermission('assets_delete', 'untuk memadam aset');
+      return;
+    }
+    const targetAsset = visibleAssets.find(asset => String(asset.id) === String(id));
+    if (targetAsset && targetAsset.status !== 'EDT') {
+      setToastMessage('Aset EDR/Dilelong tidak boleh dipadam terus. Gunakan tindakan kebal dengan kelulusan dwi-kawalan.');
+      setTimeout(() => setToastMessage(null), 5500);
+      return;
+    }
     const deletedAt = new Date().toISOString();
     const audit = auditDelete('asset', deletedAt);
     setAssets(prev => prev.map(asset =>
       asset.id === id ? { ...asset, deletedAt, ...audit } : asset
     ));
+    void recordAuditActivity(supabaseClient, 'ASSET_DELETED', 'Vault Management', 'assets', String(id), {
+      code: targetAsset?.code || '',
+      status: targetAsset?.status || '',
+      deletedBy: describeRecordActor(recordActor)
+    });
     setToastMessage('Rekod aset ditandakan sebagai dipadam dan disorokkan.');
     setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleDelete = (id) => {
+    if (!hasPermission('sag_delete')) {
+      denyPermission('sag_delete', 'untuk memadam rekod transaksi');
+      return;
+    }
+    const target = visibleTransactions.find(item => String(item.id) === String(id));
     const deletedAt = new Date().toISOString();
     const audit = auditDelete('transaction', deletedAt);
     setTransactions(prev => prev.map(transaction =>
       transaction.id === id ? { ...transaction, deletedAt, ...audit } : transaction
     ));
+    void recordAuditActivity(supabaseClient, 'TRANSACTION_DELETED', 'Pengurusan Surat Gadaian', 'transactions', String(id), {
+      refNo: target?.refNo || '',
+      deletedBy: describeRecordActor(recordActor)
+    });
     setToastMessage('Rekod transaksi ditandakan sebagai dipadam dan disorokkan.');
     setTimeout(() => setToastMessage(null), 3000);
   };
@@ -3985,6 +4053,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveSagDocument = (document: SagDocument) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk menyimpan surat akuan');
+      return;
+    }
     const savedAt = new Date().toISOString();
     const isUpdate = sagDocuments.some(entry => String(entry.id) === String(document.id));
     const audit = isUpdate ? auditUpdate('sagDocument', savedAt) : auditCreate('sagDocument', savedAt);
@@ -4078,6 +4150,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteSagDocument = (document: SagDocument) => {
+    if (!hasPermission('sag_delete')) {
+      denyPermission('sag_delete', 'untuk memadam surat akuan');
+      return;
+    }
     if (!window.confirm(`Padam Surat Akuan Gadaian ${document.documentNo}? Rekod akan disorokkan tetapi kekal dalam jejak audit.`)) {
       return;
     }
@@ -4103,6 +4179,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
    *    supaya senarai surat tidak lagi kosong apabila lejar sudah berisi.
    */
   const handleSyncSagLedger = () => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk menyelaraskan lejar SAG');
+      return;
+    }
     const savedAt = new Date().toISOString();
     const ledger = [...transactions];
     let createdLedgerRecords = 0;
@@ -4206,6 +4286,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveSagSettings = (settings: SagModuleSettings) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk mengubah tetapan surat');
+      return;
+    }
     setSagSettings(settings);
     setIsSagLetterheadOpen(false);
     setToastMessage('Tetapan letterhead Surat Akuan Gadaian disimpan.');
@@ -4213,6 +4297,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleExportCSV = () => {
+    if (!hasPermission('export_data')) {
+      denyPermission('export_data', 'untuk mengeksport data');
+      return;
+    }
     const headers = [
       "Tarikh & Masa", "Jenis Transaksi", "Tempat (Koperasi/Ar-Rahnu)",
       "No. Surat Rujukan", "Berat Emas (g)", "Harga Taksiran (RM/g)",
@@ -4447,6 +4535,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleImportCSV = (e) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk mengimport rekod SAG');
+      e.target.value = '';
+      return;
+    }
     const file = e.target.files[0];
     if (!file) return;
 
@@ -4465,11 +4558,19 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const importedTx = [];
       const importedAt = new Date().toISOString();
       const importedAudit = auditCreate('transaction', importedAt);
+      let rejectedNonCompliant = 0;
       for (let i = 1; i < lines.length; i++) {
         // Regex to split by comma but ignore commas inside quotes
         const cols = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
 
         if (cols.length >= 11 && !cols[0].startsWith('Tarikh')) { // Ensure row is valid and not a header duplicate
+          // Tolak baris yang melanggar Shariah/LTV: ujrah berasaskan pembiayaan atau LTV > had sistem.
+          const importedBasis = normalizeFeeBasis(cols[15]);
+          const importedMargin = parseFloat(String(cols[6] || '').replace('%', '')) || 0;
+          if (importedBasis === 'jumlahPembiayaan' || importedMargin > GOLD_LTV_HARD_CAP_PERCENT + 0.005) {
+            rejectedNonCompliant += 1;
+            continue;
+          }
           importedTx.push({
             id: Date.now() + i,
             date: normalizeTransactionDateTime({ date: cols[0] }, importedAt).date,
@@ -4481,19 +4582,19 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             weight: parseFloat(cols[4]) || 0,
             marhunPrice: parseFloat(cols[5]) || 0,
             marhunValue: cols[12] !== undefined && Number.isFinite(parseFloat(cols[12]))
-              ? parseFloat(cols[12])
+              ? roundMoney(parseFloat(cols[12]))
               : calculateMarhunValue(parseFloat(cols[4]) || 0, parseFloat(cols[5]) || 0),
-            margin: parseFloat(cols[6].replace('%', '')) || 0,
-            loan: parseFloat(cols[7]) || 0,
-            fee: parseFloat(cols[8]) || 0,
-            redemption: parseFloat(cols[9]) || 0,
-            profit: parseFloat(cols[10]) || 0,
+            margin: importedMargin,
+            loan: roundMoney(parseFloat(cols[7]) || 0),
+            fee: roundMoney(parseFloat(cols[8]) || 0),
+            redemption: roundMoney(parseFloat(cols[9]) || 0),
+            profit: roundMoney(parseFloat(cols[10]) || 0),
             remarks: cols[11] || '',
             purity: cols[13] || '',
             feeRate: cols[14] !== undefined && cols[14] !== ''
               ? parseFloat(cols[14]) || 0
               : null,
-            feeBasis: normalizeFeeBasis(cols[15]),
+            feeBasis: importedBasis,
             feeTermMonths: cols[16] !== undefined && cols[16] !== ''
               ? parseFloat(cols[16]) || 0
               : null
@@ -4508,6 +4609,13 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           const newUnique = importedTx.filter(t => !existingRefs.has(t.refNo));
           return [...prev, ...newUnique];
         });
+      }
+      if (rejectedNonCompliant > 0) {
+        setToastMessage(
+          `${rejectedNonCompliant} baris CSV ditolak: ujrah berasaskan jumlah pembiayaan atau margin melebihi had LTV ${GOLD_LTV_HARD_CAP_PERCENT}%. ` +
+          `${importedTx.length} baris diproses.`
+        );
+        setTimeout(() => setToastMessage(null), 9000);
       }
     };
     reader.readAsText(file);
@@ -4584,6 +4692,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     const currentArrears = getCurrentFeeArrears(actionTransaction);
     const arrearsPaid = Number(correction.feePaid) || 0;
+    if (!Number.isFinite(arrearsPaid) || arrearsPaid < 0) {
+      setToastMessage('Bayaran ujrah tidak boleh negatif.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
     if (currentArrears > 0.005 && arrearsPaid + 0.005 < currentArrears) {
       setToastMessage(
         `Lanjutan tidak dibenarkan: ujrah terkumpul RM${currentArrears.toFixed(2)} belum dijelaskan sepenuhnya ` +
@@ -4666,6 +4779,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const handleSaveCorrection = (correction) => {
     if (!correctionTransaction) return;
+    // Kebenaran mengikut jenis tindakan: OL/Pusing/Lelong memerlukan sag_overlap.
+    const requiredPermission = ['OL', 'Pusing', 'Lelong'].includes(correction.type) ? 'sag_overlap' : 'sag_create';
+    if (!hasPermission(requiredPermission)) {
+      denyPermission(requiredPermission, `untuk tindakan ${correction.type}`);
+      return;
+    }
     if (correction.type === 'Lelong' && !correction.institutionConfirmed) {
       setToastMessage('Pengesahan institusi wajib direkod sebelum status lelong dikemas kini.');
       setTimeout(() => setToastMessage(null), 4000);
@@ -4683,6 +4802,26 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     if (correction.type === 'Lanjutan') {
       handleSaveExtension(actionTransaction, correction);
       return;
+    }
+    // Dwi-kawalan: pelepasan aset dari kebal / penyelesaian lelong mesti
+    // diluluskan pegawai kedua yang berbeza daripada pemohon.
+    let custodyApproval = null;
+    if (['TS', 'TKS', 'Lelong'].includes(correction.type)) {
+      const custody = evaluateDualCustody({
+        action: correction.type === 'Lelong' ? 'auction_settlement' : 'asset_release',
+        requestedBy: recordActor.id,
+        requestedByName: recordActor.name,
+        approvedBy: correction.approverId,
+        approvedByName: correction.approverName,
+        reference: correction.approvalReference,
+        referenceRequired: correction.type === 'Lelong'
+      });
+      if (!custody.compliant) {
+        setToastMessage(`Kelulusan dwi-kawalan tidak lengkap: ${custody.violations.join(' ')}`);
+        setTimeout(() => setToastMessage(null), 7000);
+        return;
+      }
+      custodyApproval = custody.approval;
     }
     const sourceAssetIds: string[] = Array.from(new Set<string>(
       getTransactionAssetIds(actionTransaction).map(assetId => String(assetId))
@@ -4905,7 +5044,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         auctionProceeds: auctionSettlement.proceeds,
         auctionCosts: auctionSettlement.auctionCosts,
         auctionSettlement
-      } : {})
+      } : {}),
+      ...(custodyApproval ? { custody: custodyApproval } : {})
     };
     const linkedTransactionId = isLinkedRollover
       ? correction.linkedTransactionId
@@ -4984,6 +5124,21 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }));
     patchLinkedSagDocuments(actionNextTransaction, updatedAt);
 
+    if (custodyApproval) {
+      void recordAuditActivity(supabaseClient, 'CUSTODY_APPROVED', 'Vault Management', 'assets', selectedAssetIds.join(','), {
+        action: custodyApproval.action,
+        label: CUSTODY_ACTION_LABELS[custodyApproval.action],
+        refNo: actionTransaction.refNo,
+        requestedBy: custodyApproval.requestedBy,
+        requestedByName: custodyApproval.requestedByName,
+        approvedBy: custodyApproval.approvedBy,
+        approvedByName: custodyApproval.approvedByName,
+        approvedAt: custodyApproval.approvedAt,
+        reference: custodyApproval.reference,
+        releasedAssetIds: selectedAssetIds
+      });
+    }
+
     const returnedAssetCount = selectedAssetIds.filter(assetId => !otherActiveAssetIds.has(assetId)).length;
     const stillPledgedCount = selectedAssetIds.length - returnedAssetCount;
     setToastMessage(
@@ -5002,6 +5157,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveTransaction = (updatedTx) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk menyimpan transaksi SAG');
+      return;
+    }
     const updatedAt = new Date().toISOString();
     const audit = auditUpdate('transaction', updatedAt);
     // Melanjutkan tarikh matang secara terus tidak dibenarkan jika ujrah terkumpul
@@ -5061,6 +5220,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDuplicateAsset = (asset) => {
+    if (!hasPermission('assets_manage')) {
+      denyPermission('assets_manage', 'untuk menduplikasi aset');
+      return;
+    }
     const newId = Date.now();
     const createdAt = new Date().toISOString();
     const currentCode = asset.code || generateAssetCode(asset.type, asset.supplier, asset.purity, asset.weight, asset.id);
@@ -5084,7 +5247,33 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveAsset = (assetData) => {
+    if (!hasPermission('assets_manage')) {
+      denyPermission('assets_manage', 'untuk mendaftar atau mengemas kini aset');
+      return;
+    }
     const updatedAt = new Date().toISOString();
+    const previousStatus = editingAsset?.status;
+    const nextStatus = assetData.status || previousStatus || 'EDT';
+    // Dwi-kawalan: perubahan status keluar dari kebal (EDR → EDT/Dilelong) wajib
+    // diluluskan pegawai kedua yang berbeza daripada pemohon.
+    let custodyApproval = null;
+    if (editingAsset && requiresCustodyApproval({ previousStatus, nextStatus })) {
+      const evaluation = evaluateDualCustody({
+        action: nextStatus === 'Dilelong' ? 'auction_settlement' : 'asset_status_change',
+        requestedBy: recordActor.id,
+        requestedByName: recordActor.name,
+        approvedBy: assetData.custodyApproval?.approvedBy,
+        approvedByName: assetData.custodyApproval?.approvedByName,
+        reference: assetData.custodyApproval?.reference,
+        referenceRequired: nextStatus === 'Dilelong'
+      });
+      if (!evaluation.compliant) {
+        setToastMessage(`Kelulusan dwi-kawalan tidak lengkap: ${evaluation.violations.join(' ')}`);
+        setTimeout(() => setToastMessage(null), 7000);
+        return;
+      }
+      custodyApproval = evaluation.approval;
+    }
     const normalizedAssetData = {
       ...assetData,
       date: parseTransactionDateTime(assetData.date).toISOString()
@@ -5097,18 +5286,35 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             ...normalizedAssetData,
             code,
             id: editingAsset.id,
-            status: assetData.status || editingAsset.status,
+            status: nextStatus,
+            ...(custodyApproval ? { custodyApproval } : {}),
             ...auditUpdate('asset', updatedAt)
           }
         : asset
       ));
+      if (previousStatus !== nextStatus) {
+        void recordAuditActivity(
+          supabaseClient,
+          custodyApproval ? 'CUSTODY_APPROVED' : 'ASSET_STATUS_CHANGED',
+          'Vault Management',
+          'assets',
+          String(editingAsset.id),
+          {
+            code,
+            previousStatus: previousStatus || '',
+            nextStatus,
+            custody: custodyApproval,
+            changedBy: describeRecordActor(recordActor)
+          }
+        );
+      }
       setToastMessage(`Aset [${code}] berjaya dikemaskini!`);
     } else {
       setAssets(prev => [...prev, {
         ...normalizedAssetData,
         code,
         id: Date.now(),
-        status: assetData.status || 'EDT',
+        status: nextStatus,
         ...auditCreate('asset', updatedAt)
       }]);
       setToastMessage(`Aset [${code}] berjaya didaftarkan!`);
@@ -5124,6 +5330,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteInstitution = (id) => {
+    if (!hasPermission('institutions_manage')) {
+      denyPermission('institutions_manage', 'untuk memadam institusi');
+      return;
+    }
     if (institutions.filter(isRecordVisible).length <= 1) {
       setToastMessage('Perlu sekurang-kurangnya 1 institusi aktif dalam sistem.');
       setTimeout(() => setToastMessage(null), 3000);
@@ -5139,10 +5349,16 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveInstitution = (instData) => {
+    if (!hasPermission('institutions_manage')) {
+      denyPermission('institutions_manage', 'untuk mengubah kadar marhun / LTV institusi');
+      return;
+    }
     const savedInstitution = { ...instData, name: instData.name.trim(), branch: instData.branch.trim(), marhunSpreadCustomized: true };
     const duplicate = institutions.find(item => item.id !== editingInstitution?.id && String(item.name || '').trim().replace(/\s+/g, ' ').toLowerCase() === savedInstitution.name.replace(/\s+/g, ' ').toLowerCase());
-    if (duplicate || !savedInstitution.name || !savedInstitution.branch || !savedInstitution.category || !Number.isFinite(savedInstitution.maxMargin) || savedInstitution.maxMargin < 50 || savedInstitution.maxMargin > 90 || !Number.isFinite(savedInstitution.marhunRate) || savedInstitution.marhunRate < 0 || !Number.isFinite(savedInstitution.marhunSpread)) {
-      setToastMessage(duplicate ? 'Nama institusi sudah digunakan.' : 'Sila semak maklumat dan kadar institusi.');
+    if (duplicate || !savedInstitution.name || !savedInstitution.branch || !savedInstitution.category || !Number.isFinite(savedInstitution.maxMargin) || savedInstitution.maxMargin < 50 || savedInstitution.maxMargin > GOLD_LTV_HARD_CAP_PERCENT || !Number.isFinite(savedInstitution.marhunRate) || savedInstitution.marhunRate < 0 || !Number.isFinite(savedInstitution.marhunSpread)) {
+      setToastMessage(duplicate
+        ? 'Nama institusi sudah digunakan.'
+        : `Sila semak maklumat institusi. Margin maksimum mesti antara 50% dan ${GOLD_LTV_HARD_CAP_PERCENT}% (had sistem).`);
       setTimeout(() => setToastMessage(null), 4000);
       return;
     }
@@ -5160,12 +5376,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setInstitutions(prev => [...prev, { ...savedInstitution, id: Date.now(), ...auditCreate('institution', new Date().toISOString()) }]);
       setToastMessage(`Institusi baharu "${savedInstitution.name}" berjaya ditambah!`);
     }
+    // Parameter kritikal (kadar marhun & had LTV) dicatat bersama pelaku + timestamp.
+    void recordAuditActivity(supabaseClient, 'PARAMETER_CHANGED', 'Vault Management', 'institutions', String(editingInstitution?.id ?? ''), {
+      name: savedInstitution.name,
+      previousMaxMargin: editingInstitution?.maxMargin ?? null,
+      maxMargin: savedInstitution.maxMargin,
+      previousMarhunRate: editingInstitution?.marhunRate ?? null,
+      marhunRate: savedInstitution.marhunRate,
+      changedBy: describeRecordActor(recordActor)
+    });
     setIsInstitutionModalOpen(false);
     setEditingInstitution(null);
     setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleResetInstitutions = () => {
+    if (!hasPermission('institutions_manage')) {
+      denyPermission('institutions_manage', 'untuk menetap semula institusi');
+      return;
+    }
     setInstitutions(prev => resetRecordsPreservingDeleted(initialInstitutions, prev));
     setToastMessage('Senarai institusi Bangi telah dimuat semula ke tetapan asal!');
     setTimeout(() => setToastMessage(null), 3000);
@@ -5177,6 +5406,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteSupplier = (id) => {
+    if (!hasPermission('suppliers_manage')) {
+      denyPermission('suppliers_manage', 'untuk memadam pembekal');
+      return;
+    }
     const supplier = suppliers.find(item => item.id === id);
     const deletedAt = new Date().toISOString();
     setSuppliers(prev => prev.map(item =>
@@ -5187,6 +5420,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveSupplier = (supplierData) => {
+    if (!hasPermission('suppliers_manage')) {
+      denyPermission('suppliers_manage', 'untuk menyimpan pembekal');
+      return;
+    }
     const normalizedCode = supplierData.code.trim().toUpperCase();
     const normalizedName = supplierData.name.trim().replace(/\s+/g, ' ').toLowerCase();
     const duplicate = suppliers.find(item =>
@@ -6894,6 +7131,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             { id: 'assets_view', label: 'Lihat inventori emas EDT & EDR', roles: ['Staff', 'Manager', 'Admin'] },
                             { id: 'assets_manage', label: 'Daftar, pautkan dan kemas kini aset emas', roles: ['Manager', 'Admin'] },
                             { id: 'assets_delete', label: 'Padam rekod aset emas daripada inventori', roles: ['Admin'] },
+
+                            { category: 'Rujukan Institusi & Pembekal' },
+                            { id: 'institutions_manage', label: 'Ubah kadar marhun, LTV dan institusi', roles: ['Manager', 'Admin'] },
+                            { id: 'suppliers_manage', label: 'Daftar dan ubah pembekal emas', roles: ['Manager', 'Admin'] },
 
                             { category: 'Analitik & Kecerdasan Pasaran' },
                             { id: 'analytics_view', label: 'Akses Papan Pemuka Eksekutif & Ringkasan BI', roles: ['Staff', 'Manager', 'Admin'] },
@@ -10830,6 +11071,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           transactions={visibleTransactions}
           assets={visibleAssets}
           initialAction={initialCorrectionAction}
+          currentActor={recordActor}
           onClose={() => {
             setIsCorrectionModalOpen(false);
             setCorrectionTransaction(null);
@@ -10851,6 +11093,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           suppliers={suppliers}
           supabaseClient={supabaseClient}
           storageOwnerId={dataOwnerUserIdRef.current}
+          currentActor={recordActor}
         />
       )}
 
@@ -11518,6 +11761,12 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
     }
     if (icDigits.length !== 12) {
       setError('No. Kad Pengenalan mesti 12 digit.');
+      return;
+    }
+    // KYC/AML: umur minimum 18 tahun diterbitkan daripada No. KP (YYMMDD).
+    const kyc = evaluateCustomerKyc({ name: normalizedName, icNumber: icDigits });
+    if (!kyc.compliant) {
+      setError(kyc.violations.join(' '));
       return;
     }
     if (existingIcNumbers.includes(icDigits)) {
@@ -12633,7 +12882,7 @@ function NavItem({ icon, label, isActive, onClick, badge = 0, theme = 'dark', co
   );
 }
 
-function CorrectionActionModal({ transaction, transactions, assets = [], initialAction, onClose, onSave }) {
+function CorrectionActionModal({ transaction, transactions, assets = [], initialAction, onClose, onSave, currentActor = null }) {
   const [actionType, setActionType] = useState(initialAction);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   const [selectionError, setSelectionError] = useState('');
@@ -12655,6 +12904,9 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
     institutionConfirmed: false,
     auctionProceeds: '',
     auctionCosts: '',
+    approverId: '',
+    approverName: '',
+    approvalReference: '',
     remarks: ''
   });
   const linkedAssetIds = [...new Set(getTransactionAssetIds(transaction).map(String))];
@@ -12760,9 +13012,28 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
         return;
       }
     }
+    // Dwi-kawalan untuk pelepasan aset dari kebal / penyelesaian lelong.
+    let custodyApproval = null;
+    if (['TS', 'TKS', 'Lelong'].includes(actionType)) {
+      const custody = evaluateDualCustody({
+        action: actionType === 'Lelong' ? 'auction_settlement' : 'asset_release',
+        requestedBy: currentActor?.id,
+        requestedByName: currentActor?.name,
+        approvedBy: formData.approverId,
+        approvedByName: formData.approverName,
+        reference: formData.approvalReference,
+        referenceRequired: actionType === 'Lelong'
+      });
+      if (!custody.compliant) {
+        setSelectionError(`Kelulusan dwi-kawalan: ${custody.violations.join(' ')}`);
+        return;
+      }
+      custodyApproval = custody.approval;
+    }
     onSave({
       ...formData,
       type: actionType,
+      custodyApproval,
       selectedAssetIds: selectedAssets.map(asset => asset.id),
       releasedWeight: selectedAssetWeight,
       remainingWeight: remainingAssetWeight
@@ -12875,6 +13146,52 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                   <input type="datetime-local" name="date" value={formData.date} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5" />
                 </label>
               </div>
+
+              {['TS', 'TKS', 'Lelong'].includes(actionType) && (
+                <div className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4">
+                  <div>
+                    <p className="text-sm font-bold text-amber-900">Kelulusan Dwi-Kawalan (Two-Man Rule)</p>
+                    <p className="mt-1 text-[11px] font-medium text-amber-800">
+                      Tindakan ini mengeluarkan aset dari kebal. Kelulusan pegawai kedua diperlukan dan tidak boleh sama dengan pemohon.
+                      {actionType === 'Lelong' && ' Rujukan kelulusan institusi adalah wajib.'}
+                    </p>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">ID Pegawai Pelulus</span>
+                      <input
+                        name="approverId"
+                        value={formData.approverId}
+                        onChange={handleChange}
+                        placeholder="UUID akaun pegawai kedua"
+                        className="w-full rounded-lg border border-slate-300 p-2.5"
+                      />
+                    </label>
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">Nama Pegawai Pelulus</span>
+                      <input
+                        name="approverName"
+                        value={formData.approverName}
+                        onChange={handleChange}
+                        placeholder="Nama penuh pegawai kedua"
+                        className="w-full rounded-lg border border-slate-300 p-2.5"
+                      />
+                    </label>
+                  </div>
+                  <label className="block space-y-1">
+                    <span className="block text-sm font-semibold text-slate-700">
+                      Rujukan Kelulusan {actionType === 'Lelong' ? '(wajib)' : '(pilihan)'}
+                    </span>
+                    <input
+                      name="approvalReference"
+                      value={formData.approvalReference}
+                      onChange={handleChange}
+                      placeholder="No. arahan / minit / rujukan kebenaran institusi"
+                      className="w-full rounded-lg border border-slate-300 p-2.5"
+                    />
+                  </label>
+                </div>
+              )}
 
               {actionType !== 'Lanjutan' && (
               <section className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -14875,7 +15192,7 @@ function AssetDetailModal({ asset, statusInfo, currentGoldPrice, relatedTransact
   );
 }
 
-function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers, supabaseClient, storageOwnerId }) {
+function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers, supabaseClient, storageOwnerId, currentActor = null }) {
   const initialSupplierCodes = initialData?.supplierCodes || suppliers
     .filter(item => initialData?.supplier?.split(',').map(name => name.trim()).includes(item.name))
     .map(item => item.code);
@@ -14903,7 +15220,10 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     weight: initialData?.weight !== undefined ? initialData.weight : '',
     deductionWeight: initialData?.deductionWeight !== undefined ? initialData.deductionWeight : '',
     price: initialData?.price !== undefined ? initialData.price : '',
-    status: initialData?.status || 'EDT'
+    status: initialData?.status || 'EDT',
+    custodyApproverId: '',
+    custodyApproverName: '',
+    custodyReference: ''
   });
   const selectedSuppliers = suppliers.filter(item => selectedSupplierCodes.includes(item.code));
 
@@ -15058,6 +15378,24 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
       setAssetFormError(assetIssues.join(' '));
       return;
     }
+    // Dwi-kawalan: aset keluar dari kebal mesti diluluskan pegawai kedua.
+    let custodyApproval = null;
+    if (requiresCustodyApproval({ previousStatus: initialData?.status, nextStatus: formData.status })) {
+      const custody = evaluateDualCustody({
+        action: formData.status === 'Dilelong' ? 'auction_settlement' : 'asset_status_change',
+        requestedBy: currentActor?.id,
+        requestedByName: currentActor?.name,
+        approvedBy: formData.custodyApproverId,
+        approvedByName: formData.custodyApproverName,
+        reference: formData.custodyReference,
+        referenceRequired: formData.status === 'Dilelong'
+      });
+      if (!custody.compliant) {
+        setAssetFormError(`Kelulusan dwi-kawalan: ${custody.violations.join(' ')}`);
+        return;
+      }
+      custodyApproval = custody.approval;
+    }
     setAssetFormError('');
     setIsSaving(true);
     setImageError('');
@@ -15085,7 +15423,8 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
         code: finalCode,
         weight: parseFloat(formData.weight) || 0,
         deductionWeight: Math.max(0, parseFloat(formData.deductionWeight) || 0),
-        price: parseFloat(formData.price) || 0
+        price: parseFloat(formData.price) || 0,
+        custodyApproval
       });
     } catch (error) {
       setImageError(`Gambar tidak dapat disimpan: ${error instanceof Error ? error.message : 'Ralat storan.'}`);
@@ -15236,6 +15575,52 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
                 <option value="Dilelong">Dilelong · Tidak lagi dalam inventori tersedia</option>
               </select>
             </div>
+
+            {requiresCustodyApproval({ previousStatus: initialData?.status, nextStatus: formData.status }) && (
+              <div className="space-y-3 rounded-xl border border-amber-300 bg-amber-50 p-4 md:col-span-2">
+                <div>
+                  <p className="text-sm font-bold text-amber-900">Kelulusan Dwi-Kawalan (Two-Man Rule)</p>
+                  <p className="mt-1 text-[11px] font-medium text-amber-800">
+                    Aset keluar dari kebal ({initialData?.status || 'EDR'} → {formData.status}). Kelulusan pegawai kedua diperlukan
+                    dan tidak boleh sama dengan pengguna yang sedang merekod.
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-sm font-semibold text-slate-700">ID Pegawai Pelulus</label>
+                    <input
+                      name="custodyApproverId"
+                      value={formData.custodyApproverId}
+                      onChange={handleChange}
+                      placeholder="UUID akaun pegawai kedua"
+                      className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-sm font-semibold text-slate-700">Nama Pegawai Pelulus</label>
+                    <input
+                      name="custodyApproverName"
+                      value={formData.custodyApproverName}
+                      onChange={handleChange}
+                      placeholder="Nama penuh pegawai kedua"
+                      className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-sm font-semibold text-slate-700">
+                    Rujukan Kelulusan {formData.status === 'Dilelong' ? '(wajib)' : '(pilihan)'}
+                  </label>
+                  <input
+                    name="custodyReference"
+                    value={formData.custodyReference}
+                    onChange={handleChange}
+                    placeholder="No. arahan / minit mesyuarat / rujukan kebenaran"
+                    className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+                  />
+                </div>
+              </div>
+            )}
 
             <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4 md:col-span-2">
               <div>
@@ -15481,14 +15866,14 @@ function InstitutionModal({ initialData, institutions, nameInUse, currentGoldPri
                 type="number"
                 step="1"
                 min="50"
-                max="90"
+                max={GOLD_LTV_HARD_CAP_PERCENT}
                 name="maxMargin"
                 value={formData.maxMargin}
                 onChange={handleChange}
                 required
                 className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all"
               />
-              <p className="text-xs text-slate-400">Standard: 70% (Salin), 75%, atau 80% (OL).</p>
+              <p className="text-xs text-slate-400">Standard: 70% (Salin), 75%, atau 80% (OL). Had sistem {GOLD_LTV_HARD_CAP_PERCENT}%.</p>
             </div>
 
             <div className="space-y-1">
