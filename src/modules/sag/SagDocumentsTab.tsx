@@ -134,7 +134,7 @@ export function SagDocumentsTab({
     { title: 'Jumlah Surat Akuan', value: String(summary.total), hint: `${summary.issued} dikeluarkan`, icon: <FileText size={18} />, tone: 'border-corporate-teal-200 bg-corporate-teal-50/70 text-corporate-teal-800' },
     { title: 'Draf Belum Selesai', value: String(summary.draft), hint: 'Salinan belum lengkap', icon: <AlertTriangle size={18} />, tone: 'border-amber-200 bg-amber-50 text-amber-900' },
     { title: 'Nilai Marhun', value: formatSagMoney(summary.marhunTotal), hint: 'Jumlah keseluruhan', icon: <Layers size={18} />, tone: 'border-slate-200 bg-slate-50 text-slate-700' },
-    { title: 'Nilai Pembiayaan', value: formatSagMoney(summary.financingTotal), hint: `Keuntungan ${formatSagMoney(summary.profitTotal)}`, icon: <Wallet size={18} />, tone: 'border-emerald-200 bg-emerald-50 text-emerald-800' }
+    { title: 'Nilai Pembiayaan', value: formatSagMoney(summary.financingTotal), hint: `Ribh ${formatSagMoney(summary.profitTotal)} · Upah ${formatSagMoney(summary.ujrahTotal)}`, icon: <Wallet size={18} />, tone: 'border-emerald-200 bg-emerald-50 text-emerald-800' }
   ];
 
   return (
@@ -349,6 +349,12 @@ export function SagDocumentsTab({
                         {statusMeta.label}
                       </span>
                       <span className="mt-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{document.copyType}</span>
+                      {document.feeBasis === 'jumlahPembiayaan' && (
+                        <span className="mt-1 block text-[10px] font-bold text-rose-600">Ujrah tidak patuh · asas pembiayaan</span>
+                      )}
+                      {document.status !== 'Draf' && !document.consent?.acceptedAt && (
+                        <span className="mt-1 block text-[10px] font-bold text-amber-700">Ijab &amp; Qabul tiada rekod</span>
+                      )}
                       {document.transactionId != null && indicators?.[String(document.transactionId)] && (() => {
                         const indicator = indicators[String(document.transactionId)];
                         const score = indicator.readinessScore;

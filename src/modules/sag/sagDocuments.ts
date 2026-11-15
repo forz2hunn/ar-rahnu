@@ -4,10 +4,23 @@
  * borang, pratonton surat dan ujian tanpa bergantung kepada React.
  */
 
+import { resolveGoldFineness } from '../../lib/gold-valuation';
+import { roundMoney as roundMoneyPrecise } from '../../lib/money';
+
 export type SagDocumentStatus = 'Draf' | 'Dikeluarkan' | 'Batal';
 export type SagCopyType = 'Salinan Pelanggan' | 'Salinan Ar-Rahnu';
-/** Asas kiraan upah simpan, sama seperti modul lejar SAG. */
-export type SagFeeBasis = '' | 'nilaiMarhun' | 'jumlahPembiayaan';
+/**
+ * Asas kiraan upah simpan (akad ijarah).
+ * - `nilaiMarhun`: peratus bulanan × nilai marhun.
+ * - `beratMarhun`: kadar RM per gram sebulan × berat marhun.
+ * - `kadarTetap`: caj perkhidmatan fizikal tetap (RM sebulan).
+ * - `jumlahPembiayaan`: WARISAN sahaja dan TIDAK dibenarkan kerana ujrah
+ *   menjadi peratusan hutang (riba). Rekod lama perlu ditukar asas.
+ */
+export type SagFeeBasis = '' | 'nilaiMarhun' | 'beratMarhun' | 'kadarTetap' | 'jumlahPembiayaan';
+
+/** Versi kontrak Shariah semasa. Naikkan versi apabila klausa berubah. */
+export const SAG_CONTRACT_VERSION = 'SAG-TWQ-2026.11';
 
 export type SagAuditActor = {
   id: string;
@@ -46,6 +59,11 @@ export type SagMarhunItem = {
   ratePerGram: number;
   weight: number;
   marhunValue: number;
+  /**
+   * Faktor ketulenan yang digunakan semasa item dijana daripada aset.
+   * Item tanpa nilai ini ialah rekod warisan yang dikira berat × kadar sahaja.
+   */
+  fineness?: number;
 };
 
 export type SagProfitPeriod = {
@@ -58,8 +76,12 @@ export type SagProfitPeriod = {
 };
 
 export type SagTawarruqAgreement = {
+  /** Akad jualan (murabahah/tawarruq) — akad pembiayaan. */
   saleAgreed: boolean;
+  /** Akad gadai (rahn) — cagaran marhun. */
   pledgeAgreed: boolean;
+  /** Akad ijarah (upah simpan) — akad perkhidmatan, BERASINGAN daripada akad jualan. */
+  ujrahAgreed: boolean;
 };
 
 export type SagSignatureBlock = {
@@ -69,6 +91,20 @@ export type SagSignatureBlock = {
   officerSignedAt: string;
   witnessName: string;
   witnessSignedAt: string;
+};
+
+/**
+ * Jejak penerimaan terma (Ijab & Qabul) bagi sesuatu versi kontrak.
+ * `acceptedAt` ialah timestamp penuh (ISO 8601), bukan tarikh sahaja.
+ */
+export type SagContractConsent = {
+  acceptedAt: string;
+  contractVersion: string;
+  acceptedBy: SagAuditActor | null;
+  userAgent: string;
+  clauses: { saleAgreed: boolean; pledgeAgreed: boolean; ujrahAgreed: boolean };
+  /** Kod rujukan kandungan terma yang diterima (bukan tandatangan kriptografi). */
+  termsHash: string;
 };
 
 export type SagDocument = SagAuditFields & {
@@ -99,16 +135,34 @@ export type SagDocument = SagAuditFields & {
   /** Margin pembiayaan (% daripada nilai marhun), selaras dengan modul lejar SAG. */
   margin: number;
   purchasePrice: number;
+  /** Keuntungan jualan (ribh murabahah) SAHAJA — tidak termasuk upah simpan. */
   totalProfit: number;
-  /** Kadar upah simpan (% sebulan) seperti direkod dalam lejar SAG. */
+  /**
+   * Kadar upah simpan. Unit bergantung kepada `feeBasis`:
+   * % sebulan (nilai marhun), RM per gram sebulan (berat marhun) atau RM sebulan (kadar tetap).
+   */
   feeRate: number;
-  /** Asas kiraan upah simpan: nilai marhun atau jumlah pembiayaan. */
+  /** Asas kiraan upah simpan. `jumlahPembiayaan` tidak lagi dibenarkan. */
   feeBasis: SagFeeBasis;
+  /** Caj perkhidmatan tetap (RM sebulan) apabila `feeBasis === 'kadarTetap'`. */
+  ujrahFixedMonthly: number;
+  /** Upah simpan sebulan (RM) — akad ijarah, BUKAN sebahagian daripada harga jualan. */
+  ujrahMonthly: number;
+  /** Jumlah upah simpan sepanjang tempoh (RM). */
+  ujrahTotal: number;
+  /** Jadual pengagihan upah simpan mengikut tempoh pembayaran. */
+  ujrahSchedule: SagProfitPeriod[];
+  /** Jumlah tebus sebenar = harga jualan + upah simpan (dua akad berasingan). */
+  redemptionTotal: number;
   /** Unjuran lebihan tunai (loan − tebus − fi) untuk surat susulan. */
   projectedProfit: number;
   sellingPrice: number;
   profitSchedule: SagProfitPeriod[];
   tawarruq: SagTawarruqAgreement;
+  /** Versi kontrak Shariah yang dipaparkan pada surat ini. */
+  contractVersion: string;
+  /** Jejak penerimaan Ijab & Qabul (timestamp + versi kontrak + pelaku). */
+  consent: SagContractConsent | null;
   marhunItems: SagMarhunItem[];
   signatures: SagSignatureBlock;
   remarks: string;
@@ -178,8 +232,21 @@ export const SAG_TAWARRUQ_CLAUSES: { key: keyof SagTawarruqAgreement; title: str
     title: 'Kontrak Gadai',
     description:
       'Saya bersetuju untuk menggadaikan Marhun sebagai cagaran kepada harga komoditi.'
+  },
+  {
+    key: 'ujrahAgreed',
+    title: 'Kontrak Ijarah (Upah Simpan)',
+    description:
+      'Saya bersetuju menyewa ruang simpanan khas daripada Ar Rahnu KPDRM untuk menyimpan Marhun, dengan upah simpan yang dikira BERASINGAN daripada Harga Jualan berdasarkan nilai/berat Marhun atau caj perkhidmatan tetap, dan bukan peratusan ke atas jumlah pembiayaan.'
   }
 ];
+
+/** Nilai sandaran untuk rekod lama yang belum mempunyai pilihan akad ijarah. */
+export const createEmptySagTawarruq = (): SagTawarruqAgreement => ({
+  saleAgreed: false,
+  pledgeAgreed: false,
+  ujrahAgreed: false
+});
 
 /** Akuan pelanggan seperti pada borang rasmi Surat Akuan Gadaian. */
 export const SAG_CUSTOMER_DECLARATIONS: string[] = [
@@ -194,7 +261,8 @@ export const SAG_CUSTOMER_DECLARATIONS: string[] = [
 
 const MS_PER_DAY = 86400000;
 
-export const roundMoney = (value: unknown): number => Number((Number(value) || 0).toFixed(2));
+/** Pembundaran wang berpusat (elak ralat floating point `toFixed`). */
+export const roundMoney = (value: unknown): number => roundMoneyPrecise(value);
 
 export const toDateOnly = (value?: string | null): string => {
   if (!value) return '';
@@ -206,20 +274,38 @@ export const toDateOnly = (value?: string | null): string => {
 };
 
 // --- Formula pajakan yang diselaraskan dengan modul lejar SAG ---
-export const SAG_FEE_BASIS_OPTIONS: { value: Exclude<SagFeeBasis, ''>; label: string }[] = [
-  { value: 'nilaiMarhun', label: 'Nilai Marhun' },
-  { value: 'jumlahPembiayaan', label: 'Jumlah Pembiayaan' }
+/** Pilihan asas upah simpan yang dibenarkan dari sudut Shariah. */
+export const SAG_FEE_BASIS_OPTIONS: { value: Exclude<SagFeeBasis, '' | 'jumlahPembiayaan'>; label: string; hint: string }[] = [
+  { value: 'nilaiMarhun', label: 'Nilai Marhun (% sebulan)', hint: 'Peratus bulanan × nilai marhun' },
+  { value: 'beratMarhun', label: 'Berat Marhun (RM/g sebulan)', hint: 'Kadar per gram × berat marhun' },
+  { value: 'kadarTetap', label: 'Kadar Tetap (RM sebulan)', hint: 'Caj perkhidmatan fizikal tetap' }
 ];
+
+/** Mesej ralat Shariah apabila ujrah dikira daripada jumlah pembiayaan (riba). */
+export const SAG_UJRAH_DISALLOWED_MESSAGE =
+  'Upah simpan tidak boleh dikira sebagai peratusan jumlah pembiayaan (qard) kerana ia menjadi riba. Gunakan asas nilai marhun, berat marhun atau kadar perkhidmatan tetap.';
 
 export const normalizeSagFeeBasis = (value: unknown): SagFeeBasis => {
   const text = String(value ?? '').trim();
   if (text === 'nilaiMarhun' || text === 'Nilai Marhun') return 'nilaiMarhun';
+  if (text === 'beratMarhun' || text === 'Berat Marhun') return 'beratMarhun';
+  if (text === 'kadarTetap' || text === 'Kadar Tetap') return 'kadarTetap';
+  // Nilai warisan: dikekalkan supaya rekod lama boleh dikenal pasti dan dibetulkan.
   if (text === 'jumlahPembiayaan' || text === 'Jumlah Pembiayaan') return 'jumlahPembiayaan';
   return '';
 };
 
-export const getSagFeeBasisLabel = (value: unknown): string =>
-  SAG_FEE_BASIS_OPTIONS.find(option => option.value === normalizeSagFeeBasis(value))?.label || 'Belum ditetapkan';
+/** Semak sama ada asas upah simpan mematuhi syarat Shariah. */
+export const isSagFeeBasisShariahCompliant = (value: unknown): boolean => {
+  const basis = normalizeSagFeeBasis(value);
+  return basis === 'nilaiMarhun' || basis === 'beratMarhun' || basis === 'kadarTetap';
+};
+
+export const getSagFeeBasisLabel = (value: unknown): string => {
+  const basis = normalizeSagFeeBasis(value);
+  if (basis === 'jumlahPembiayaan') return 'Jumlah Pembiayaan (tidak dibenarkan)';
+  return SAG_FEE_BASIS_OPTIONS.find(option => option.value === basis)?.label || 'Belum ditetapkan';
+};
 
 /** Nilai marhun = berat × kadar taksiran per gram. */
 export const calculateSagMarhunValue = (weight: unknown, ratePerGram: unknown): number =>
@@ -241,34 +327,102 @@ export const calculateSagProjectedProfit = (
   return roundMoney((Number(purchasePrice) || 0) - (Number(redemption) || 0) - (Number(totalProfit) || 0));
 };
 
-/** Upah simpan: kadar sebulan × asas kiraan × tempoh, berserta jumlah tebus. */
+export type SagUjrahCalculation = {
+  basis: SagFeeBasis;
+  basisAmount: number;
+  basisUnit: 'RM' | 'g' | '';
+  /** Upah simpan sebulan (RM). */
+  monthly: number;
+  /** Jumlah upah simpan sepanjang tempoh (RM). */
+  total: number;
+  /** Harga jualan + upah simpan (jumlah tebus). */
+  redemption: number;
+  compliant: boolean;
+  violations: string[];
+};
+
+/**
+ * Upah simpan (ujrah) bagi akad ijarah al-hifz.
+ *
+ * PENTING: fungsi ini TIDAK menerima jumlah pembiayaan sebagai asas kiraan.
+ * Ujrah mesti berasaskan nilai/berat marhun atau caj perkhidmatan tetap supaya
+ * ia tidak menjadi peratusan ke atas hutang (riba) dan kekal sebagai akad
+ * berasingan daripada akad jualan tawarruq.
+ */
 export const calculateSagStorageFee = ({
   feeRate,
   feeBasis,
   termMonths,
   marhunValue,
+  marhunWeight,
+  fixedMonthly,
+  sellingPrice,
   purchasePrice
 }: {
   feeRate: unknown;
   feeBasis: unknown;
   termMonths: unknown;
   marhunValue: unknown;
-  purchasePrice: unknown;
-}) => {
+  /** Berat marhun (gram) untuk asas `beratMarhun`. */
+  marhunWeight?: unknown;
+  /** Caj perkhidmatan tetap (RM sebulan) untuk asas `kadarTetap`. */
+  fixedMonthly?: unknown;
+  /** Harga jualan (purchasePrice + ribh) sebagai asas jumlah tebus. */
+  sellingPrice?: unknown;
+  /** Fallback harga jualan apabila `sellingPrice` tidak diberi. */
+  purchasePrice?: unknown;
+}): SagUjrahCalculation => {
   const basis = normalizeSagFeeBasis(feeBasis);
-  const basisAmount = basis === 'nilaiMarhun'
-    ? Number(marhunValue) || 0
-    : basis === 'jumlahPembiayaan'
-      ? Number(purchasePrice) || 0
-      : 0;
-  const monthly = roundMoney(basisAmount * ((Number(feeRate) || 0) / 100));
-  const months = Math.max(0, Number(termMonths) || 0);
+  const rate = Math.max(0, Number(feeRate) || 0);
+  const months = Math.min(24, Math.max(0, Math.round(Number(termMonths) || 0)));
+  const weight = Math.max(0, Number(marhunWeight) || 0);
+  const fixed = Math.max(0, Number(fixedMonthly) || 0);
+  const marhun = Math.max(0, Number(marhunValue) || 0);
+  const selling = roundMoney(sellingPrice ?? purchasePrice ?? 0);
+  const violations: string[] = [];
+
+  let basisAmount = 0;
+  let basisUnit: SagUjrahCalculation['basisUnit'] = '';
+  let monthly = 0;
+
+  switch (basis) {
+    case 'nilaiMarhun':
+      basisAmount = roundMoney(marhun);
+      basisUnit = 'RM';
+      monthly = roundMoney(basisAmount * (rate / 100));
+      if (rate <= 0) violations.push('Kadar upah simpan (peratus sebulan) mesti melebihi 0.');
+      if (basisAmount <= 0) violations.push('Nilai marhun mesti melebihi RM 0.00 untuk mengira upah simpan.');
+      break;
+    case 'beratMarhun':
+      basisAmount = roundMoney(weight);
+      basisUnit = 'g';
+      monthly = roundMoney(basisAmount * rate);
+      if (rate <= 0) violations.push('Kadar upah simpan (RM per gram sebulan) mesti melebihi 0.');
+      if (basisAmount <= 0) violations.push('Berat marhun mesti melebihi 0 gram untuk mengira upah simpan.');
+      break;
+    case 'kadarTetap':
+      basisAmount = roundMoney(fixed);
+      basisUnit = 'RM';
+      monthly = basisAmount;
+      if (basisAmount <= 0) violations.push('Caj perkhidmatan tetap mesti melebihi RM 0.00 sebulan.');
+      break;
+    case 'jumlahPembiayaan':
+      violations.push(SAG_UJRAH_DISALLOWED_MESSAGE);
+      break;
+    default:
+      violations.push('Asas upah simpan belum ditetapkan (nilai marhun / berat marhun / kadar tetap).');
+  }
+
   const total = roundMoney(monthly * months);
   return {
-    basisAmount: roundMoney(basisAmount),
+    basis,
+    basisAmount,
+    basisUnit,
     monthly,
     total,
-    redemption: roundMoney((Number(purchasePrice) || 0) + total)
+    redemption: roundMoney(selling + total),
+    compliant: violations.length === 0,
+    violations
   };
 };
 
@@ -453,17 +607,24 @@ export const buildSagProfitSchedule = ({
 };
 
 export const createSagMarhunItem = (asset: any, ratePerGram: number): SagMarhunItem => {
-  const weight = roundMoney(asset?.weight);
-  const rate = roundMoney(ratePerGram);
+  const grossWeight = roundMoney(asset?.weight);
+  const deductionWeight = Math.max(0, roundMoney(asset?.deductionWeight));
+  const weight = Math.max(0, roundMoney(grossWeight - deductionWeight));
+  const baseRate = roundMoney(ratePerGram);
+  // Kadar institusi ialah kadar emas tulen (spot + spread): ketulenan aset mesti
+  // didarabkan supaya nilai marhun sama dengan kandungan emas sebenar.
+  const fineness = resolveGoldFineness(asset?.purity);
+  const effectiveRate = fineness === null ? baseRate : roundMoney(baseRate * fineness);
   return {
     id: `marhun-${asset?.id ?? Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     assetId: asset?.id ?? null,
     description: `${asset?.type || 'Marhun'}${asset?.code ? ` (${asset.code})` : ''}`,
     quantity: 1,
     karat: purityToKarat(asset?.purity),
-    ratePerGram: rate,
+    ratePerGram: effectiveRate,
     weight,
-    marhunValue: roundMoney(weight * rate)
+    marhunValue: roundMoney(weight * effectiveRate),
+    fineness: fineness === null ? undefined : Number(fineness.toFixed(4))
   };
 };
 
@@ -483,7 +644,9 @@ export const normalizeSagMarhunItems = (items: unknown): SagMarhunItem[] => {
         karat: String(item.karat || '-'),
         ratePerGram: roundMoney(ratePerGram),
         weight: roundMoney(weight),
-        marhunValue: roundMoney(quantity * weight * ratePerGram)
+        marhunValue: roundMoney(quantity * weight * ratePerGram),
+        // Kekalkan faktor ketulenan supaya nilai tidak dikira semula tanpa pelarasan.
+        fineness: Number(item.fineness) > 0 ? Number(Number(item.fineness).toFixed(4)) : undefined
       };
     });
 };
@@ -494,9 +657,128 @@ export const summarizeSagMarhunItems = (items: SagMarhunItem[]) => ({
   value: roundMoney(items.reduce((total, item) => total + item.marhunValue, 0))
 });
 
+/** Kod rujukan kandungan terma (bukan tandatangan kriptografi; jejak penuh ada dalam audit trail). */
+export const buildSagTermsHash = (input: {
+  documentNo?: string;
+  contractVersion?: string;
+  acceptedAt?: string;
+  saleAgreed?: boolean;
+  pledgeAgreed?: boolean;
+  ujrahAgreed?: boolean;
+}): string => {
+  const payload = [
+    String(input.documentNo || '-').toUpperCase(),
+    String(input.contractVersion || '-'),
+    String(input.acceptedAt || '-'),
+    input.saleAgreed ? '1' : '0',
+    input.pledgeAgreed ? '1' : '0',
+    input.ujrahAgreed ? '1' : '0'
+  ].join('|');
+  let hash = 0;
+  for (let index = 0; index < payload.length; index += 1) {
+    hash = (hash * 31 + payload.charCodeAt(index)) >>> 0;
+  }
+  return hash.toString(36).toUpperCase().padStart(8, '0').slice(0, 8);
+};
+
+const normalizeSagTawarruq = (value: unknown): SagTawarruqAgreement => {
+  const source = (value && typeof value === 'object' ? value : {}) as Partial<SagTawarruqAgreement>;
+  return {
+    saleAgreed: Boolean(source.saleAgreed),
+    pledgeAgreed: Boolean(source.pledgeAgreed),
+    ujrahAgreed: Boolean(source.ujrahAgreed)
+  };
+};
+
+const normalizeSagContractConsent = (
+  value: unknown,
+  documentNo: string,
+  contractVersion: string,
+  tawarruq: SagTawarruqAgreement
+): SagContractConsent | null => {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Partial<SagContractConsent>;
+  if (!source.acceptedAt) return null;
+  const clauses = {
+    saleAgreed: Boolean(source.clauses?.saleAgreed ?? tawarruq.saleAgreed),
+    pledgeAgreed: Boolean(source.clauses?.pledgeAgreed ?? tawarruq.pledgeAgreed),
+    ujrahAgreed: Boolean(source.clauses?.ujrahAgreed ?? tawarruq.ujrahAgreed)
+  };
+  const acceptedAt = String(source.acceptedAt);
+  const resolvedVersion = String(source.contractVersion || contractVersion);
+  return {
+    acceptedAt,
+    contractVersion: resolvedVersion,
+    acceptedBy: source.acceptedBy
+      ? {
+          id: String(source.acceptedBy.id || ''),
+          name: String(source.acceptedBy.name || ''),
+          email: String(source.acceptedBy.email || '')
+        }
+      : null,
+    userAgent: String(source.userAgent || ''),
+    clauses,
+    termsHash: String(source.termsHash || buildSagTermsHash({
+      documentNo,
+      contractVersion: resolvedVersion,
+      acceptedAt,
+      ...clauses
+    }))
+  };
+};
+
+/**
+ * Bina jejak penerimaan terma. Jika pelanggan sudah menerima versi & klausa
+ * yang sama, timestamp asal dikekalkan supaya jejak tidak ditulis semula.
+ */
+export const buildSagContractConsent = ({
+  documentNo,
+  tawarruq,
+  acceptedBy,
+  userAgent = '',
+  contractVersion = SAG_CONTRACT_VERSION,
+  previousConsent = null,
+  acceptedAt = new Date().toISOString()
+}: {
+  documentNo: string;
+  tawarruq: SagTawarruqAgreement;
+  acceptedBy: SagAuditActor | null;
+  userAgent?: string;
+  contractVersion?: string;
+  previousConsent?: SagContractConsent | null;
+  acceptedAt?: string;
+}): SagContractConsent | null => {
+  const clauses = {
+    saleAgreed: Boolean(tawarruq.saleAgreed),
+    pledgeAgreed: Boolean(tawarruq.pledgeAgreed),
+    ujrahAgreed: Boolean(tawarruq.ujrahAgreed)
+  };
+  if (!clauses.saleAgreed || !clauses.pledgeAgreed || !clauses.ujrahAgreed) return null;
+  const reuse = previousConsent
+    && previousConsent.contractVersion === contractVersion
+    && previousConsent.clauses?.saleAgreed === clauses.saleAgreed
+    && previousConsent.clauses?.pledgeAgreed === clauses.pledgeAgreed
+    && previousConsent.clauses?.ujrahAgreed === clauses.ujrahAgreed
+    && Boolean(previousConsent.acceptedAt);
+  if (reuse && previousConsent) return previousConsent;
+  return {
+    acceptedAt,
+    contractVersion,
+    acceptedBy: acceptedBy
+      ? { id: acceptedBy.id, name: acceptedBy.name, email: acceptedBy.email }
+      : null,
+    userAgent,
+    clauses,
+    termsHash: buildSagTermsHash({ documentNo, contractVersion, acceptedAt, ...clauses })
+  };
+};
+
 /**
  * Kira semula semua nilai terbitan supaya borang, senarai dan surat
  * sentiasa menggunakan angka yang sama.
+ *
+ * Harga Jualan hanya mengandungi kos + keuntungan jualan. Upah simpan (ujrah)
+ * dikira BERASINGAN dan ditambah hanya pada Jumlah Tebus.
  */
 export const normalizeSagDocument = (document: SagDocument): SagDocument => {
   const marhunItems = normalizeSagMarhunItems(document.marhunItems);
@@ -509,10 +791,27 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
   const financingDate = toDateOnly(document.financingDate) || toDateOnly(new Date().toISOString());
   const maturityDate = toDateOnly(document.maturityDate) ||
     addMonthsToDateOnly(financingDate, paymentTermMonths * 3);
+  const documentNo = String(document.documentNo || '').trim().toUpperCase();
+  const contractVersion = String(document.contractVersion || SAG_CONTRACT_VERSION);
+  const tawarruq = normalizeSagTawarruq(document.tawarruq);
+  const marhunValue = marhunItems.length ? marhunSummary.value : roundMoney(document.marhunValue);
+  const sellingPrice = roundMoney(purchasePrice + totalProfit);
+  const ujrahFixedMonthly = Math.max(0, roundMoney(document.ujrahFixedMonthly));
+
+  // Akad ijarah: upah simpan dikira daripada marhun/perkhidmatan, bukan hutang.
+  const ujrah = calculateSagStorageFee({
+    feeRate: document.feeRate,
+    feeBasis: document.feeBasis,
+    termMonths: paymentTermMonths,
+    marhunValue,
+    marhunWeight: marhunSummary.weight,
+    fixedMonthly: ujrahFixedMonthly,
+    sellingPrice
+  });
 
   return {
     ...document,
-    documentNo: String(document.documentNo || '').trim().toUpperCase(),
+    documentNo,
     product: String(document.product || SAG_PRODUCT_DEFAULT).trim(),
     pledgeType: String(document.pledgeType || '').trim(),
     pledgeStatus: String(document.pledgeStatus || 'Aktif').trim(),
@@ -523,20 +822,33 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
     maturityDate,
     paymentTermMonths,
     marhunItems,
-    marhunValue: marhunItems.length ? marhunSummary.value : roundMoney(document.marhunValue),
+    marhunValue,
     margin: Math.max(0, Math.min(100, roundMoney(document.margin))),
     feeRate: Math.max(0, roundMoney(document.feeRate)),
     feeBasis: normalizeSagFeeBasis(document.feeBasis),
+    ujrahFixedMonthly,
+    ujrahMonthly: ujrah.monthly,
+    ujrahTotal: ujrah.total,
+    ujrahSchedule: buildSagProfitSchedule({
+      financingDate,
+      maturityDate,
+      totalProfit: ujrah.total,
+      paymentTermMonths
+    }),
+    redemptionTotal: ujrah.redemption,
     projectedProfit: calculateSagProjectedProfit(pledgeType, purchasePrice, previousRedemption, totalProfit),
     purchasePrice,
     totalProfit,
-    sellingPrice: roundMoney(purchasePrice + totalProfit),
+    sellingPrice,
     profitSchedule: buildSagProfitSchedule({
       financingDate,
       maturityDate,
       totalProfit,
       paymentTermMonths
-    })
+    }),
+    contractVersion,
+    tawarruq,
+    consent: normalizeSagContractConsent(document.consent, documentNo, contractVersion, tawarruq)
   };
 };
 
@@ -568,8 +880,11 @@ export type SagLedgerFields = {
 
 /**
  * Terjemah Surat Akuan Gadaian kepada medan lejar SAG supaya surat menjadi
- * rekod master dan lejar menyimpan angka yang sama. Medan khusus lejar
- * (feeRate, feeBasis, profit, status, lampiran) tidak disentuh.
+ * rekod master dan lejar menyimpan angka yang sama.
+ *
+ * `fee` dalam lejar ialah CAJ SIMPANAN SEBENAR (ujrah), bukan keuntungan
+ * jualan. Keuntungan murabahah tidak ditulis ke lejar kerana lejar tidak
+ * mempunyai medan ribh — ia kekal pada surat sahaja.
  */
 export const buildSagLedgerFieldsFromDocument = (
   document: SagDocument,
@@ -580,7 +895,8 @@ export const buildSagLedgerFieldsFromDocument = (
   const marhunValue = summary.value || roundMoney(document.marhunValue);
   const weight = summary.weight;
   const loan = roundMoney(document.purchasePrice);
-  const fee = roundMoney(document.totalProfit);
+  // Ujrah sahaja — JANGAN gunakan totalProfit (ribh) sebagai caj simpanan.
+  const fee = roundMoney(document.ujrahTotal);
   const pledgeType = SAG_PLEDGE_TYPES.includes(String(document.pledgeType || ''))
     ? String(document.pledgeType)
     : '';
@@ -610,7 +926,7 @@ export const buildSagLedgerFieldsFromDocument = (
     profit: roundMoney(document.projectedProfit ?? existingTransaction?.profit ?? 0),
     redemption: document.previousRedemption > 0
       ? roundMoney(document.previousRedemption)
-      : roundMoney(loan + fee),
+      : roundMoney(document.redemptionTotal || (loan + fee)),
     feeTermMonths: Math.max(1, Number(document.paymentTermMonths) || SAG_DEFAULT_PAYMENT_TERM_MONTHS),
     transactionStatus: pledgeType || String(existingTransaction?.transactionStatus || 'Pajakan Asal'),
     selectedAssetIds: assetIds,
@@ -621,6 +937,9 @@ export const buildSagLedgerFieldsFromDocument = (
 /**
  * Terjemah semula perubahan lejar kepada surat supaya surat sentiasa
  * memaparkan institusi, tarikh, nilai dan status pajakan terkini.
+ *
+ * Medan `fee` lejar TIDAK dipetakan ke `totalProfit` (ribh) — ia hanya
+ * memaklumkan kadar/asas ujrah supaya surat mengira semula upah simpan.
  */
 export const buildSagDocumentPatchFromLedger = (
   document: SagDocument,
@@ -638,7 +957,6 @@ export const buildSagDocumentPatchFromLedger = (
     financingDate: toDateOnly(transaction?.date) || document.financingDate,
     maturityDate: toDateOnly(transaction?.redemptionDate) || document.maturityDate,
     purchasePrice: roundMoney(transaction?.loan ?? document.purchasePrice),
-    totalProfit: roundMoney(transaction?.fee ?? document.totalProfit),
     marhunValue: roundMoney(transaction?.marhunValue ?? document.marhunValue),
     margin: roundMoney(transaction?.margin ?? document.margin),
     feeRate: roundMoney(transaction?.feeRate ?? document.feeRate),
@@ -718,7 +1036,6 @@ export const buildSagDocumentDraft = ({
   const financingDate = toDateOnly(transaction?.date) || toDateOnly(now);
   const marhunRate = roundMoney(transaction?.marhunPrice ?? institution?.marhunRate ?? 0);
   const purchasePrice = roundMoney(transaction?.loan ?? 0);
-  const totalProfit = roundMoney(transaction?.fee ?? 0);
   const linkedItems = assets
     .filter(asset => asset && (parseFloat(asset.weight) || 0) > 0)
     .map(asset => createSagMarhunItem(asset, marhunRate));
@@ -756,11 +1073,17 @@ export const buildSagDocumentDraft = ({
     margin: roundMoney(transaction?.margin ?? institution?.maxMargin ?? 0),
     feeRate: roundMoney(transaction?.feeRate ?? 0),
     feeBasis: normalizeSagFeeBasis(transaction?.feeBasis),
+    ujrahFixedMonthly: 0,
     purchasePrice,
-    totalProfit,
-    sellingPrice: roundMoney(purchasePrice + totalProfit),
+    // Keuntungan jualan (ribh) TIDAK diambil daripada `transaction.fee` kerana
+    // medan itu ialah caj simpanan sebenar (ujrah), bukan keuntungan murabahah.
+    totalProfit: 0,
+    sellingPrice: roundMoney(purchasePrice),
     profitSchedule: [],
-    tawarruq: { saleAgreed: true, pledgeAgreed: true },
+    // Persetujuan akad direkod secara eksplisit oleh pengguna, bukan dipratanda.
+    tawarruq: { ...createEmptySagTawarruq() },
+    contractVersion: SAG_CONTRACT_VERSION,
+    consent: null,
     marhunItems: linkedItems,
     signatures: {
       customerName: String(member?.name || ''),
@@ -817,11 +1140,14 @@ export const createEmptySagDocument = (
     margin: 0,
     feeRate: 0,
     feeBasis: '' as SagFeeBasis,
+    ujrahFixedMonthly: 0,
     purchasePrice: 0,
     totalProfit: 0,
     sellingPrice: 0,
     profitSchedule: [],
-    tawarruq: { saleAgreed: true, pledgeAgreed: true },
+    tawarruq: { ...createEmptySagTawarruq() },
+    contractVersion: SAG_CONTRACT_VERSION,
+    consent: null,
     marhunItems: [],
     signatures: {
       customerName: '',
@@ -890,6 +1216,12 @@ export const buildSagDocumentFromLedger = ({
     transactionRefNo: String(transaction?.refNo || draft.transactionRefNo || ''),
     // Rekod lejar tidak menyimpan surat terdahulu: tebusan hanya relevan untuk surat susulan.
     previousRedemption: pledgeType === 'Pajakan Asal' ? 0 : draft.previousRedemption,
+    // Surat salinan bagi pajakan yang sudah berjalan: klausa dianggap diterima
+    // seperti pada surat fizikal, tetapi tiada jejak e-consent direkodkan.
+    tawarruq: { saleAgreed: true, pledgeAgreed: true, ujrahAgreed: true },
+    consent: null,
+    contractVersion: SAG_CONTRACT_VERSION,
+    ujrahFixedMonthly: 0,
     remarks: draft.remarks || 'Diimport daripada lejar SAG',
     recordType: 'sagDocument',
     lastAction: 'CREATE',
@@ -897,6 +1229,9 @@ export const buildSagDocumentFromLedger = ({
     updatedAt: now
   } as SagDocument);
 };
+
+/** Jenis pajakan yang tidak mewajibkan upah simpan (tebus / lelong). */
+export const SAG_UJRAH_EXEMPT_PLEDGE_TYPES = ['Tebus Cash', 'Tebus EDT', 'TS', 'TKS', 'Lelong'];
 
 export const validateSagDocument = (document: SagDocument): string[] => {
   const errors: string[] = [];
@@ -919,8 +1254,49 @@ export const validateSagDocument = (document: SagDocument): string[] => {
   if (!document.marhunItems.length && !(Number(document.marhunValue) > 0)) {
     errors.push('Masukkan sekurang-kurangnya satu item marhun atau nilai marhun.');
   }
+
+  // --- Semakan Shariah: upah simpan (akad ijarah) ---
+  const feeBasis = normalizeSagFeeBasis(document.feeBasis);
+  const ujrahExempt = SAG_UJRAH_EXEMPT_PLEDGE_TYPES.includes(String(document.pledgeType || ''));
+  const isIssued = document.status !== 'Draf';
+  if (feeBasis === 'jumlahPembiayaan') {
+    // Dilarang sama sekali: ujrah sebagai peratusan hutang ialah riba.
+    errors.push(SAG_UJRAH_DISALLOWED_MESSAGE);
+  } else if (!feeBasis && isIssued && !ujrahExempt) {
+    errors.push('Asas upah simpan wajib ditetapkan (nilai marhun / berat marhun / kadar tetap).');
+  }
+  if (feeBasis && feeBasis !== 'jumlahPembiayaan' && isIssued) {
+    const ujrah = calculateSagStorageFee({
+      feeRate: document.feeRate,
+      feeBasis,
+      termMonths: document.paymentTermMonths,
+      marhunValue: document.marhunValue,
+      marhunWeight: summarizeSagMarhunItems(document.marhunItems || []).weight,
+      fixedMonthly: document.ujrahFixedMonthly,
+      sellingPrice: document.sellingPrice
+    });
+    ujrah.violations.forEach(violation => errors.push(violation));
+  }
+
+  // --- Semakan akad: akad jualan & gadai mesti diterima secara eksplisit ---
   if (!document.tawarruq?.saleAgreed || !document.tawarruq?.pledgeAgreed) {
-    errors.push('Kedua-dua akad tawarruq perlu disahkan.');
+    errors.push('Akad jualan dan akad gadai perlu disahkan.');
+  }
+
+  // --- Semakan jejak penerimaan terma (Ijab & Qabul) ---
+  if (isIssued) {
+    if (!document.tawarruq?.ujrahAgreed) {
+      errors.push('Akad ijarah (upah simpan) perlu disahkan secara berasingan daripada akad jualan sebelum surat dikeluarkan.');
+    }
+    if (!document.consent?.acceptedAt) {
+      errors.push('Surat tidak boleh dikeluarkan tanpa rekod penerimaan Ijab & Qabul (timestamp + versi kontrak).');
+    } else if (!document.consent.contractVersion) {
+      errors.push('Versi kontrak yang diterima tidak direkodkan.');
+    } else if (document.consent.contractVersion !== document.contractVersion) {
+      errors.push(
+        `Pelanggan menerima versi kontrak ${document.consent.contractVersion}, bukan ${document.contractVersion}. Dapatkan semula persetujuan.`
+      );
+    }
   }
   return errors;
 };
@@ -953,7 +1329,9 @@ export const buildSagVerificationCode = (document: SagDocument): string => {
     document.member?.memberNo,
     document.member?.icNumber,
     toDateOnly(document.financingDate),
-    roundMoney(document.sellingPrice).toFixed(2)
+    roundMoney(document.sellingPrice).toFixed(2),
+    roundMoney(document.ujrahTotal).toFixed(2),
+    document.contractVersion
   ].join('|');
   let hash = 0;
   for (let index = 0; index < payload.length; index += 1) {
@@ -970,8 +1348,129 @@ export const buildSagQrPayload = (document: SagDocument): string =>
     `AH:${String(document.member?.memberNo || '-').toUpperCase()}`,
     `JM:${roundMoney(document.marhunValue).toFixed(2)}`,
     `HJ:${roundMoney(document.sellingPrice).toFixed(2)}`,
+    `US:${roundMoney(document.ujrahTotal).toFixed(2)}`,
+    `KV:${document.contractVersion || '-'}`,
     `SAH:${buildSagVerificationCode(document)}`
   ].join('|');
+
+/** Had pendedahan pembiayaan terkumpul bagi seorang pelanggan (RM). */
+export const SAG_SINGLE_CUSTOMER_EXPOSURE_LIMIT = 50000;
+/** Had pendedahan pembiayaan harian bagi seorang pelanggan (RM). */
+export const SAG_SINGLE_CUSTOMER_DAILY_LIMIT = 25000;
+
+export type SagCustomerExposure = {
+  customerKey: string;
+  customerLabel: string;
+  /** Pembiayaan aktif sedia ada (tidak termasuk surat ini). */
+  activeFinancing: number;
+  activeLetters: number;
+  /** Pembiayaan direkod pada tarikh yang sama (tidak termasuk surat ini). */
+  todayFinancing: number;
+  candidateFinancing: number;
+  cumulativeAfter: number;
+  todayAfter: number;
+  limits: { singleCustomer: number; daily: number };
+  remaining: number;
+  /** Pelanggaran had; kosong jika masih dalam had atau identiti tiada. */
+  violations: string[];
+};
+
+const resolveSagCustomerKey = (document: SagDocument | null | undefined): string => {
+  const member = document?.member;
+  if (!member) return '';
+  const byUser = String(member.userId || '').trim();
+  if (byUser) return `user:${byUser}`;
+  const byIc = String(member.icNumber || '').replace(/\D/g, '');
+  if (byIc) return `ic:${byIc}`;
+  const byMemberNo = String(member.memberNo || '').trim().toUpperCase();
+  return byMemberNo ? `member:${byMemberNo}` : '';
+};
+
+/**
+ * Kira pendedahan pembiayaan seorang pelanggan (jumlah terkumpul & harian)
+ * sebelum surat baharu dikeluarkan.
+ *
+ * Surat `Batal`/dipadam dan surat yang sudah tidak aktif tidak dikira dalam
+ * pendedahan aktif, tetapi surat harian masih dikira untuk mengelak pemecahan
+ * transaksi (structuring) dalam tempoh yang sama.
+ */
+export const evaluateSagCustomerExposure = ({
+  documents,
+  candidate,
+  singleCustomerLimit = SAG_SINGLE_CUSTOMER_EXPOSURE_LIMIT,
+  dailyLimit = SAG_SINGLE_CUSTOMER_DAILY_LIMIT
+}: {
+  documents: SagDocument[];
+  candidate: SagDocument;
+  singleCustomerLimit?: number;
+  dailyLimit?: number;
+}): SagCustomerExposure => {
+  const customerKey = resolveSagCustomerKey(candidate);
+  const candidateFinancing = roundMoney(candidate.purchasePrice);
+  const empty: SagCustomerExposure = {
+    customerKey,
+    customerLabel: String(candidate.member?.name || candidate.member?.memberNo || ''),
+    activeFinancing: 0,
+    activeLetters: 0,
+    todayFinancing: 0,
+    candidateFinancing,
+    cumulativeAfter: candidateFinancing,
+    todayAfter: candidateFinancing,
+    limits: { singleCustomer: singleCustomerLimit, daily: dailyLimit },
+    remaining: Math.max(0, singleCustomerLimit - candidateFinancing),
+    violations: []
+  };
+  if (!customerKey) return empty;
+
+  const sameDay = toDateOnly(candidate.financingDate);
+  let activeFinancing = 0;
+  let activeLetters = 0;
+  let todayFinancing = 0;
+
+  documents.forEach(document => {
+    if (!document || document.deletedAt) return;
+    if (String(document.id) === String(candidate.id)) return;
+    if (document.status === 'Batal') return;
+    if (resolveSagCustomerKey(document) !== customerKey) return;
+    const financing = roundMoney(document.purchasePrice);
+    if (String(document.pledgeStatus || '') === 'Aktif') {
+      activeFinancing += financing;
+      activeLetters += 1;
+    }
+    if (sameDay && toDateOnly(document.financingDate) === sameDay) {
+      todayFinancing += financing;
+    }
+  });
+
+  const cumulativeAfter = roundMoney(activeFinancing + candidateFinancing);
+  const todayAfter = roundMoney(todayFinancing + candidateFinancing);
+  const violations: string[] = [];
+
+  if (cumulativeAfter > singleCustomerLimit + 0.005) {
+    violations.push(
+      `Had pendedahan pelanggan dilampaui: RM${cumulativeAfter.toFixed(2)} berbanding had RM${singleCustomerLimit.toFixed(2)} (aktif RM${activeFinancing.toFixed(2)}).`
+    );
+  }
+  if (todayAfter > dailyLimit + 0.005) {
+    violations.push(
+      `Had pembiayaan harian dilampaui: RM${todayAfter.toFixed(2)} berbanding had RM${dailyLimit.toFixed(2)} pada ${sameDay || 'tarikh yang sama'}.`
+    );
+  }
+
+  return {
+    customerKey,
+    customerLabel: String(candidate.member?.name || candidate.member?.memberNo || ''),
+    activeFinancing: roundMoney(activeFinancing),
+    activeLetters,
+    todayFinancing: roundMoney(todayFinancing),
+    candidateFinancing,
+    cumulativeAfter,
+    todayAfter,
+    limits: { singleCustomer: singleCustomerLimit, daily: dailyLimit },
+    remaining: roundMoney(Math.max(0, singleCustomerLimit - cumulativeAfter)),
+    violations
+  };
+};
 
 export const summarizeSagDocuments = (documents: SagDocument[]) => {
   const visible = documents.filter(document => !document.deletedAt);
@@ -982,6 +1481,7 @@ export const summarizeSagDocuments = (documents: SagDocument[]) => {
     cancelled: visible.filter(document => document.status === 'Batal').length,
     marhunTotal: roundMoney(visible.reduce((total, document) => total + (Number(document.marhunValue) || 0), 0)),
     financingTotal: roundMoney(visible.reduce((total, document) => total + (Number(document.purchasePrice) || 0), 0)),
-    profitTotal: roundMoney(visible.reduce((total, document) => total + (Number(document.totalProfit) || 0), 0))
+    profitTotal: roundMoney(visible.reduce((total, document) => total + (Number(document.totalProfit) || 0), 0)),
+    ujrahTotal: roundMoney(visible.reduce((total, document) => total + (Number(document.ujrahTotal) || 0), 0))
   };
 };

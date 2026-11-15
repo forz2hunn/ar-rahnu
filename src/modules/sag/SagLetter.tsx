@@ -7,6 +7,7 @@ import {
   formatSagDate,
   formatSagMoney,
   formatSagNumber,
+  getSagFeeBasisLabel,
   roundMoney,
   summarizeSagMarhunItems,
   type SagDocument,
@@ -17,6 +18,25 @@ import './sagLetter.css';
 const MIN_MARHUN_ROWS = 5;
 
 const buildSignatureDate = (value: string) => (value ? formatSagDate(value) : '');
+
+/** Timestamp penuh untuk jejak penerimaan terma. */
+const buildConsentTimestamp = (value?: string) => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return new Intl.DateTimeFormat('ms-MY', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    timeZone: 'Asia/Kuala_Lumpur'
+  }).format(parsed) + ' MYT';
+};
+
+const describeUjrahRate = (document: SagDocument) => {
+  if (document.feeBasis === 'kadarTetap') return `${formatSagMoney(document.ujrahFixedMonthly)} sebulan`;
+  if (document.feeBasis === 'beratMarhun') return `RM ${formatSagNumber(document.feeRate)} / gram / bulan`;
+  if (document.feeBasis === 'nilaiMarhun') return `${formatSagNumber(document.feeRate)}% sebulan`;
+  return '-';
+};
 
 export function SagLetter({
   document: sagDocument,
@@ -121,14 +141,26 @@ export function SagLetter({
             <tr>
               <td className="is-label">No Kotak</td>
               <td className="is-value">{sagDocument.member.poBox || '-'}</td>
-              <td className="is-label">Jumlah Keuntungan</td>
+              <td className="is-label">Keuntungan Jualan (Ribh)</td>
               <td className="is-num is-value">{formatSagMoney(sagDocument.totalProfit)}</td>
             </tr>
             <tr>
               <td className="is-label" />
               <td />
-              <td className="is-label">Harga Jualan</td>
+              <td className="is-label">Harga Jualan (tanpa upah)</td>
               <td className="is-num is-value">{formatSagMoney(sagDocument.sellingPrice)}</td>
+            </tr>
+            <tr>
+              <td className="is-label">Versi Kontrak</td>
+              <td className="is-value">{sagDocument.contractVersion || '-'}</td>
+              <td className="is-label">Upah Simpan (Ijarah)</td>
+              <td className="is-num is-value">{formatSagMoney(sagDocument.ujrahTotal)}</td>
+            </tr>
+            <tr>
+              <td className="is-label" />
+              <td />
+              <td className="is-label">Jumlah Tebus (Jualan + Upah)</td>
+              <td className="is-num is-value">{formatSagMoney(sagDocument.redemptionTotal)}</td>
             </tr>
             <tr>
               <td className="is-label" />
@@ -181,7 +213,63 @@ export function SagLetter({
       </section>
 
       <section className="sag-letter__section">
-        <p className="sag-letter__section-title">Jumlah Keuntungan Berdasarkan Tempoh Pembiayaan</p>
+        <p className="sag-letter__section-title">Akad Ijarah — Upah Simpan (Berasingan Daripada Harga Jualan)</p>
+        <table className="sag-letter__table">
+          <tbody>
+            <tr>
+              <td className="is-label" style={{ width: '52mm' }}>Asas Kiraan</td>
+              <td className="is-value">{getSagFeeBasisLabel(sagDocument.feeBasis)}</td>
+              <td className="is-label" style={{ width: '42mm' }}>Kadar</td>
+              <td className="is-value">{describeUjrahRate(sagDocument)}</td>
+            </tr>
+            <tr>
+              <td className="is-label">Upah Simpan Sebulan</td>
+              <td className="is-num is-value">{formatSagMoney(sagDocument.ujrahMonthly)}</td>
+              <td className="is-label">Jumlah Upah ({sagDocument.paymentTermMonths} bulan)</td>
+              <td className="is-num is-value">{formatSagMoney(sagDocument.ujrahTotal)}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p className="sag-letter__agreement-text" style={{ marginTop: '2mm' }}>
+          Upah simpan ialah bayaran perkhidmatan penyimpanan Marhun dan dikira berasaskan nilai/berat Marhun atau caj
+          perkhidmatan tetap. Ia bukan sebahagian daripada Harga Jualan dan bukan peratusan ke atas jumlah pembiayaan.
+        </p>
+        {(sagDocument.ujrahSchedule || []).length > 0 && (
+          <table className="sag-letter__table" style={{ marginTop: '2mm' }}>
+            <thead>
+              <tr>
+                <th style={{ width: '52mm' }}>Tempoh</th>
+                {(sagDocument.ujrahSchedule || []).map(period => (
+                  <th key={period.index}>{period.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="is-label">Tarikh Bayaran</td>
+                {(sagDocument.ujrahSchedule || []).map(period => (
+                  <td key={period.index} className="is-center">{formatSagDate(period.dueDate)}</td>
+                ))}
+              </tr>
+              <tr>
+                <td className="is-label">Upah Simpan</td>
+                {(sagDocument.ujrahSchedule || []).map(period => (
+                  <td key={period.index} className="is-num">{formatSagMoney(period.profit)}</td>
+                ))}
+              </tr>
+              <tr>
+                <td className="is-label">Jumlah Terkumpul</td>
+                {(sagDocument.ujrahSchedule || []).map(period => (
+                  <td key={period.index} className="is-num is-total">{formatSagMoney(period.cumulativeProfit)}</td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="sag-letter__section">
+        <p className="sag-letter__section-title">Jadual Keuntungan Jualan (Ribh)</p>
         <table className="sag-letter__table">
           <thead>
             <tr>
@@ -327,6 +415,11 @@ export function SagLetter({
         <span>
           {sagDocument.transactionRefNo ? `Ruj. transaksi: ${sagDocument.transactionRefNo} · ` : ''}
           {sagDocument.institutionName || letterhead.organizationName}
+        </span>
+        <span>
+          Versi kontrak: {sagDocument.contractVersion || '-'} · Ijab &amp; Qabul:{' '}
+          {buildConsentTimestamp(sagDocument.consent?.acceptedAt) || 'Belum direkod'}
+          {sagDocument.consent?.termsHash ? ` (${sagDocument.consent.termsHash})` : ''}
         </span>
       </footer>
     </article>

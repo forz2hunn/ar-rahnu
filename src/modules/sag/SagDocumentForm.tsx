@@ -11,6 +11,7 @@ import {
   X
 } from 'lucide-react';
 import {
+  SAG_CONTRACT_VERSION,
   SAG_COPY_TYPES,
   SAG_FEE_BASIS_OPTIONS,
   SAG_KARAT_OPTIONS,
@@ -19,10 +20,13 @@ import {
   SAG_PRODUCT_DEFAULT,
   SAG_STATUS_OPTIONS,
   SAG_TAWARRUQ_CLAUSES,
+  SAG_UJRAH_DISALLOWED_MESSAGE,
   addMonthsToDateOnly,
+  buildSagContractConsent,
   calculateSagFinancing,
   calculateSagStorageFee,
   createSagMarhunItem,
+  evaluateSagCustomerExposure,
   formatSagDate,
   formatSagMoney,
   normalizeSagDocument,
@@ -33,6 +37,7 @@ import {
   summarizeSagMarhunItems,
   toDateOnly,
   validateSagDocument,
+  type SagAuditActor,
   type SagDocument,
   type SagDocumentStatus,
   type SagLetterhead,
@@ -51,6 +56,18 @@ const sectionClass = 'rounded-2xl border border-slate-200 bg-white p-4 sm:p-5';
 const formatInputNumber = (value: number | string | null | undefined) => {
   const numeric = Number(value);
   return Number.isFinite(numeric) ? numeric : '';
+};
+
+/** Timestamp penuh (bukan tarikh sahaja) untuk jejak Ijab & Qabul. */
+const formatConsentTimestamp = (value?: string | null) => {
+  if (!value) return '';
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return String(value);
+  return new Intl.DateTimeFormat('ms-MY', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+    timeZone: 'Asia/Kuala_Lumpur'
+  }).format(parsed) + ' MYT';
 };
 
 const assetStatusLabel = (asset: any) => {
@@ -93,6 +110,7 @@ export function SagDocumentForm({
   assets = [],
   resolveTransactionAssets,
   loadMemberProfile,
+  acceptanceActor = null,
   onClose,
   onSave
 }: {
@@ -108,6 +126,8 @@ export function SagDocumentForm({
   resolveTransactionAssets: (transaction: any) => any[];
   /** Ambil butiran profil ahli (telefon/alamat/waris) apabila daftar keahlian belum menyimpannya. */
   loadMemberProfile?: (userId: string) => Promise<Partial<SagMemberSnapshot> | null>;
+  /** Pelaku yang menerima pengesahan Ijab & Qabul (direkod bersama timestamp). */
+  acceptanceActor?: SagAuditActor | null;
   onClose: () => void;
   onSave: (document: SagDocument) => void;
 }) {
@@ -118,33 +138,52 @@ export function SagDocumentForm({
   const selectedMemberUserIdRef = useRef('');
 
   const derived = useMemo(() => normalizeSagDocument(form), [form]);
+  // Had pendedahan seorang pelanggan (terkumpul + harian).
+  const exposure = useMemo(
+    () => evaluateSagCustomerExposure({ documents: sagDocuments, candidate: derived }),
+    [sagDocuments, derived]
+  );
   const selectedMemberRecord = useMemo(
     () => members.find(entry => entry.userId === form.member.userId) || null,
     [members, form.member.userId]
   );
   const memberHasContact = Boolean(form.member.phone || form.member.address || form.member.heirName);
 
-  // Formula upah simpan diselaraskan dengan modul lejar SAG (kadar % sebulan × asas × tempoh).
+  // Upah simpan (akad ijarah) dikira daripada marhun/perkhidmatan — BUKAN jumlah pembiayaan.
+  const marhunWeight = useMemo(
+    () => summarizeSagMarhunItems(derived.marhunItems).weight,
+    [derived.marhunItems]
+  );
   const feeSummary = useMemo(
     () => calculateSagStorageFee({
-      feeRate: form.feeRate,
-      feeBasis: form.feeBasis,
-      termMonths: form.paymentTermMonths,
+      feeRate: derived.feeRate,
+      feeBasis: derived.feeBasis,
+      termMonths: derived.paymentTermMonths,
       marhunValue: derived.marhunValue,
-      purchasePrice: form.purchasePrice
+      marhunWeight,
+      fixedMonthly: derived.ujrahFixedMonthly,
+      sellingPrice: derived.sellingPrice
     }),
-    [form.feeRate, form.feeBasis, form.paymentTermMonths, form.purchasePrice, derived.marhunValue]
+    [derived.feeRate, derived.feeBasis, derived.paymentTermMonths, derived.marhunValue, derived.ujrahFixedMonthly, derived.sellingPrice, marhunWeight]
   );
   const financingFromMargin = useMemo(
     () => calculateSagFinancing(derived.marhunValue, form.margin),
     [derived.marhunValue, form.margin]
   );
+  // Hanya pembiayaan diisi. Upah simpan TIDAK dimasukkan ke dalam keuntungan/harga jualan.
   const applyCalculatedFinancing = () => {
-    update({
-      purchasePrice: financingFromMargin,
-      totalProfit: feeSummary.total
-    });
+    update({ purchasePrice: financingFromMargin });
   };
+  const feeBasisUnitLabel = derived.feeBasis === 'beratMarhun'
+    ? 'RM/g sebulan'
+    : derived.feeBasis === 'kadarTetap'
+      ? 'RM sebulan'
+      : '% sebulan';
+  const feeBasisHint = feeSummary.basis === 'beratMarhun'
+    ? `${formatInputNumber(feeSummary.basisAmount)} g × RM ${formatInputNumber(derived.feeRate)}/g`
+    : feeSummary.basis === 'kadarTetap'
+      ? 'Caj perkhidmatan tetap'
+      : `RM ${formatInputNumber(feeSummary.basisAmount)} × ${formatInputNumber(derived.feeRate)}%`;
   const marhunSummary = useMemo(() => summarizeSagMarhunItems(derived.marhunItems), [derived.marhunItems]);
   const usedDocumentNumbers = useMemo(
     () => existingNumbers.filter(number => number !== initialDocument.documentNo),
@@ -324,7 +363,9 @@ export function SagDocumentForm({
         ? 0
         : roundMoney(transaction.redemption ?? previous.previousRedemption),
       purchasePrice: roundMoney(transaction.loan ?? previous.purchasePrice),
-      totalProfit: roundMoney(transaction.fee ?? previous.totalProfit),
+      // `transaction.fee` ialah caj simpanan (ujrah), bukan keuntungan jualan.
+      // Ribh murabahah dikekalkan daripada surat dan tidak diambil daripada lejar.
+      totalProfit: previous.totalProfit,
       marhunValue: items.length
         ? summarizeSagMarhunItems(items).value
         : roundMoney(transaction.marhunValue ?? previous.marhunValue),
@@ -394,11 +435,31 @@ export function SagDocumentForm({
   };
 
   const handleSubmit = (statusOverride?: SagDocumentStatus) => {
+    const nextStatus = statusOverride || form.status;
+    const contractVersion = form.contractVersion || SAG_CONTRACT_VERSION;
+    // Jejak penerimaan terma hanya direkod apabila surat dikeluarkan — bukan Draf.
+    const consent = nextStatus === 'Draf'
+      ? form.consent
+      : buildSagContractConsent({
+          documentNo: form.documentNo,
+          tawarruq: form.tawarruq,
+          acceptedBy: acceptanceActor,
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          contractVersion,
+          previousConsent: form.consent
+        });
     const candidate = normalizeSagDocument({
       ...form,
-      status: statusOverride || form.status
+      status: nextStatus,
+      contractVersion,
+      consent
     });
     const nextErrors = validateSagDocument(candidate);
+    // Had pendedahan pelanggan hanya disemak untuk surat yang dikeluarkan.
+    if (nextStatus !== 'Draf') {
+      evaluateSagCustomerExposure({ documents: sagDocuments, candidate })
+        .violations.forEach(violation => nextErrors.push(violation));
+    }
     if (usedDocumentNumbers.some(number => String(number).toUpperCase() === candidate.documentNo)) {
       nextErrors.unshift(`No. SAG ${candidate.documentNo} telah digunakan oleh rekod lain.`);
     }
@@ -808,7 +869,7 @@ export function SagDocumentForm({
                 />
               </div>
               <div className="space-y-1.5">
-                <label className={labelClass} htmlFor="sag-total-profit">Jumlah Keuntungan (RM)</label>
+                <label className={labelClass} htmlFor="sag-total-profit">Keuntungan Jualan / Ribh (RM)</label>
                 <input
                   id="sag-total-profit"
                   type="number"
@@ -818,6 +879,7 @@ export function SagDocumentForm({
                   onChange={event => update({ totalProfit: Number(event.target.value) || 0 })}
                   className={`${fieldClass} font-mono font-bold`}
                 />
+                <p className="text-[11px] font-medium text-slate-500">Tidak termasuk upah simpan (akad ijarah).</p>
               </div>
               <div className="space-y-1.5">
                 <label className={labelClass} htmlFor="sag-margin">Margin Pembiayaan (%)</label>
@@ -834,19 +896,7 @@ export function SagDocumentForm({
                 <p className="text-[11px] font-medium text-slate-500">Pembiayaan = nilai marhun × margin.</p>
               </div>
               <div className="space-y-1.5">
-                <label className={labelClass} htmlFor="sag-fee-rate">Kadar Upah Simpan (% sebulan)</label>
-                <input
-                  id="sag-fee-rate"
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  value={formatInputNumber(form.feeRate)}
-                  onChange={event => update({ feeRate: Math.max(0, Number(event.target.value) || 0) })}
-                  className={`${fieldClass} font-mono`}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <label className={labelClass} htmlFor="sag-fee-basis">Asas Kiraan Upah Simpan</label>
+                <label className={labelClass} htmlFor="sag-fee-basis">Asas Upah Simpan (Akad Ijarah)</label>
                 <select
                   id="sag-fee-basis"
                   value={form.feeBasis}
@@ -857,8 +907,50 @@ export function SagDocumentForm({
                   {SAG_FEE_BASIS_OPTIONS.map(option => (
                     <option key={option.value} value={option.value}>{option.label}</option>
                   ))}
+                  {/* Rekod warisan yang masih menggunakan asas pembiayaan ditunjuk supaya boleh dibetulkan. */}
+                  {normalizeSagFeeBasis(form.feeBasis) === 'jumlahPembiayaan' && (
+                    <option value="jumlahPembiayaan">Jumlah Pembiayaan (tidak dibenarkan)</option>
+                  )}
                 </select>
+                <p className="text-[11px] font-medium text-slate-500">
+                  {SAG_FEE_BASIS_OPTIONS.find(option => option.value === normalizeSagFeeBasis(form.feeBasis))?.hint
+                    || 'Upah simpan mesti berasaskan marhun atau caj perkhidmatan fizikal.'}
+                </p>
               </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-fee-rate">
+                  {normalizeSagFeeBasis(form.feeBasis) === 'kadarTetap' ? 'Kadar Tetap (RM sebulan)' : `Kadar Upah Simpan (${feeBasisUnitLabel})`}
+                </label>
+                <input
+                  id="sag-fee-rate"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={formatInputNumber(form.feeRate)}
+                  onChange={event => update({ feeRate: Math.max(0, Number(event.target.value) || 0) })}
+                  className={`${fieldClass} font-mono`}
+                  disabled={normalizeSagFeeBasis(form.feeBasis) === 'kadarTetap'}
+                />
+                {normalizeSagFeeBasis(form.feeBasis) === 'jumlahPembiayaan' && (
+                  <p className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-[11px] font-semibold text-rose-700">
+                    {SAG_UJRAH_DISALLOWED_MESSAGE}
+                  </p>
+                )}
+              </div>
+              {normalizeSagFeeBasis(form.feeBasis) === 'kadarTetap' && (
+                <div className="space-y-1.5">
+                  <label className={labelClass} htmlFor="sag-ujrah-fixed">Caj Perkhidmatan Tetap (RM sebulan)</label>
+                  <input
+                    id="sag-ujrah-fixed"
+                    type="number"
+                    step="0.01"
+                    min={0}
+                    value={formatInputNumber(form.ujrahFixedMonthly)}
+                    onChange={event => update({ ujrahFixedMonthly: Math.max(0, Number(event.target.value) || 0) })}
+                    className={`${fieldClass} font-mono`}
+                  />
+                </div>
+              )}
               <div className="space-y-1.5">
                 <label className={labelClass} htmlFor="sag-previous-redemption">Jumlah Tebus Surat Asal (RM)</label>
                 <input
@@ -912,18 +1004,19 @@ export function SagDocumentForm({
                 <button
                   type="button"
                   onClick={applyCalculatedFinancing}
-                  title="Gunakan pembiayaan (nilai marhun × margin) dan jumlah upah simpan pada surat ini"
+                  title="Gunakan pembiayaan (nilai marhun × margin) sahaja; upah simpan kekal dalam akad ijarah berasingan"
                   className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-bold text-emerald-800 transition-colors hover:bg-emerald-50"
                 >
                   <RefreshCw size={13} /> Guna Kiraan Ini
                 </button>
               </div>
-              <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+              <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
                 {[
                   { label: 'Pembiayaan (margin)', value: formatSagMoney(financingFromMargin), hint: `${formatInputNumber(form.margin)}% × ${formatSagMoney(derived.marhunValue)}` },
-                  { label: 'Upah simpan sebulan', value: formatSagMoney(feeSummary.monthly), hint: `${formatInputNumber(form.feeRate)}% × ${formatSagMoney(feeSummary.basisAmount)}` },
-                  { label: 'Jumlah upah (tempoh)', value: formatSagMoney(feeSummary.total), hint: `${form.paymentTermMonths} bulan` },
-                  { label: 'Anggaran jumlah tebus', value: formatSagMoney(feeSummary.redemption), hint: 'Pembiayaan + upah' },
+                  { label: 'Upah simpan sebulan', value: formatSagMoney(feeSummary.monthly), hint: feeBasisHint },
+                  { label: 'Jumlah upah (tempoh)', value: formatSagMoney(feeSummary.total), hint: `${derived.paymentTermMonths} bulan` },
+                  { label: 'Harga Jualan (tanpa upah)', value: formatSagMoney(derived.sellingPrice), hint: 'Pembiayaan + ribh' },
+                  { label: 'Jumlah Tebus (jualan + upah)', value: formatSagMoney(feeSummary.redemption), hint: 'Dua akad berasingan' },
                   { label: 'Unjuran lebihan tunai', value: formatSagMoney(derived.projectedProfit), hint: 'Pembiayaan − tebus asal − fi' }
                 ].map(item => (
                   <div key={item.label} className="rounded-lg border border-emerald-100 bg-white px-2.5 py-2">
@@ -933,6 +1026,33 @@ export function SagDocumentForm({
                   </div>
                 ))}
               </div>
+              {feeSummary.violations.length > 0 && (
+                <ul className="mt-2 space-y-1 rounded-lg border border-rose-200 bg-rose-50 p-2 text-[11px] font-semibold text-rose-700">
+                  {feeSummary.violations.map(violation => <li key={violation}>• {violation}</li>)}
+                </ul>
+              )}
+              <p className="mt-2 text-[11px] font-medium text-emerald-900">
+                Akad ijarah (upah simpan) dikira berasingan daripada akad jualan tawarruq; upah tidak dimasukkan ke dalam Harga Jualan.
+              </p>
+            </div>
+
+            <div className={`mt-3 rounded-xl border p-3 text-xs ${exposure.violations.length ? 'border-rose-300 bg-rose-50 text-rose-800' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+              <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Had Pendedahan Pelanggan</p>
+              <p className="mt-1">
+                Aktif sedia ada: <span className="font-mono font-bold">{formatSagMoney(exposure.activeFinancing)}</span>
+                {' '}({exposure.activeLetters} surat) · Selepas surat ini:{' '}
+                <span className="font-mono font-bold">{formatSagMoney(exposure.cumulativeAfter)}</span>
+                {' '}/ {formatSagMoney(exposure.limits.singleCustomer)}
+              </p>
+              <p className="mt-0.5">
+                Pembiayaan pada tarikh ini: <span className="font-mono font-bold">{formatSagMoney(exposure.todayAfter)}</span>
+                {' '}/ {formatSagMoney(exposure.limits.daily)}
+              </p>
+              {exposure.violations.length > 0 && (
+                <ul className="mt-1 list-inside list-disc space-y-0.5 font-semibold">
+                  {exposure.violations.map(violation => <li key={violation}>{violation}</li>)}
+                </ul>
+              )}
             </div>
 
             <div className="mt-4 overflow-x-auto rounded-xl border border-slate-200">
@@ -1169,6 +1289,26 @@ export function SagDocumentForm({
                   </label>
                 );
               })}
+            </div>
+
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-[11px] font-medium text-slate-600">
+              <p className="font-bold uppercase tracking-wide text-slate-500">Jejak Ijab &amp; Qabul</p>
+              <p className="mt-1">
+                Versi kontrak: <span className="font-mono font-bold text-slate-800">{form.contractVersion || SAG_CONTRACT_VERSION}</span>
+              </p>
+              {form.consent?.acceptedAt ? (
+                <p>
+                  Diterima: <span className="font-mono font-bold text-emerald-800">{formatConsentTimestamp(form.consent.acceptedAt)}</span>
+                  {form.consent.acceptedBy?.name || form.consent.acceptedBy?.email
+                    ? ` · oleh ${form.consent.acceptedBy?.name || form.consent.acceptedBy?.email}`
+                    : ''}
+                  {' · '}kod rujukan <span className="font-mono font-bold">{form.consent.termsHash}</span>
+                </p>
+              ) : (
+                <p className="text-amber-700">
+                  Belum direkod. Timestamp dan versi kontrak akan dicatat secara automatik apabila surat dikeluarkan.
+                </p>
+              )}
             </div>
 
             <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">

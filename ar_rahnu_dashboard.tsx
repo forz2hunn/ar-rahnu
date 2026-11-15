@@ -78,12 +78,25 @@ import {
 } from 'recharts';
 import { buildGoldForecast, getMalaysiaDateKey, type GoldPriceSnapshot } from './src/lib/portfolio-analytics';
 import {
+  GOLD_LTV_HARD_CAP_PERCENT,
+  calculateMarhunValuation,
+  evaluateLtv,
+  resolveGoldFineness,
+  type GoldValuationMethod
+} from './src/lib/gold-valuation';
+import { roundMoney } from './src/lib/money';
+import { calculateAuctionSettlement } from './src/lib/auction-settlement';
+import {
+  SAG_CONTRACT_VERSION,
   SAG_DEFAULT_SETTINGS,
+  buildSagContractConsent,
   buildSagDocumentDraft,
   buildSagDocumentFromLedger,
   buildSagDocumentPatchFromLedger,
   buildSagLedgerFieldsFromDocument,
+  calculateSagStorageFee,
   createEmptySagDocument,
+  evaluateSagCustomerExposure,
   normalizeSagDocument,
   resolveSagPledgeStatus,
   type SagDocument,
@@ -507,6 +520,7 @@ const auditActionLabels: Record<string, string> = {
   HEIR_UPDATED: 'Maklumat waris dikemas kini',
   BANK_UPDATED: 'Akaun bank dikemas kini',
   PDPA_CONSENT: 'Persetujuan PDPA direkodkan',
+  SAG_CONSENT: 'Penerimaan terma SAG (Ijab & Qabul)',
   AVATAR_UPDATED: 'Gambar profil dikemas kini',
   AVATAR_REMOVED: 'Gambar profil dibuang',
   DATA_EXPORTED: 'Data dieksport',
@@ -613,6 +627,21 @@ const getCorrectionEvents = (transaction) =>
   Array.isArray(transaction?.correctionEvents) ? transaction.correctionEvents : [];
 const getLatestPartialRedemption = (transaction) =>
   getCorrectionEvents(transaction).slice().reverse().find(event => event.type === 'TKS');
+/**
+ * Peristiwa terakhir yang menetapkan baki (TKS = tebus sebahagian,
+ * Lanjutan = lanjutan tempoh yang menetapkan semula jumlah tebus).
+ */
+const getLatestBalanceEvent = (transaction) => {
+  const events = getCorrectionEvents(transaction);
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if ((event?.type === 'TKS' || event?.type === 'Lanjutan') &&
+        event.remainingRedemption !== undefined && event.remainingRedemption !== null) {
+      return { event, index };
+    }
+  }
+  return { event: null, index: -1 };
+};
 const getLatestPledgedAssetEvent = (transaction) =>
   getCorrectionEvents(transaction).slice().reverse().find(event =>
     (event.type === 'TKS' || Array.isArray(event.releasedAssetIds)) &&
@@ -626,28 +655,37 @@ const getCurrentPledgedWeight = (transaction) => {
     : Number(transaction?.weight) || 0;
 };
 const getCurrentPrincipal = (transaction) => {
-  const latestPartialRedemption = getLatestPartialRedemption(transaction);
-  return latestPartialRedemption?.remainingPrincipal !== undefined &&
-    latestPartialRedemption?.remainingPrincipal !== null
-    ? Number(latestPartialRedemption.remainingPrincipal) || 0
+  const { event } = getLatestBalanceEvent(transaction);
+  return event?.remainingPrincipal !== undefined && event?.remainingPrincipal !== null
+    ? Number(event.remainingPrincipal) || 0
     : Number(transaction?.loan) || 0;
 };
+/**
+ * Jumlah tebus semasa = baki selepas TKS/Lanjutan terakhir, ditolak bayaran
+ * upah simpan (US) yang direkod selepas peristiwa itu. Ia tidak pernah turun
+ * bawah baki prinsipal.
+ */
 const getCurrentRedemption = (transaction) => {
-  const latestPartialRedemption = getLatestPartialRedemption(transaction);
-  return latestPartialRedemption?.remainingRedemption !== undefined &&
-    latestPartialRedemption?.remainingRedemption !== null
-    ? Number(latestPartialRedemption.remainingRedemption) || 0
+  const { event, index } = getLatestBalanceEvent(transaction);
+  const base = event?.remainingRedemption !== undefined && event?.remainingRedemption !== null
+    ? Number(event.remainingRedemption) || 0
     : Number(transaction?.redemption) || 0;
+  const principal = getCurrentPrincipal(transaction);
+  const ujrahPaidAfterBalanceEvent = getCorrectionEvents(transaction)
+    .slice(index + 1)
+    .filter(entry => entry?.type === 'US')
+    .reduce((total, entry) => total + (Number(entry.feePaid) || 0), 0);
+  return Math.max(principal, roundMoney(base - ujrahPaidAfterBalanceEvent));
 };
 const getCurrentFeeArrears = (transaction) =>
-  Math.max(0, getCurrentRedemption(transaction) - getCurrentPrincipal(transaction));
+  roundMoney(Math.max(0, getCurrentRedemption(transaction) - getCurrentPrincipal(transaction)));
 const calculateOverlapCashBalance = (newFinancing, oldFinancing, overdueFees, relatedFees) =>
-  Number((
+  roundMoney(
     (Number(newFinancing) || 0) -
     (Number(oldFinancing) || 0) -
     (Number(overdueFees) || 0) -
     (Number(relatedFees) || 0)
-  ).toFixed(2));
+  );
 const getPurityFromAssets = (assets) => {
   if (!assets.length) return '';
   const purities = assets.map(asset => String(asset.purity || '').trim());
@@ -657,13 +695,18 @@ const getPurityFromAssets = (assets) => {
 };
 const normalizeFeeBasis = (feeBasis) => {
   if (feeBasis === 'nilaiMarhun' || feeBasis === 'Nilai Marhun') return 'nilaiMarhun';
+  if (feeBasis === 'beratMarhun' || feeBasis === 'Berat Marhun') return 'beratMarhun';
+  if (feeBasis === 'kadarTetap' || feeBasis === 'Kadar Tetap') return 'kadarTetap';
   if (feeBasis === 'jumlahPembiayaan' || feeBasis === 'Jumlah Pembiayaan') return 'jumlahPembiayaan';
   return '';
 };
 const getFeeBasisLabel = (feeBasis) => {
   const normalizedBasis = normalizeFeeBasis(feeBasis);
   if (normalizedBasis === 'nilaiMarhun') return 'Nilai Marhun';
-  if (normalizedBasis === 'jumlahPembiayaan') return 'Jumlah Pembiayaan';
+  if (normalizedBasis === 'beratMarhun') return 'Berat Marhun';
+  if (normalizedBasis === 'kadarTetap') return 'Kadar Tetap';
+  // Nilai warisan: dipaparkan dengan amaran kerana tidak mematuhi syarat Shariah.
+  if (normalizedBasis === 'jumlahPembiayaan') return 'Jumlah Pembiayaan (tidak dibenarkan)';
   return '';
 };
 const getCheckedInAssetIds = (transactions) => new Set(
@@ -773,7 +816,7 @@ const initialAssets = [
 // --- UTILS ---
 const formatRM = (val) => new Intl.NumberFormat('en-MY', { style: 'currency', currency: 'MYR' }).format(val);
 const calculateMarhunValue = (weight, marhunRate) =>
-  (parseFloat(weight) || 0) * (parseFloat(marhunRate) || 0);
+  roundMoney((parseFloat(weight) || 0) * (parseFloat(marhunRate) || 0));
 const getTransactionMarhunValue = (transaction) =>
   transaction?.marhunValue == null
     ? calculateMarhunValue(transaction?.weight, transaction?.marhunPrice)
@@ -3948,13 +3991,66 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     // Draf belum menjadi pajakan sebenar: lejar hanya ditulis apabila surat dikeluarkan
     // (atau sudah pun dipautkan kepada rekod lejar sedia ada).
     const shouldSyncLedger = document.status !== 'Draf' || Boolean(document.transactionId);
-    const ledger = shouldSyncLedger ? syncSagDocumentToLedger(document, savedAt) : null;
-    const normalized = normalizeSagDocument({
+    // Jejak Ijab & Qabul: timestamp penuh + versi kontrak + klausa yang diterima.
+    // Direkod oleh pelaku sebenar (bukan input klien) dan disimpan bersama surat.
+    const contractVersion = document.contractVersion || SAG_CONTRACT_VERSION;
+    const storedConsent = sagDocuments.find(entry => String(entry.id) === String(document.id))?.consent || null;
+    const consent = document.status === 'Draf'
+      ? document.consent || null
+      : buildSagContractConsent({
+          documentNo: document.documentNo,
+          tawarruq: document.tawarruq,
+          acceptedBy: recordActor,
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+          contractVersion,
+          previousConsent: document.consent || storedConsent,
+          acceptedAt: savedAt
+        });
+    const prepared = normalizeSagDocument({
       ...document,
-      transactionId: ledger ? ledger.transactionId : document.transactionId,
-      transactionRefNo: ledger ? ledger.transactionRefNo : document.transactionRefNo,
+      contractVersion,
+      consent,
       ...audit
     } as SagDocument);
+
+    // Had pendedahan pelanggan: disemak SEBELUM lejar ditulis supaya tiada
+    // rekod separa tercatat apabila had dilampaui.
+    if (prepared.status !== 'Draf') {
+      const exposure = evaluateSagCustomerExposure({ documents: sagDocuments, candidate: prepared });
+      if (exposure.violations.length) {
+        setToastMessage(`Surat tidak boleh dikeluarkan. ${exposure.violations.join(' ')}`);
+        setTimeout(() => setToastMessage(null), 9000);
+        return;
+      }
+    }
+
+    const ledger = shouldSyncLedger ? syncSagDocumentToLedger(prepared, savedAt) : null;
+    const normalized = normalizeSagDocument({
+      ...prepared,
+      transactionId: ledger ? ledger.transactionId : prepared.transactionId,
+      transactionRefNo: ledger ? ledger.transactionRefNo : prepared.transactionRefNo
+    } as SagDocument);
+
+    // Hanya catat peristiwa apabila penerimaan baharu direkodkan (bukan setiap simpanan).
+    if (normalized.consent && normalized.consent.acceptedAt !== (storedConsent?.acceptedAt || '')) {
+      void recordAuditActivity(
+        supabaseClient,
+        'SAG_CONSENT',
+        'Pengurusan Surat Akuan Gadaian',
+        'sagDocuments',
+        String(normalized.documentNo || normalized.id),
+        {
+          documentNo: normalized.documentNo,
+          contractVersion: normalized.consent.contractVersion,
+          acceptedAt: normalized.consent.acceptedAt,
+          acceptedBy: describeRecordActor(recordActor),
+          clauses: normalized.consent.clauses,
+          termsHash: normalized.consent.termsHash,
+          transactionRefNo: normalized.transactionRefNo,
+          status: normalized.status
+        }
+      );
+    }
 
     setSagDocuments(previous => isUpdate
       ? previous.map(entry => String(entry.id) === String(document.id)
@@ -4446,6 +4542,122 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setIsModalOpen(true);
   };
 
+  /** Selaraskan surat akuan yang dipautkan selepas tindakan lejar (TS/TKS/US/Lanjutan). */
+  const patchLinkedSagDocuments = (transaction, updatedAt) => {
+    setSagDocuments(previous => previous.map(entry => {
+      if (entry.deletedAt || String(entry.transactionId) !== String(transaction?.id)) return entry;
+      return normalizeSagDocument({
+        ...entry,
+        ...buildSagDocumentPatchFromLedger(entry, transaction),
+        ...auditUpdate('sagDocument', updatedAt)
+      } as SagDocument);
+    }));
+  };
+
+  /** Tarikh sahaja (YYYY-MM-DD) daripada nilai tarikh tersimpan. */
+  const toDayKey = (value) => String(value || '').slice(0, 10);
+
+  /**
+   * Lanjutan tempoh pajakan.
+   *
+   * Syarat: ujrah/keuntungan terkumpul WAJIB dijelaskan sepenuhnya sebelum
+   * tarikh matang boleh dilanjutkan, dan tarikh baharu mesti selepas tarikh semasa.
+   */
+  const handleSaveExtension = (actionTransaction, correction) => {
+    const nextMaturity = toDayKey(correction.newMaturityDate);
+    const currentMaturity = toDayKey(actionTransaction.redemptionDate);
+    if (!nextMaturity) {
+      setToastMessage('Masukkan tarikh matang baharu untuk lanjutan tempoh.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    if (!currentMaturity) {
+      setToastMessage('Surat ini tidak mempunyai tarikh matang asal. Kemaskini surat sebelum merekod lanjutan.');
+      setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    if (nextMaturity <= currentMaturity) {
+      setToastMessage(`Tarikh matang baharu (${nextMaturity}) mesti selepas tarikh matang semasa (${currentMaturity}).`);
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
+
+    const currentArrears = getCurrentFeeArrears(actionTransaction);
+    const arrearsPaid = Number(correction.feePaid) || 0;
+    if (currentArrears > 0.005 && arrearsPaid + 0.005 < currentArrears) {
+      setToastMessage(
+        `Lanjutan tidak dibenarkan: ujrah terkumpul RM${currentArrears.toFixed(2)} belum dijelaskan sepenuhnya ` +
+        `(bayaran direkod RM${arrearsPaid.toFixed(2)}).`
+      );
+      setTimeout(() => setToastMessage(null), 6000);
+      return;
+    }
+
+    const extensionMonths = Math.max(
+      1,
+      Math.ceil((new Date(nextMaturity).getTime() - new Date(currentMaturity).getTime()) / (30 * 86400000))
+    );
+    const principal = getCurrentPrincipal(actionTransaction);
+    const extensionFee = calculateSagStorageFee({
+      feeRate: actionTransaction.feeRate,
+      feeBasis: actionTransaction.feeBasis,
+      termMonths: extensionMonths,
+      marhunValue: actionTransaction.marhunValue,
+      marhunWeight: getCurrentPledgedWeight(actionTransaction),
+      fixedMonthly: actionTransaction.ujrahFixedMonthly ?? 0
+    });
+    if (!extensionFee.compliant) {
+      setToastMessage(`Lanjutan tidak boleh dikira: ${extensionFee.violations.join(' ')}`);
+      setTimeout(() => setToastMessage(null), 6500);
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const previousRedemption = getCurrentRedemption(actionTransaction);
+    const newRedemption = roundMoney(principal + extensionFee.total);
+    const correctionAudit = auditCreate('correction', updatedAt);
+    const transactionAudit = auditUpdate('transaction', updatedAt);
+    const extensionEvent = {
+      ...correction,
+      type: 'Lanjutan',
+      id: `${Date.now()}`,
+      recordedAt: updatedAt,
+      ...correctionAudit,
+      date: parseTransactionDateTime(correction.date).toISOString(),
+      previousRedemptionDate: currentMaturity,
+      newMaturityDate: nextMaturity,
+      extensionMonths,
+      extensionUjrah: extensionFee.total,
+      previousRedemption,
+      remainingPrincipal: principal,
+      remainingRedemption: newRedemption
+    };
+    const nextTransaction = {
+      ...actionTransaction,
+      redemptionDate: nextMaturity,
+      feeTermMonths: Math.max(1, Number(actionTransaction.feeTermMonths) || 0) + extensionMonths,
+      fee: roundMoney((Number(actionTransaction.fee) || 0) + extensionFee.total),
+      redemption: newRedemption,
+      ujrahPaidTotal: roundMoney((Number(actionTransaction.ujrahPaidTotal) || 0) + arrearsPaid),
+      ujrahPaidThrough: toDayKey(correction.paidThroughDate) || actionTransaction.ujrahPaidThrough,
+      correctionEvents: [...getCorrectionEvents(actionTransaction), extensionEvent],
+      status: 'Aktif',
+      ...transactionAudit
+    };
+
+    setTransactions(previous => previous.map(transaction =>
+      String(transaction.id) === String(actionTransaction.id) ? nextTransaction : transaction
+    ));
+    patchLinkedSagDocuments(nextTransaction, updatedAt);
+    setToastMessage(
+      `Lanjutan Surat #${actionTransaction.refNo} direkod. Matang ${currentMaturity} → ${nextMaturity} ` +
+      `(${extensionMonths} bulan). Ujrah tempoh lanjutan RM${extensionFee.total.toFixed(2)}.`
+    );
+    setIsCorrectionModalOpen(false);
+    setCorrectionTransaction(null);
+    setTimeout(() => setToastMessage(null), 6000);
+  };
+
   const handleOpenCorrection = (transaction, action = 'TS') => {
     setCorrectionTransaction(transaction);
     setInitialCorrectionAction(action);
@@ -4465,6 +4677,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     if (!actionTransaction || ['Selesai', 'Ditebus', 'Dilelong'].includes(actionTransaction.status)) {
       setToastMessage('Surat ini telah berubah atau selesai. Muat semula sebelum merekod tindakan.');
       setTimeout(() => setToastMessage(null), 4000);
+      return;
+    }
+    // Lanjutan tempoh tidak melibatkan pelepasan aset; ia ada semakan ujrah tersendiri.
+    if (correction.type === 'Lanjutan') {
+      handleSaveExtension(actionTransaction, correction);
       return;
     }
     const sourceAssetIds: string[] = Array.from(new Set<string>(
@@ -4543,15 +4760,130 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         correction.relatedFees
       );
     }
+    // --- Semakan kewangan kitaran hayat: TS / TKS / US ---
+    const currentPrincipal = getCurrentPrincipal(actionTransaction);
+    const currentRedemption = getCurrentRedemption(actionTransaction);
+    const usFeePaid = Number(correction.feePaid) || 0;
+    if (correction.type === 'TKS') {
+      const remainingPrincipal = Number(correction.remainingPrincipal);
+      const remainingRedemption = Number(correction.remainingRedemption);
+      if (!Number.isFinite(remainingPrincipal) || remainingPrincipal < 0) {
+        setToastMessage('Baki prinsipal mesti nombor 0 atau lebih besar.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
+      if (!Number.isFinite(remainingRedemption) || remainingRedemption < 0) {
+        setToastMessage('Baki jumlah tebus mesti nombor 0 atau lebih besar.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
+      if (remainingPrincipal >= currentPrincipal - 0.005) {
+        setToastMessage(
+          `TKS mesti mengurangkan pokok: baki prinsipal RM${remainingPrincipal.toFixed(2)} mesti kurang daripada RM${currentPrincipal.toFixed(2)}. Gunakan TS untuk tebus penuh.`
+        );
+        setTimeout(() => setToastMessage(null), 6000);
+        return;
+      }
+      if (remainingRedemption + 0.005 < remainingPrincipal) {
+        setToastMessage('Baki jumlah tebus tidak boleh kurang daripada baki prinsipal.');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+      if (remainingRedemption >= currentRedemption + 0.005) {
+        setToastMessage('Baki jumlah tebus mesti kurang daripada jumlah tebus semasa.');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+      if ((Number(correction.totalPaid) || 0) <= 0) {
+        setToastMessage('Masukkan jumlah bayaran sebenar yang diterima untuk TKS.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
+    }
+    if (correction.type === 'TS' && (Number(correction.totalPaid) || 0) + 0.01 < currentRedemption) {
+      setToastMessage(
+        `Tebus penuh memerlukan bayaran sekurang-kurangnya RM${currentRedemption.toFixed(2)}. Untuk bayaran separa, gunakan tindakan TKS.`
+      );
+      setTimeout(() => setToastMessage(null), 6000);
+      return;
+    }
+    if (correction.type === 'US') {
+      if (usFeePaid <= 0) {
+        setToastMessage('Masukkan jumlah upah simpan yang dibayar.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
+      const paidThrough = toDayKey(correction.paidThroughDate);
+      const latestUsEvent = getCorrectionEvents(actionTransaction).slice().reverse().find(event => event.type === 'US');
+      const lastPaidThrough = toDayKey(latestUsEvent?.paidThroughDate || actionTransaction.ujrahPaidThrough);
+      if (!paidThrough) {
+        setToastMessage('Nyatakan tarikh "Dibayar hingga" untuk bayaran upah simpan.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
+      if (paidThrough <= toDayKey(actionTransaction.date)) {
+        setToastMessage('Tarikh "Dibayar hingga" mesti selepas tarikh pembiayaan surat ini.');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+      if (lastPaidThrough && paidThrough <= lastPaidThrough) {
+        setToastMessage(
+          `Tarikh "Dibayar hingga" mesti selepas bayaran terakhir (${lastPaidThrough}); tiada bayaran berganda dibenarkan.`
+        );
+        setTimeout(() => setToastMessage(null), 6000);
+        return;
+      }
+    }
+
+    // --- Penyelesaian lelong: kos lelongan/guaman → ujrah tertunggak → baki pokok ---
+    let auctionSettlement = null;
+    if (correction.type === 'Lelong') {
+      const proceeds = Number(correction.auctionProceeds);
+      const costs = Number(correction.auctionCosts) || 0;
+      if (!Number.isFinite(proceeds) || proceeds <= 0) {
+        setToastMessage('Masukkan hasil lelong sebenar yang diterima (mesti melebihi RM 0.00).');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+      if (!Number.isFinite(costs) || costs < 0) {
+        setToastMessage('Kos lelongan / guaman tidak boleh negatif.');
+        setTimeout(() => setToastMessage(null), 5000);
+        return;
+      }
+      auctionSettlement = calculateAuctionSettlement({
+        proceeds,
+        auctionCosts: costs,
+        ujrahArrears: getCurrentFeeArrears(actionTransaction),
+        principal: getCurrentPrincipal(actionTransaction)
+      });
+      if (auctionSettlement.violations.length) {
+        setToastMessage(`Penyelesaian lelong tidak sah: ${auctionSettlement.violations.join(' ')}`);
+        setTimeout(() => setToastMessage(null), 6500);
+        return;
+      }
+    }
+
     const updatedAt = new Date().toISOString();
     const correctionAudit = auditCreate('correction', updatedAt);
     const transactionAudit = auditUpdate('transaction', updatedAt);
     const assetAudit = auditUpdate('asset', updatedAt);
-    const remainingAssetIds = sourceAssetIds.filter(assetId => !selectedAssetIds.includes(assetId));
     const releasedWeight = selectedAssets.reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
-    const remainingWeight = visibleAssets
-      .filter(asset => remainingAssetIds.includes(String(asset.id)))
+    const remainingAssets = sourceAssets.filter(asset => !selectedAssetIds.includes(String(asset.id)));
+    const remainingWeight = remainingAssets
       .reduce((total, asset) => total + (Number(asset.weight) || 0), 0);
+    // Nilai marhun baki dikira semula selepas aset dilepaskan supaya asas ujrah
+    // dan LTV untuk tempoh seterusnya mengikut emas yang masih digadaikan.
+    const remainingItems = remainingAssets.map(asset => ({
+      weight: Number(asset.weight) || 0,
+      purity: asset.purity,
+      deductionWeight: Number(asset.deductionWeight) || 0
+    }));
+    const remainingValuation = calculateMarhunValuation({
+      grossWeight: 0,
+      ratePerGram: actionTransaction.marhunPrice,
+      method: actionTransaction.valuationMethod === 'legacyPerGram' ? 'legacyPerGram' : 'purityAdjusted',
+      items: remainingItems
+    });
     const correctionEvent = {
       ...correction,
       selectedAssetIds: undefined,
@@ -4568,32 +4900,57 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       date: parseTransactionDateTime(correction.date).toISOString(),
       linkedRefNo: linkedTransaction?.refNo,
       newFinancing: linkedNewFinancing,
-      cashDifference
+      cashDifference,
+      ...(auctionSettlement ? {
+        auctionProceeds: auctionSettlement.proceeds,
+        auctionCosts: auctionSettlement.auctionCosts,
+        auctionSettlement
+      } : {})
     };
     const linkedTransactionId = isLinkedRollover
       ? correction.linkedTransactionId
       : null;
+    const nextStatus = correction.type === 'TS'
+      ? 'Ditebus'
+      : correction.type === 'Lelong'
+        ? 'Dilelong'
+        : isLinkedRollover
+          ? 'Selesai'
+          : actionTransaction.status || 'Aktif';
+    const actionNextTransaction = {
+      ...actionTransaction,
+      correctionEvents: [...getCorrectionEvents(actionTransaction), correctionEvent],
+      selectedAssetIds: getTransactionAssetIds(actionTransaction)
+        .filter(assetId => !selectedAssetIds.includes(String(assetId))),
+      selectedAssetId: undefined,
+      weight: remainingWeight,
+      ...(correction.type === 'TKS' ? {
+        grossWeight: roundMoney(remainingItems.reduce((total, item) => total + item.weight, 0)),
+        deductionWeight: roundMoney(remainingItems.reduce((total, item) => total + (item.deductionWeight || 0), 0)),
+        marhunValue: remainingValuation.marhunValue
+      } : {}),
+      ...(correction.type === 'US' ? {
+        // Jumlah tebus semasa dikira daripada peristiwa US, bukan ditulis semula,
+        // supaya rekod kontrak asal kekal dan tiada pengiraan berganda.
+        ujrahPaidTotal: roundMoney((Number(actionTransaction.ujrahPaidTotal) || 0) + usFeePaid),
+        ujrahPaidThrough: toDayKey(correction.paidThroughDate) || actionTransaction.ujrahPaidThrough
+      } : {}),
+      ...(auctionSettlement ? {
+        auctionProceeds: auctionSettlement.proceeds,
+        auctionCosts: auctionSettlement.auctionCosts,
+        auctionSettlement: { ...auctionSettlement, recordedAt: updatedAt },
+        // Lebihan lelong ialah LIABILITI kepada penggadai, bukan keuntungan syarikat.
+        pledgorSurplusLiability: auctionSettlement.surplus,
+        // Kekurangan lelong ialah AKAUN BELUM TERIMA (A/R) pelanggan.
+        customerReceivable: auctionSettlement.deficit,
+        profit: 0
+      } : {}),
+      status: nextStatus,
+      ...transactionAudit
+    };
 
     setTransactions(previous => previous.map(transaction => {
-      if (String(transaction.id) === String(actionTransaction.id)) {
-        const status = correction.type === 'TS'
-          ? 'Ditebus'
-          : correction.type === 'Lelong'
-            ? 'Dilelong'
-            : isLinkedRollover
-              ? 'Selesai'
-              : transaction.status || 'Aktif';
-        return {
-          ...transaction,
-          correctionEvents: [...getCorrectionEvents(transaction), correctionEvent],
-          selectedAssetIds: getTransactionAssetIds(transaction)
-            .filter(assetId => !selectedAssetIds.includes(String(assetId))),
-          selectedAssetId: undefined,
-          weight: remainingWeight,
-          status,
-          ...transactionAudit
-        };
-      }
+      if (String(transaction.id) === String(actionTransaction.id)) return actionNextTransaction;
       if (linkedTransactionId && String(transaction.id) === String(linkedTransactionId)) {
         return {
           ...transaction,
@@ -4605,12 +4962,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return transaction;
     }));
 
-    setAssets(previous => previous.map(asset =>
-      isRecordVisible(asset) && selectedAssetIds.includes(String(asset.id))
-        ? { ...asset, status: 'EDT', ...assetAudit }
-        : asset
-    ));
-
+    // Aset yang dilepaskan hanya kembali EDT jika tiada SAG aktif lain memautkannya.
+    // Lelong menandakan aset sebagai Dilelong (bukan kembali ke inventori tersedia).
     const otherActiveAssetIds = new Set<string>(visibleTransactions
       .filter(transaction =>
         String(transaction.id) !== String(actionTransaction.id) &&
@@ -4619,12 +4972,29 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       )
       .flatMap(getTransactionAssetIds)
       .map(assetId => String(assetId)));
+    setAssets(previous => previous.map(asset => {
+      if (!isRecordVisible(asset) || !selectedAssetIds.includes(String(asset.id))) return asset;
+      const stillPledged = otherActiveAssetIds.has(String(asset.id));
+      const nextAssetStatus = correction.type === 'Lelong'
+        ? 'Dilelong'
+        : stillPledged
+          ? 'Dalam Ar-Rahnu'
+          : 'EDT';
+      return asset.status === nextAssetStatus ? asset : { ...asset, status: nextAssetStatus, ...assetAudit };
+    }));
+    patchLinkedSagDocuments(actionNextTransaction, updatedAt);
+
     const returnedAssetCount = selectedAssetIds.filter(assetId => !otherActiveAssetIds.has(assetId)).length;
     const stillPledgedCount = selectedAssetIds.length - returnedAssetCount;
     setToastMessage(
       `Tindakan ${correction.type} untuk Surat #${actionTransaction.refNo} direkodkan. ` +
-      `${returnedAssetCount} aset dikembalikan ke EDT` +
-      (stillPledgedCount ? `; ${stillPledgedCount} aset kekal dipautkan kepada SAG aktif.` : '.')
+      (correction.type === 'Lelong'
+        ? `${selectedAssetIds.length} aset ditandakan Dilelong`
+        : `${returnedAssetCount} aset dikembalikan ke EDT`) +
+      (stillPledgedCount ? `; ${stillPledgedCount} aset kekal dipautkan kepada SAG aktif.` : '.') +
+      (auctionSettlement
+        ? ` Lebihan kepada penggadai RM${auctionSettlement.surplus.toFixed(2)}; A/R pelanggan RM${auctionSettlement.deficit.toFixed(2)}.`
+        : '')
     );
     setIsCorrectionModalOpen(false);
     setCorrectionTransaction(null);
@@ -4634,6 +5004,23 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const handleSaveTransaction = (updatedTx) => {
     const updatedAt = new Date().toISOString();
     const audit = auditUpdate('transaction', updatedAt);
+    // Melanjutkan tarikh matang secara terus tidak dibenarkan jika ujrah terkumpul
+    // masih belum dijelaskan; gunakan tindakan "Lanjutan" yang merekod bayaran.
+    if (editingTransaction) {
+      const previousMaturity = String(editingTransaction.redemptionDate || '').slice(0, 10);
+      const nextMaturity = String(updatedTx.redemptionDate || '').slice(0, 10);
+      if (previousMaturity && nextMaturity && nextMaturity > previousMaturity) {
+        const arrears = getCurrentFeeArrears(editingTransaction);
+        if (arrears > 0.005) {
+          setToastMessage(
+            `Tarikh matang tidak boleh dilanjutkan secara terus: ujrah terkumpul RM${arrears.toFixed(2)} belum dijelaskan. ` +
+            'Gunakan tindakan "Lanjutan" selepas bayaran direkod.'
+          );
+          setTimeout(() => setToastMessage(null), 7000);
+          return;
+        }
+      }
+    }
     const selectedAssetIds = !updatedTx.type.includes('Tebus') ? (updatedTx.selectedAssetIds || []) : [];
     const { selectedAssetId, ...transactionData } = updatedTx;
     const transactionStatus = getTransactionStatus({ ...transactionData, transactionStatus: undefined });
@@ -7504,6 +7891,12 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
             const totalActiveLoan = activePortfolioTransactions.reduce((sum, tx) => sum + getCurrentPrincipal(tx), 0);
             const totalActiveMarhun = activePortfolioTransactions.reduce((sum, tx) => sum + getTransactionMarhunValue(tx), 0);
             const urgentRedemptionTotal = redemptionNotifications.reduce((sum, tx) => sum + getCurrentRedemption(tx), 0);
+            // Penyelesaian lelong: kekurangan = A/R pelanggan, lebihan = liabiliti kepada penggadai.
+            const auctionSettledTransactions = transactions.filter(tx => isRecordVisible(tx) && tx.auctionSettlement);
+            const auctionReceivableTotal = roundMoney(auctionSettledTransactions
+              .reduce((sum, tx) => sum + (Number(tx.customerReceivable) || 0), 0));
+            const auctionLiabilityTotal = roundMoney(auctionSettledTransactions
+              .reduce((sum, tx) => sum + (Number(tx.pledgorSurplusLiability) || 0), 0));
 
             const filteredSagList = sortedTransactions.filter(tx => {
               if (sagSearchQuery.trim()) {
@@ -7689,6 +8082,26 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                     </div>
                   </div>
                 </div>
+
+                {/* Penyelesaian Lelong: A/R pelanggan vs liabiliti kepada penggadai */}
+                {(auctionReceivableTotal > 0 || auctionLiabilityTotal > 0) && (
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className={`rounded-2xl border p-4 ${auctionReceivableTotal > 0 ? 'border-rose-300 bg-rose-50' : 'border-slate-200 bg-white'}`}>
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">A/R Pelanggan · Kekurangan Lelong</p>
+                      <p className={`mt-1 font-mono text-2xl font-black ${auctionReceivableTotal > 0 ? 'text-rose-700' : 'text-slate-400'}`}>
+                        {formatRM(auctionReceivableTotal)}
+                      </p>
+                      <p className="mt-1 text-xs font-medium text-slate-600">
+                        {auctionSettledTransactions.filter(tx => (Number(tx.customerReceivable) || 0) > 0).length} kes lelong dengan baki hutang pelanggan.
+                      </p>
+                    </div>
+                    <div className="rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50 p-4">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">Liabiliti Kepada Penggadai · Lebihan Lelong</p>
+                      <p className="mt-1 font-mono text-2xl font-black text-corporate-teal-800">{formatRM(auctionLiabilityTotal)}</p>
+                      <p className="mt-1 text-xs font-medium text-slate-600">Lebihan hasil lelong ialah hutang syarikat kepada penggadai, BUKAN keuntungan.</p>
+                    </div>
+                  </div>
+                )}
 
                 {/* Smart Search, Filter & Layout Control Hub */}
                 <div className="rounded-3xl border border-slate-200/80 bg-white p-4 sm:p-5 shadow-sm space-y-3">
@@ -10388,6 +10801,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           assets={visibleAssets}
           resolveTransactionAssets={resolveTransactionAssets}
           loadMemberProfile={loadSagMemberProfile}
+          acceptanceActor={recordActor}
           onClose={() => setSagFormDocument(null)}
           onSave={handleSaveSagDocument}
         />
@@ -12234,11 +12648,13 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
     remainingPrincipal: '',
     remainingRedemption: '',
     paidThroughDate: '',
+    newMaturityDate: '',
     linkedTransactionId: '',
     relatedFees: '',
     sameGoldConfirmed: false,
     institutionConfirmed: false,
     auctionProceeds: '',
+    auctionCosts: '',
     remarks: ''
   });
   const linkedAssetIds = [...new Set(getTransactionAssetIds(transaction).map(String))];
@@ -12289,11 +12705,11 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    if (!selectedAssetIds.length) {
+    if (actionType !== 'Lanjutan' && !selectedAssetIds.length) {
       setSelectionError('Pilih sekurang-kurangnya satu aset EDR untuk tindakan ini.');
       return;
     }
-    if (requiresAllAssets && selectedAssetIds.length !== linkedAssetIds.length) {
+    if (actionType !== 'Lanjutan' && requiresAllAssets && selectedAssetIds.length !== linkedAssetIds.length) {
       setSelectionError('Jenis tindakan ini menamatkan surat lama; pilih semua aset EDR yang dipautkan.');
       return;
     }
@@ -12301,9 +12717,48 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
       setSelectionError('TKS perlu meninggalkan sekurang-kurangnya satu aset. Gunakan TS untuk tebus penuh.');
       return;
     }
-    if (missingAssetCount > 0) {
+    if (actionType !== 'Lanjutan' && missingAssetCount > 0) {
       setSelectionError('Semua aset yang dipautkan perlu ditemui sebelum tindakan boleh disimpan.');
       return;
+    }
+    if (actionType === 'Lanjutan') {
+      if (!String(formData.newMaturityDate || '').trim()) {
+        setSelectionError('Masukkan tarikh matang baharu untuk lanjutan tempoh.');
+        return;
+      }
+      const currentMaturity = String(transaction.redemptionDate || '').slice(0, 10);
+      if (currentMaturity && String(formData.newMaturityDate) <= currentMaturity) {
+        setSelectionError(`Tarikh matang baharu mesti selepas ${currentMaturity}.`);
+        return;
+      }
+    }
+    if (actionType === 'TKS') {
+      const currentPrincipal = getCurrentPrincipal(transaction);
+      const currentRedemption = getCurrentRedemption(transaction);
+      const remainingPrincipal = Number(formData.remainingPrincipal);
+      const remainingRedemption = Number(formData.remainingRedemption);
+      if (!Number.isFinite(remainingPrincipal) || remainingPrincipal >= currentPrincipal - 0.005) {
+        setSelectionError(`Baki prinsipal mesti kurang daripada RM${currentPrincipal.toFixed(2)}.`);
+        return;
+      }
+      if (!Number.isFinite(remainingRedemption) || remainingRedemption + 0.005 < remainingPrincipal) {
+        setSelectionError('Baki jumlah tebus tidak boleh kurang daripada baki prinsipal.');
+        return;
+      }
+      if (remainingRedemption >= currentRedemption + 0.005) {
+        setSelectionError(`Baki jumlah tebus mesti kurang daripada RM${currentRedemption.toFixed(2)}.`);
+        return;
+      }
+    }
+    if (actionType === 'Lelong') {
+      if (!((Number(formData.auctionProceeds) || 0) > 0)) {
+        setSelectionError('Masukkan hasil lelong sebenar yang diterima.');
+        return;
+      }
+      if ((Number(formData.auctionCosts) || 0) < 0) {
+        setSelectionError('Kos lelongan / guaman tidak boleh negatif.');
+        return;
+      }
     }
     onSave({
       ...formData,
@@ -12377,6 +12832,15 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                       {event.paidThroughDate && <span>Dibayar hingga: {event.paidThroughDate}</span>}
                       {event.linkedRefNo && <span>SAG baharu: #{event.linkedRefNo}</span>}
                       {event.auctionProceeds !== undefined && event.auctionProceeds !== '' && <span>Hasil lelong: {formatEventAmount(event.auctionProceeds)}</span>}
+                      {event.auctionSettlement && (
+                        <>
+                          <span>Kos lelong dibayar: {formatEventAmount(event.auctionSettlement.auctionCostsPaid)}</span>
+                          <span>Ujrah dibayar: {formatEventAmount(event.auctionSettlement.ujrahPaid)}</span>
+                          <span>Pokok dibayar: {formatEventAmount(event.auctionSettlement.principalPaid)}</span>
+                          <span>Lebihan penggadai: {formatEventAmount(event.auctionSettlement.surplus)}</span>
+                          <span>Kekurangan (A/R): {formatEventAmount(event.auctionSettlement.deficit)}</span>
+                        </>
+                      )}
                       {event.institutionConfirmed && <span>Pengesahan institusi direkodkan</span>}
                       {event.sameGoldConfirmed && <span>Emas sama disahkan</span>}
                     </div>
@@ -12400,6 +12864,7 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                     <option value="TS">TS · Tebus penuh</option>
                     <option value="TKS">TKS · Tebus sebahagian</option>
                     <option value="US">US · Bayar upah simpan</option>
+                    <option value="Lanjutan">Lanjutan · Lanjutkan tarikh matang</option>
                     <option value="OL">OL · Overlap (pautkan SAG baharu)</option>
                     <option value="Pusing">Pusing · Pautkan SAG baharu</option>
                     <option value="Lelong">Lelong · Selepas pengesahan institusi</option>
@@ -12411,6 +12876,7 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                 </label>
               </div>
 
+              {actionType !== 'Lanjutan' && (
               <section className="space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
                 <div>
                   <h3 className="text-sm font-bold text-slate-800">Aset EDR · Surat #{transaction.refNo}</h3>
@@ -12459,6 +12925,29 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                 </p>
                 {selectionError && <p role="alert" className="text-xs font-semibold text-rose-700">{selectionError}</p>}
               </section>
+              )}
+
+              {actionType === 'Lanjutan' && (
+                <div className="space-y-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+                  <p className="text-xs leading-relaxed text-amber-900">
+                    Lanjutan hanya dibenarkan selepas <strong>ujrah/keuntungan terkumpul dijelaskan sepenuhnya</strong>.
+                    Ujrah terkumpul semasa: <strong>{formatRM(getCurrentFeeArrears(transaction))}</strong> ·
+                    Tarikh matang semasa: <strong>{String(transaction.redemptionDate || '-').slice(0, 10) || '-'}</strong>.
+                  </p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">Tarikh matang baharu</span>
+                      <input type="date" name="newMaturityDate" value={formData.newMaturityDate} onChange={handleChange} required className="w-full rounded-lg border border-slate-300 p-2.5" />
+                    </label>
+                    {renderNumberField('feePaid', 'Ujrah terkumpul dibayar (RM)')}
+                    <label className="space-y-1">
+                      <span className="block text-sm font-semibold text-slate-700">Dibayar hingga</span>
+                      <input type="date" name="paidThroughDate" value={formData.paidThroughDate} onChange={handleChange} className="w-full rounded-lg border border-slate-300 p-2.5" />
+                    </label>
+                  </div>
+                  {selectionError && <p role="alert" className="text-xs font-semibold text-rose-700">{selectionError}</p>}
+                </div>
+              )}
 
               {actionType === 'TS' && (
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -12533,15 +13022,47 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
                 </div>
               )}
 
-              {actionType === 'Lelong' && (
-                <div className="space-y-4">
-                  <label className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
-                    <input type="checkbox" name="institutionConfirmed" checked={formData.institutionConfirmed} onChange={handleChange} required className="mt-1" />
-                    <span>Saya mengesahkan lelong telah disahkan oleh institusi. Status hanya akan dikemas kini selepas pengesahan ini.</span>
-                  </label>
-                  {renderNumberField('auctionProceeds', 'Hasil lelong direkod (RM)', false)}
-                </div>
-              )}
+              {actionType === 'Lelong' && (() => {
+                const settlement = calculateAuctionSettlement({
+                  proceeds: Number(formData.auctionProceeds) || 0,
+                  auctionCosts: Number(formData.auctionCosts) || 0,
+                  ujrahArrears: getCurrentFeeArrears(transaction),
+                  principal: getCurrentPrincipal(transaction)
+                });
+                return (
+                  <div className="space-y-4">
+                    <label className="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-800">
+                      <input type="checkbox" name="institutionConfirmed" checked={formData.institutionConfirmed} onChange={handleChange} required className="mt-1" />
+                      <span>Saya mengesahkan lelong telah disahkan oleh institusi. Status hanya akan dikemas kini selepas pengesahan ini.</span>
+                    </label>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      {renderNumberField('auctionProceeds', 'Hasil lelong sebenar diterima (RM)')}
+                      {renderNumberField('auctionCosts', 'Kos lelongan / guaman (RM)', false)}
+                    </div>
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700">
+                      <p className="text-[11px] font-bold uppercase tracking-wide text-slate-500">Turutan penyelesaian hasil lelong</p>
+                      <ol className="mt-1 list-decimal space-y-0.5 pl-4">
+                        {settlement.breakdown.map(item => (
+                          <li key={item.code}>
+                            {item.label}: <span className="font-mono font-bold">{formatRM(item.due)}</span>
+                            {' → dibayar '}<span className="font-mono font-bold text-emerald-800">{formatRM(item.paid)}</span>
+                            {item.unpaid > 0 && <span className="font-semibold text-rose-700"> (kurang {formatRM(item.unpaid)})</span>}
+                          </li>
+                        ))}
+                      </ol>
+                      <p className="mt-2">
+                        Lebihan kepada penggadai (liabiliti):{' '}
+                        <span className="font-mono font-bold text-corporate-teal-800">{formatRM(settlement.surplus)}</span>
+                        {' · '}Kekurangan (A/R pelanggan):{' '}
+                        <span className="font-mono font-bold text-rose-700">{formatRM(settlement.deficit)}</span>
+                      </p>
+                      <p className="mt-1 text-[11px] font-semibold text-amber-800">
+                        Lebihan BUKAN keuntungan syarikat; ia direkod sebagai hutang kepada penggadai.
+                      </p>
+                    </div>
+                  </div>
+                );
+              })()}
 
               <label className="block space-y-1">
                 <span className="text-sm font-semibold text-slate-700">Catatan</span>
@@ -12561,7 +13082,6 @@ function CorrectionActionModal({ transaction, transactions, assets = [], initial
 }
 
 function TransactionModal({ institutions, availableAssets, pledgedAssets, sourceTransactions, initialData, supabaseClient, storageOwnerId, onClose, onSave, onOpenCorrection, currentGoldPrice, isRefreshing, onRefresh }) {
-  const roundMoney = (value) => Number((Number(value) || 0).toFixed(2));
   const calculateLoan = (marhunValue, margin) =>
     (parseFloat(marhunValue) || 0) * ((parseFloat(margin) || 0) / 100);
   const calculateProjectedProfit = (type, loan, redemption, fee) =>
@@ -12575,6 +13095,12 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
     .map(assetId => transactionAssets.find(asset => String(asset.id) === String(assetId)))
     .filter(Boolean);
   const initialWeight = initialData?.weight ?? 0;
+  const initialGrossWeight = Number(initialData?.grossWeight ?? initialWeight) || 0;
+  const initialDeductionWeight = Math.max(0, Number(initialData?.deductionWeight) || 0);
+  // Rekod lama tiada `valuationMethod`: kekalkan formula warisan supaya angka sejarah tidak berubah.
+  const initialValuationMethod: GoldValuationMethod = initialData
+    ? (initialData.valuationMethod === 'purityAdjusted' ? 'purityAdjusted' : 'legacyPerGram')
+    : 'purityAdjusted';
   const initialPurity = initialData?.purity || getPurityFromAssets(initialLinkedAssets);
   const initialMarhunPrice = initialData?.marhunPrice ?? institutions?.[0]?.marhunRate ?? 0;
   const initialMargin = initialData?.margin ?? institutions?.[0]?.maxMargin ?? 0;
@@ -12596,6 +13122,9 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
     redemptionDate: initialData?.redemptionDate || '',
     institution: initialData?.institution || institutions?.[0]?.name || '',
     refNo: initialData?.refNo || '',
+    grossWeight: initialGrossWeight,
+    deductionWeight: initialDeductionWeight,
+    valuationMethod: initialValuationMethod,
     weight: initialWeight,
     purity: initialPurity,
     marhunPrice: initialMarhunPrice,
@@ -12618,6 +13147,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   );
   const [newAttachmentFiles, setNewAttachmentFiles] = useState<File[]>([]);
   const [attachmentError, setAttachmentError] = useState('');
+  const [validationError, setValidationError] = useState<string[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [actionSourceId, setActionSourceId] = useState('');
   const [isDateEdited, setIsDateEdited] = useState(false);
@@ -12704,10 +13234,33 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   const handleRemoveSavedAttachment = (attachment) => {
     setSavedAttachments(previous => previous.filter(item => item !== attachment));
   };
-  const recalculateFinancialFields = (data, recalculateMarhunValue = false) => {
-    const marhunValue = recalculateMarhunValue
-      ? calculateMarhunValue(data.weight, data.marhunPrice)
-      : parseFloat(data.marhunValue) || 0;
+  // Aset yang dipilih menentukan berat & ketulenan sebenar bagi penilaian marhun.
+  const valuationItems = selectedAssetIds
+    .map(assetId => transactionAssets.find(asset => String(asset.id) === String(assetId)))
+    .filter(Boolean)
+    .map(asset => ({
+      weight: parseFloat(asset.weight) || 0,
+      purity: asset.purity,
+      deductionWeight: parseFloat(asset.deductionWeight) || 0
+    }));
+
+  const computeValuation = (data, items = valuationItems) =>
+    calculateMarhunValuation({
+      grossWeight: data.grossWeight,
+      deductionWeight: data.deductionWeight,
+      purity: data.purity,
+      ratePerGram: data.marhunPrice,
+      method: data.valuationMethod === 'legacyPerGram' ? 'legacyPerGram' : 'purityAdjusted',
+      items
+    });
+
+  const recalculateFinancialFields = (data, options: { recalculateMarhun?: boolean; items?: any[] } = {}) => {
+    const items = options.items ?? valuationItems;
+    const valuation = computeValuation(data, items);
+    const deriveMarhunValue = items.length > 0
+      || data.valuationMethod !== 'legacyPerGram'
+      || options.recalculateMarhun === true;
+    const marhunValue = deriveMarhunValue ? valuation.marhunValue : (parseFloat(data.marhunValue) || 0);
     const loan = calculateLoan(marhunValue, data.margin);
     return {
       ...data,
@@ -12716,16 +13269,40 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
       profit: roundMoney(calculateProjectedProfit(data.type, loan, data.redemption, data.fee))
     };
   };
-  const calculatedMarhunValue = parseFloat(String(formData.marhunValue)) || 0;
+  const currentValuation = computeValuation(formData);
+  // Rekod warisan (tanpa `valuationMethod`) mengekalkan nilai tersimpan melainkan
+  // berat/kadar diubah semula.
+  const calculatedMarhunValue = (formData.valuationMethod !== 'legacyPerGram' || valuationItems.length > 0)
+    ? currentValuation.marhunValue
+    : (parseFloat(String(formData.marhunValue)) || 0);
   const loanForSave = parseFloat(String(formData.loan)) || 0;
   const profitForSave = parseFloat(String(formData.profit)) || 0;
+  const institutionPolicy = institutions.find(item => item.name === formData.institution);
+  const institutionMarginCap = Math.min(
+    Number(institutionPolicy?.maxMargin) || GOLD_LTV_HARD_CAP_PERCENT,
+    GOLD_LTV_HARD_CAP_PERCENT
+  );
+  const ltvEvaluation = evaluateLtv({
+    marhunValue: calculatedMarhunValue,
+    loan: loanForSave,
+    margin: parseFloat(formData.margin) || 0,
+    institutionCapPercent: institutionPolicy?.maxMargin
+  });
+  const valuationIsRequired = !formData.type.includes('Tebus');
+  // Upah simpan (ujrah) hanya boleh berasaskan marhun/perkhidmatan. Asas "jumlah pembiayaan"
+  // dilarang kerana menjadikan ujrah sebagai peratusan hutang (riba).
+  const feeBasisIsCompliant = formData.feeBasis !== 'jumlahPembiayaan';
   const feeBasisAmount = formData.feeBasis === 'nilaiMarhun'
     ? calculatedMarhunValue
-    : formData.feeBasis === 'jumlahPembiayaan'
-      ? loanForSave
+    : formData.feeBasis === 'beratMarhun'
+      ? (parseFloat(String(formData.weight)) || 0)
       : 0;
   const estimatedMonthlyStorageFee = roundMoney(
-    feeBasisAmount * ((parseFloat(formData.feeRate) || 0) / 100)
+    formData.feeBasis === 'beratMarhun'
+      // RM per gram sebulan × berat marhun.
+      ? feeBasisAmount * (parseFloat(formData.feeRate) || 0)
+      // Peratus sebulan × nilai marhun.
+      : feeBasisAmount * ((parseFloat(formData.feeRate) || 0) / 100)
   );
   const feeTermMonths = parseFloat(formData.feeTermMonths) || 0;
   const estimatedTotalStorageFee = roundMoney(estimatedMonthlyStorageFee * feeTermMonths);
@@ -12754,7 +13331,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
     setFormData(prev => {
       const updated = { ...prev, [name]: value };
       if (name === 'type') {
-        return recalculateFinancialFields(updated, true);
+        return recalculateFinancialFields(updated, { recalculateMarhun: true, items: [] });
       }
 
       // Auto-fill rates if institution changes
@@ -12764,11 +13341,19 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
           updated.marhunPrice = inst.marhunRate;
           updated.margin = inst.maxMargin;
         }
-        return recalculateFinancialFields(updated, true);
+        return recalculateFinancialFields(updated, { recalculateMarhun: true });
       }
 
-      if (name === 'weight' || name === 'marhunPrice') {
-        return recalculateFinancialFields(updated, true);
+      // Berat bersih = berat kasar − potongan (batu / patri / bukan emas).
+      if (name === 'grossWeight' || name === 'deductionWeight') {
+        const gross = Math.max(0, Number(updated.grossWeight) || 0);
+        const deduction = Math.max(0, Number(updated.deductionWeight) || 0);
+        updated.weight = roundMoney(Math.max(0, gross - deduction));
+        return recalculateFinancialFields(updated, { recalculateMarhun: true });
+      }
+
+      if (name === 'weight' || name === 'marhunPrice' || name === 'purity') {
+        return recalculateFinancialFields(updated, { recalculateMarhun: true });
       }
       if (name === 'marhunValue' || name === 'margin') {
         return recalculateFinancialFields(updated);
@@ -12790,11 +13375,22 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
     setSelectedAssetIds(updatedIds);
     const updatedAssets = assetCandidates
       .filter(asset => updatedIds.map(String).includes(String(asset.id)));
-    const selectedWeight = updatedAssets
-      .reduce((total, asset) => total + (parseFloat(asset.weight) || 0), 0);
+    const items = updatedAssets.map(asset => ({
+      weight: parseFloat(asset.weight) || 0,
+      purity: asset.purity,
+      deductionWeight: parseFloat(asset.deductionWeight) || 0
+    }));
+    const selectedGrossWeight = items.reduce((total, item) => total + item.weight, 0);
+    const selectedDeductionWeight = items.reduce((total, item) => total + (item.deductionWeight || 0), 0);
     setFormData(prev => recalculateFinancialFields(
-      { ...prev, weight: selectedWeight, purity: getPurityFromAssets(updatedAssets) },
-      true
+      {
+        ...prev,
+        grossWeight: roundMoney(selectedGrossWeight),
+        deductionWeight: roundMoney(selectedDeductionWeight),
+        weight: roundMoney(Math.max(0, selectedGrossWeight - selectedDeductionWeight)),
+        purity: getPurityFromAssets(updatedAssets)
+      },
+      { recalculateMarhun: true, items }
     ));
   };
 
@@ -12805,6 +13401,15 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
       onOpenCorrection(selectedSourceTransaction, correctionActionType);
       return;
     }
+    // Halang pengesahan jika penilaian marhun atau LTV melanggar had.
+    if (valuationIsRequired) {
+      const issues = [...currentValuation.violations, ...ltvEvaluation.violations];
+      if (issues.length) {
+        setValidationError(Array.from(new Set(issues)));
+        return;
+      }
+    }
+    setValidationError([]);
     setIsSaving(true);
     setAttachmentError('');
     const transactionId = initialData?.id ?? Date.now();
@@ -12845,10 +13450,14 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
           ? initialData.date
           : parseTransactionDateTime(formData.date).toISOString(),
         selectedAssetIds,
+        grossWeight: Number(formData.grossWeight) || 0,
+        deductionWeight: Number(formData.deductionWeight) || 0,
+        valuationMethod: formData.valuationMethod,
         weight: parseFloat(formData.weight) || 0,
         purity: formData.purity,
         marhunPrice: parseFloat(formData.marhunPrice) || 0,
         marhunValue: roundMoney(calculatedMarhunValue),
+        ltvPercent: ltvEvaluation.ltvPercent,
         margin: parseFloat(formData.margin) || 0,
         feeRate: parseFloat(formData.feeRate) || 0,
         feeTermMonths,
@@ -13212,7 +13821,7 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
                     onRefresh(institution.id, ({ institutionRate }) =>
                       setFormData(prev => recalculateFinancialFields(
                         { ...prev, marhunPrice: institutionRate.toFixed(2) },
-                        true
+                        { recalculateMarhun: true }
                       ))
                     );
                   }
@@ -13225,20 +13834,58 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
               </button>
             </div>
 
-            <div className="order-11 md:col-span-2 grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="order-11 md:col-span-2 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div className="space-y-2">
-                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Berat Emas (g)</label>
-                <input type="number" step="0.01" min="0" name="weight" value={formData.weight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Berat Kasar (g)</label>
+                <input type="number" step="0.01" min="0" name="grossWeight" value={formData.grossWeight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} required className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
               </div>
               <div className="space-y-2">
-                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Harga Taksiran (RM/g)</label>
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Potongan Berat · batu/patri (g)</label>
+                <input type="number" step="0.01" min="0" name="deductionWeight" value={formData.deductionWeight} onChange={handleChange} readOnly={selectedAssetIds.length > 0} className={`w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all ${selectedAssetIds.length ? 'bg-slate-100' : ''}`} />
+              </div>
+              <div className="space-y-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Berat Bersih (g)</label>
+                <input type="number" step="0.01" name="weight" value={formData.weight} readOnly className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-100 font-mono font-bold outline-none" />
+                <p className="text-[11px] font-medium text-slate-500">Berat kasar − potongan bukan emas.</p>
+              </div>
+              <div className="space-y-2">
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Harga Taksiran (RM/g emas tulen)</label>
                 <input type="number" step="0.01" min="0" name="marhunPrice" value={formData.marhunPrice} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50 focus:ring-2 focus:ring-emerald-500 outline-none transition-all" />
               </div>
               <div className="space-y-2">
-                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Kadar Pembiayaan (%)</label>
-                <input type="number" step="0.01" name="margin" value={formData.margin} onChange={handleChange} min="0" max="100" required className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50" />
+                <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">Kadar Pembiayaan · LTV (%)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  name="margin"
+                  value={formData.margin}
+                  onChange={handleChange}
+                  min="0"
+                  max={institutionMarginCap}
+                  required
+                  aria-describedby="transaction-ltv-hint"
+                  className="w-full p-2.5 border border-slate-300 rounded-lg bg-slate-50"
+                />
+                <p id="transaction-ltv-hint" className="text-[11px] font-medium text-slate-500">Had institusi {institutionPolicy?.maxMargin ?? '-'}% · had sistem {GOLD_LTV_HARD_CAP_PERCENT}%.</p>
+              </div>
+              <div className={`space-y-1 rounded-xl border p-3 ${ltvEvaluation.compliant ? 'border-emerald-200 bg-emerald-50' : 'border-rose-300 bg-rose-50'}`}>
+                <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">LTV sebenar</p>
+                <p className={`font-mono text-lg font-black ${ltvEvaluation.compliant ? 'text-emerald-800' : 'text-rose-700'}`}>{ltvEvaluation.ltvPercent.toFixed(2)}%</p>
+                <p className="text-[11px] font-semibold text-slate-600">Had {ltvEvaluation.effectiveCapPercent.toFixed(0)}% · baki ruang {formatRM(ltvEvaluation.headroom)}</p>
               </div>
             </div>
+
+            {valuationIsRequired && (
+              <div className="order-11 md:col-span-2 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+                <p className="font-bold">Penilaian Marhun</p>
+                <p className="mt-1">
+                  Berat bersih {currentValuation.netWeight.toFixed(2)}g × ketulenan {currentValuation.fineness.toFixed(4)} ={' '}
+                  {currentValuation.fineWeight.toFixed(3)}g emas tulen × {formatRM(currentValuation.ratePerGram)}/g =
+                  {' '}<span className="font-mono font-bold">{formatRM(currentValuation.marhunValue)}</span>.
+                  {formData.valuationMethod === 'legacyPerGram' && ' (rekod warisan: nilai tersimpan dikekalkan oleh pengguna)'}
+                </p>
+              </div>
+            )}
 
             {!formData.type.includes('Tebus') && (
               <div className="order-12 md:col-span-2 grid grid-cols-1 gap-4 border-t border-slate-100 pt-4 sm:grid-cols-2">
@@ -13278,9 +13925,17 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
                     className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 outline-none"
                   >
                     <option value="">Pilih asas caj</option>
-                    <option value="nilaiMarhun">Nilai Marhun</option>
-                    <option value="jumlahPembiayaan">Jumlah Pembiayaan</option>
+                    <option value="nilaiMarhun">Nilai Marhun (% sebulan)</option>
+                    <option value="beratMarhun">Berat Marhun (RM/g sebulan)</option>
+                    {formData.feeBasis === 'jumlahPembiayaan' && (
+                      <option value="jumlahPembiayaan">Jumlah Pembiayaan (tidak dibenarkan)</option>
+                    )}
                   </select>
+                  {!feeBasisIsCompliant && (
+                    <p className="text-xs font-semibold text-rose-600">
+                      Ujrah tidak boleh dikira daripada jumlah pembiayaan (riba). Tukar asas kepada Nilai Marhun.
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-2">
                   <label className="flex min-h-10 items-end text-sm font-semibold text-slate-700">
@@ -13300,9 +13955,11 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
                   />
                 </div>
                 <p className="sm:col-span-2 text-xs text-slate-500">
-                  {formData.feeBasis
-                    ? `Anggaran upah simpan: ${formatRM(feeBasisAmount)} × ${(parseFloat(formData.feeRate) || 0).toFixed(2)}% × ${feeTermMonths || 0} bulan. Anggaran bulanan ${formatRM(estimatedMonthlyStorageFee)}, jumlah ${formatRM(estimatedTotalStorageFee)}, jumlah tebus anggaran ${formatRM(estimatedTotalRedemption)}. Untuk OL, masukkan jumlah fi berkaitan sebenar mengikut sebut harga institusi.`
-                    : 'Pilih asas caj mengikut terma Ar-Rahnu untuk melihat anggaran caj bulanan.'}
+                  {!feeBasisIsCompliant
+                    ? 'Rekod ini menggunakan asas jumlah pembiayaan yang tidak mematuhi syarat Shariah. Tukar asas kepada Nilai Marhun sebelum menyimpan.'
+                    : formData.feeBasis
+                      ? `Anggaran upah simpan: ${formatRM(feeBasisAmount)} × ${(parseFloat(formData.feeRate) || 0).toFixed(2)}${formData.feeBasis === 'beratMarhun' ? ' /g' : '%'} × ${feeTermMonths || 0} bulan. Anggaran bulanan ${formatRM(estimatedMonthlyStorageFee)}, jumlah ${formatRM(estimatedTotalStorageFee)}, jumlah tebus anggaran ${formatRM(estimatedTotalRedemption)}. Untuk OL, masukkan jumlah fi berkaitan sebenar mengikut sebut harga institusi.`
+                      : 'Pilih asas caj mengikut terma Ar-Rahnu untuk melihat anggaran caj bulanan.'}
                 </p>
               </div>
             )}
@@ -13334,13 +13991,17 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
                   type="number"
                   step="0.01"
                   name="marhunValue"
-                  value={formData.marhunValue}
+                  value={formData.valuationMethod === 'legacyPerGram' && !valuationItems.length ? formData.marhunValue : calculatedMarhunValue}
                   onChange={handleChange}
+                  readOnly={formData.valuationMethod !== 'legacyPerGram' || valuationItems.length > 0}
                   min="0"
                   required
-                  className="w-full p-2.5 border border-emerald-200 rounded-lg bg-white text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none"
+                  className={`w-full p-2.5 border border-emerald-200 rounded-lg text-lg font-bold text-slate-800 focus:ring-2 focus:ring-emerald-500 outline-none ${formData.valuationMethod !== 'legacyPerGram' || valuationItems.length > 0 ? 'bg-slate-100' : 'bg-white'}`}
                 />
-                <p className="mt-1 min-h-12 text-xs text-slate-500">Kiraan asal: berat emas × harga taksiran (RM/g). Boleh ubah manual.</p>
+                <p className="mt-1 min-h-12 text-xs text-slate-500">
+                  Berat bersih × ketulenan × harga taksiran emas tulen (setelah potongan batu/patri).
+                  {formData.valuationMethod !== 'legacyPerGram' && ' Dikira automatik dan tidak boleh diubah manual.'}
+                </p>
               </div>
               <div className="flex h-full flex-col">
                 <label htmlFor="transaction-loan" className="text-xs text-emerald-600 font-semibold uppercase tracking-wider mb-1 block min-h-12">Jumlah Pembiayaan (RM)</label>
@@ -13382,6 +14043,15 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
               </div>
             </div>
           </section>
+
+          {validationError.length > 0 && (
+            <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+              <p className="text-sm font-bold text-rose-800">Transaksi tidak boleh disahkan:</p>
+              <ul className="mt-1 list-inside list-disc space-y-0.5 text-xs font-medium text-rose-700">
+                {validationError.map(message => <li key={message}>{message}</li>)}
+              </ul>
+            </div>
+          )}
 
           <div className="flex flex-col-reverse sm:flex-row justify-between items-center gap-3 pt-4 border-t border-slate-100">
             <div className="text-xs text-slate-400 hidden sm:flex items-center gap-2">
@@ -13913,6 +14583,51 @@ function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGol
             </div>
           </div>
 
+          {transaction.auctionSettlement && (
+            <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-wider text-amber-900">Penyelesaian Lelong</p>
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-700">
+                  Turutan: Kos → Ujrah → Pokok
+                </span>
+              </div>
+              <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-4">
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Hasil Lelong</p>
+                  <p className="font-mono text-sm font-extrabold text-slate-900">{formatRM(transaction.auctionSettlement.proceeds)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Kos Lelongan/Guaman</p>
+                  <p className="font-mono text-sm font-bold text-slate-700">{formatRM(transaction.auctionSettlement.auctionCostsPaid)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Ujrah Dibayar</p>
+                  <p className="font-mono text-sm font-bold text-slate-700">{formatRM(transaction.auctionSettlement.ujrahPaid)}</p>
+                </div>
+                <div>
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Pokok Dibayar</p>
+                  <p className="font-mono text-sm font-bold text-slate-700">{formatRM(transaction.auctionSettlement.principalPaid)}</p>
+                </div>
+              </div>
+              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border border-corporate-teal-200 bg-white p-3">
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Lebihan kepada Penggadai (Liabiliti)</p>
+                  <p className="font-mono text-sm font-extrabold text-corporate-teal-800">{formatRM(transaction.auctionSettlement.surplus)}</p>
+                  <p className="mt-0.5 text-[10px] font-semibold text-slate-500">Bukan keuntungan syarikat.</p>
+                </div>
+                <div className={`rounded-xl border bg-white p-3 ${transaction.auctionSettlement.deficit > 0 ? 'border-rose-300' : 'border-slate-200'}`}>
+                  <p className="text-[10px] font-bold uppercase text-slate-500">Kekurangan · A/R Pelanggan</p>
+                  <p className={`font-mono text-sm font-extrabold ${transaction.auctionSettlement.deficit > 0 ? 'text-rose-700' : 'text-slate-400'}`}>
+                    {formatRM(transaction.auctionSettlement.deficit)}
+                  </p>
+                  <p className="mt-0.5 text-[10px] font-semibold text-slate-500">
+                    {transaction.auctionSettlement.settled ? 'Selesai sepenuhnya.' : 'Baki hutang pelanggan selepas hasil lelong.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
           {transaction.remarks && (
             <div className="mt-5">
               <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Catatan</p>
@@ -14175,6 +14890,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
   const [isDeleteImagePending, setIsDeleteImagePending] = useState(false);
   const [isDeletingImage, setIsDeletingImage] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [assetFormError, setAssetFormError] = useState('');
   const selectableSuppliers = suppliers.filter(item =>
     isRecordVisible(item) || selectedSupplierCodes.includes(item.code)
   );
@@ -14185,6 +14901,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
     supplier: initialData?.supplier || '',
     purity: initialData?.purity || '999.9',
     weight: initialData?.weight !== undefined ? initialData.weight : '',
+    deductionWeight: initialData?.deductionWeight !== undefined ? initialData.deductionWeight : '',
     price: initialData?.price !== undefined ? initialData.price : '',
     status: initialData?.status || 'EDT'
   });
@@ -14328,6 +15045,20 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
       setSupplierError('Pilih sekurang-kurangnya satu pembekal.');
       return;
     }
+    const assetGrossWeight = parseFloat(formData.weight) || 0;
+    const assetDeductionWeight = Math.max(0, parseFloat(formData.deductionWeight) || 0);
+    const assetIssues: string[] = [];
+    if (assetGrossWeight <= 0) assetIssues.push('Berat kasar mesti melebihi 0 gram.');
+    if (assetDeductionWeight >= assetGrossWeight && assetGrossWeight > 0) {
+      assetIssues.push('Potongan batu/patri mesti kurang daripada berat kasar.');
+    }
+    if ((parseFloat(formData.price) || 0) < 0) assetIssues.push('Kos belian tidak boleh negatif.');
+    if (resolveGoldFineness(formData.purity) === null) assetIssues.push('Ketulenan aset tidak dikenali.');
+    if (assetIssues.length) {
+      setAssetFormError(assetIssues.join(' '));
+      return;
+    }
+    setAssetFormError('');
     setIsSaving(true);
     setImageError('');
     const supplierNames = selectedSuppliers.map(item => item.name);
@@ -14353,6 +15084,7 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
         supplierCodes: selectedSupplierCodes,
         code: finalCode,
         weight: parseFloat(formData.weight) || 0,
+        deductionWeight: Math.max(0, parseFloat(formData.deductionWeight) || 0),
         price: parseFloat(formData.price) || 0
       });
     } catch (error) {
@@ -14473,14 +15205,28 @@ function AssetModal({ initialData, currentGoldPrice, onClose, onSave, suppliers,
             </div>
 
             <div className="space-y-1">
-              <label className="text-sm font-semibold text-slate-700">Weight (g)</label>
-              <input type="number" step="0.01" name="weight" value={formData.weight} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              <label className="text-sm font-semibold text-slate-700">Berat Kasar (g)</label>
+              <input type="number" step="0.01" min="0" name="weight" value={formData.weight} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-sm font-semibold text-slate-700">Potongan Berat · batu/patri (g)</label>
+              <input type="number" step="0.01" min="0" name="deductionWeight" value={formData.deductionWeight} onChange={handleChange} className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
+              <p className="text-[11px] font-medium text-slate-500">
+                Berat bersih untuk penilaian: {Math.max(0, (parseFloat(formData.weight) || 0) - (parseFloat(formData.deductionWeight) || 0)).toFixed(2)}g
+              </p>
             </div>
 
             <div className="space-y-1">
               <label className="text-sm font-semibold text-slate-700">Purchase Price (RM)</label>
               <input type="number" step="0.01" name="price" value={formData.price} onChange={handleChange} required className="w-full p-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none transition-all" />
             </div>
+
+            {assetFormError && (
+              <p role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-2 text-xs font-semibold text-rose-700 md:col-span-2">
+                {assetFormError}
+              </p>
+            )}
 
             <div className="space-y-1 md:col-span-2">
               <label className="text-sm font-semibold text-slate-700">Status Aset</label>

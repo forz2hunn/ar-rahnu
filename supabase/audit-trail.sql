@@ -587,12 +587,12 @@ begin
   if upper(coalesce(p_action, '')) not in (
     'SESSION_START', 'SESSION_END', 'PASSWORD_CHANGED', 'PROFILE_UPDATED',
     'HEIR_UPDATED', 'BANK_UPDATED', 'PDPA_CONSENT', 'AVATAR_UPDATED',
-    'AVATAR_REMOVED', 'DATA_EXPORTED', 'AUDIT_EXPORTED'
+    'AVATAR_REMOVED', 'DATA_EXPORTED', 'AUDIT_EXPORTED', 'SAG_CONSENT'
   ) then
     raise exception 'Tindakan aktiviti audit tidak sah: %', p_action;
   end if;
 
-  if coalesce(p_resource_type, '') not in ('auth.users', 'user_activity', 'portfolio_export') then
+  if coalesce(p_resource_type, '') not in ('auth.users', 'user_activity', 'portfolio_export', 'sagDocuments') then
     raise exception 'Jenis sumber aktiviti audit tidak sah: %', p_resource_type;
   end if;
 
