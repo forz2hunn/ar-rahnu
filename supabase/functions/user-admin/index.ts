@@ -227,7 +227,17 @@ Deno.serve(async (request) => {
           fullName: String(userMetadata.full_name || userMetadata.name || ''),
           icNumber: String(userMetadata.ic_number || ''),
           memberNo: String(userMetadata.member_no || ''),
-          avatarPhotoPath: String(userMetadata.avatar_photo_path || '')
+          avatarPhotoPath: String(userMetadata.avatar_photo_path || ''),
+          // Butiran hubungan dihantar juga supaya surat/dokumen ahli boleh diisi automatik
+          // tanpa panggilan tambahan apabila fungsi ini sudah dideploy semula.
+          phone: String(userMetadata.phone || ''),
+          addressLine: String(userMetadata.address_line || ''),
+          city: String(userMetadata.city || ''),
+          postcode: String(userMetadata.postcode || ''),
+          state: String(userMetadata.state || ''),
+          heirName: String(userMetadata.heir_name || ''),
+          heirRelationship: String(userMetadata.heir_relationship || ''),
+          heirPhone: String(userMetadata.heir_phone || '')
         });
       }
       return jsonResponse({ users });

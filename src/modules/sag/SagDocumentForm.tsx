@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   Check,
@@ -22,7 +22,6 @@ import {
   createSagMarhunItem,
   formatSagDate,
   formatSagMoney,
-  mergeSagMemberContact,
   normalizeSagDocument,
   resolveSagPledgeStatus,
   resolveSagPledgeType,
@@ -57,6 +56,17 @@ const assetStatusLabel = (asset: any) => {
   return 'EDT';
 };
 
+const emptyMemberContact: SagMemberSnapshot = {
+  userId: '',
+  memberNo: '',
+  name: '',
+  icNumber: '',
+  address: '',
+  phone: '',
+  heirName: '',
+  poBox: ''
+};
+
 const formatAssetOption = (asset: any) =>
   [
     asset?.code || asset?.id,
@@ -78,6 +88,7 @@ export function SagDocumentForm({
   sagDocuments = [],
   assets = [],
   resolveTransactionAssets,
+  loadMemberProfile,
   onClose,
   onSave
 }: {
@@ -91,14 +102,23 @@ export function SagDocumentForm({
   /** Senarai aset daripada modul Asset Record. */
   assets?: any[];
   resolveTransactionAssets: (transaction: any) => any[];
+  /** Ambil butiran profil ahli (telefon/alamat/waris) apabila daftar keahlian belum menyimpannya. */
+  loadMemberProfile?: (userId: string) => Promise<Partial<SagMemberSnapshot> | null>;
   onClose: () => void;
   onSave: (document: SagDocument) => void;
 }) {
   const [form, setForm] = useState<SagDocument>(initialDocument);
   const [errors, setErrors] = useState<string[]>([]);
   const [assetPickerId, setAssetPickerId] = useState('');
+  const [isLoadingMemberProfile, setIsLoadingMemberProfile] = useState(false);
+  const selectedMemberUserIdRef = useRef('');
 
   const derived = useMemo(() => normalizeSagDocument(form), [form]);
+  const selectedMemberRecord = useMemo(
+    () => members.find(entry => entry.userId === form.member.userId) || null,
+    [members, form.member.userId]
+  );
+  const memberHasContact = Boolean(form.member.phone || form.member.address || form.member.heirName);
   const marhunSummary = useMemo(() => summarizeSagMarhunItems(derived.marhunItems), [derived.marhunItems]);
   const usedDocumentNumbers = useMemo(
     () => existingNumbers.filter(number => number !== initialDocument.documentNo),
@@ -167,23 +187,77 @@ export function SagDocumentForm({
   const updateSignature = (patch: Partial<SagDocument['signatures']>) =>
     setForm(previous => ({ ...previous, signatures: { ...previous.signatures, ...patch } }));
 
+  /**
+   * Memilih ahli mesti menggantikan butiran di bawah sepenuhnya. Jika rekod ahli tiada
+   * alamat/telefon/waris, medan tersebut dikosongkan dan tidak dikekalkan daripada
+   * pilihan ahli sebelumnya.
+   */
   const handleMemberSelect = (userId: string) => {
-    const member = members.find(entry => entry.userId === userId);
-    if (!member) {
-      updateMember({ userId: '' });
-      return;
-    }
+    const member = userId ? members.find(entry => entry.userId === userId) : null;
+    selectedMemberUserIdRef.current = userId;
     setForm(previous => {
-      const nextMember = mergeSagMemberContact(previous.member, member);
+      const nextMember: SagMemberSnapshot = member
+        ? {
+            userId: member.userId,
+            memberNo: member.memberNo || '',
+            name: member.name || '',
+            icNumber: member.icNumber || '',
+            address: member.address || '',
+            phone: member.phone || '',
+            heirName: member.heirName || '',
+            poBox: member.poBox || ''
+          }
+        : { ...emptyMemberContact };
+      const signatureWasAuto = !previous.signatures.customerName ||
+        previous.signatures.customerName === previous.member.name;
       return {
         ...previous,
         member: nextMember,
         signatures: {
           ...previous.signatures,
-          customerName: previous.signatures.customerName || nextMember.name
+          customerName: signatureWasAuto ? nextMember.name : previous.signatures.customerName
         }
       };
     });
+
+    // Daftar keahlian mungkin belum menyimpan telefon/alamat/waris ahli, sedangkan
+    // butiran itu ada dalam profil ahli. Ambil daripada profil dan isi medan kosong.
+    const needsProfile = Boolean(member && loadMemberProfile &&
+      (!member.address || !member.phone || !member.heirName));
+    setIsLoadingMemberProfile(needsProfile);
+    if (!member || !needsProfile || !loadMemberProfile) return;
+    void loadMemberProfile(userId)
+      .then(profile => {
+        if (!profile || selectedMemberUserIdRef.current !== userId) return;
+        setForm(previous => {
+          if (String(previous.member.userId) !== userId) return previous;
+          const fill = (current: string, incoming?: string) =>
+            String(current || '').trim() || String(incoming || '').trim();
+          const nextMember: SagMemberSnapshot = {
+            ...previous.member,
+            name: fill(previous.member.name, profile.name),
+            icNumber: fill(previous.member.icNumber, profile.icNumber),
+            memberNo: fill(previous.member.memberNo, profile.memberNo),
+            phone: fill(previous.member.phone, profile.phone),
+            address: fill(previous.member.address, profile.address),
+            heirName: fill(previous.member.heirName, profile.heirName)
+          };
+          const signatureWasAuto = !previous.signatures.customerName ||
+            previous.signatures.customerName === previous.member.name;
+          return {
+            ...previous,
+            member: nextMember,
+            signatures: {
+              ...previous.signatures,
+              customerName: signatureWasAuto ? nextMember.name : previous.signatures.customerName
+            }
+          };
+        });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (selectedMemberUserIdRef.current === userId) setIsLoadingMemberProfile(false);
+      });
   };
 
   const handleTransactionSelect = (value: string) => {
@@ -533,7 +607,15 @@ export function SagDocumentForm({
                   ))}
                 </select>
                 <p className="text-[11px] font-medium text-slate-500">
-                  Nama, No. MyKad dan No. Keahlian diambil daripada modul Keahlian Ahli. Alamat, telefon dan waris disimpan semula ke profil ahli selepas disimpan.
+                  {!form.member.userId
+                    ? 'Nama, No. MyKad dan No. Keahlian diambil daripada modul Keahlian Ahli. Alamat, telefon dan waris disimpan semula ke profil ahli selepas disimpan.'
+                    : isLoadingMemberProfile
+                      ? 'Memuatkan butiran profil ahli daripada modul Keahlian Ahli...'
+                      : memberHasContact
+                        ? 'Alamat, telefon dan waris diambil daripada rekod ahli. Perubahan akan disimpan semula ke profil ahli selepas surat disimpan.'
+                        : !selectedMemberRecord
+                          ? 'Ahli ini tidak lagi wujud dalam senarai Keahlian Ahli. Butiran di bawah dikekalkan daripada surat ini.'
+                          : 'Tiada rekod alamat, telefon atau waris bagi ahli ini dalam Keahlian Ahli. Isi maklumat baharu dan ia akan disimpan semula ke profil ahli selepas surat disimpan.'}
                 </p>
               </div>
               <div className="space-y-1.5">
@@ -580,14 +662,18 @@ export function SagDocumentForm({
                 />
               </div>
               <div className="space-y-1.5">
-                <label className={labelClass} htmlFor="sag-member-pobox">No. Kotak</label>
+                <label className={labelClass} htmlFor="sag-member-pobox">No. Peti/Kotak Simpanan</label>
                 <input
                   id="sag-member-pobox"
                   value={form.member.poBox}
                   onChange={event => updateMember({ poBox: event.target.value })}
                   className={`${fieldClass} font-mono`}
                   placeholder="cth. A49"
+                  aria-describedby="sag-member-pobox-help"
                 />
+                <p id="sag-member-pobox-help" className="text-[11px] font-medium text-slate-500">
+                  Nombor peti/kotak tempat marhun disimpan, seperti pada resit institusi. Pilihan — biarkan kosong jika tidak berkenaan. Surat akan mencetaknya pada baris <span className="font-semibold">No Kotak</span>.
+                </p>
               </div>
               <div className="space-y-1.5 sm:col-span-2">
                 <label className={labelClass} htmlFor="sag-member-address">Alamat</label>

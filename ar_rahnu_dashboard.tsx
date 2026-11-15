@@ -84,6 +84,7 @@ import {
   normalizeSagDocument,
   type SagDocument,
   type SagLetterhead,
+  type SagMemberSnapshot,
   type SagModuleSettings
 } from './src/modules/sag/sagDocuments';
 import { SagDocumentForm, SagLetterOverlay, type SagMemberOption } from './src/modules/sag/SagDocumentForm';
@@ -2843,21 +2844,28 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
   const sagMemberOptions = useMemo<SagMemberOption[]>(() => {
     const metadata = (user.user_metadata || {}) as Record<string, string>;
-    const currentUserAddress = [
-      metadata.address_line,
-      metadata.city,
-      [metadata.postcode, metadata.state].filter(Boolean).join(' ')
-    ].filter(value => String(value || '').trim().length > 0).join(', ');
-    const options = memberRegistry.map(entry => ({
-      userId: entry.userId,
-      memberNo: entry.memberNo || '',
-      name: entry.fullName || '',
-      icNumber: entry.icNumber || '',
-      address: entry.address || '',
-      phone: entry.phone || '',
-      heirName: entry.heirName || '',
-      poBox: entry.poBox || ''
-    }));
+    const composeAddress = (line?: unknown, city?: unknown, postcode?: unknown, state?: unknown) =>
+      [line, city, [postcode, state].filter(Boolean).join(' ')]
+        .map(value => String(value || '').trim())
+        .filter(Boolean)
+        .join(', ');
+    const currentUserAddress = composeAddress(metadata.address_line, metadata.city, metadata.postcode, metadata.state);
+    // Telefon/alamat/waris diambil daripada daftar keahlian; jika belum disimpan di situ,
+    // gunakan medan profil akaun daripada senarai user-admin supaya surat tidak kosong.
+    const accountById = new Map(organizationUsers.map(entry => [String(entry.id), entry]));
+    const options = memberRegistry.map(entry => {
+      const account = accountById.get(String(entry.userId)) || {};
+      return {
+        userId: entry.userId,
+        memberNo: entry.memberNo || String(account.memberNo || ''),
+        name: entry.fullName || String(account.fullName || ''),
+        icNumber: entry.icNumber || String(account.icNumber || ''),
+        address: entry.address || composeAddress(account.addressLine, account.city, account.postcode, account.state),
+        phone: entry.phone || String(account.phone || ''),
+        heirName: entry.heirName || String(account.heirName || ''),
+        poBox: entry.poBox || ''
+      };
+    });
     const selfEntry: SagMemberOption = {
       userId: user.id,
       memberNo: String(metadata.member_no || ''),
@@ -2882,7 +2890,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return [...options, { ...selfEntry, email: user.email || '' }];
     }
     return options;
-  }, [memberRegistry, user]);
+  }, [memberRegistry, organizationUsers, user]);
 
   const canManageSagDocuments = useMemo(() => {
     const role = organizationMembership?.role;
@@ -2902,6 +2910,40 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     getTransactionAssetIds(transaction)
       .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
       .filter(Boolean);
+
+  /**
+   * Butiran profil ahli untuk Surat Akuan Gadaian. Daftar keahlian hanya menyimpan
+   * telefon/alamat/waris selepas surat disimpan, sedangkan ahli sudah mengisinya dalam
+   * profil — jadi butiran itu diambil daripada `get-member-profile` (Admin).
+   */
+  const sagMemberProfileCacheRef = useRef(new Map<string, Partial<SagMemberSnapshot>>());
+  const loadSagMemberProfile = async (memberUserId: string) => {
+    const key = String(memberUserId || '');
+    if (!key || !isOrganizationAdmin) return null;
+    const cached = sagMemberProfileCacheRef.current.get(key);
+    if (cached) return cached;
+    try {
+      const data = await invokeUserAdmin({ action: 'get-member-profile', userId: key });
+      const profile = data?.profile;
+      if (!profile) return null;
+      const contact: Partial<SagMemberSnapshot> = {
+        name: String(profile.fullName || ''),
+        icNumber: String(profile.icNumber || ''),
+        memberNo: String(profile.memberNo || ''),
+        phone: String(profile.phone || ''),
+        address: [profile.addressLine, profile.city, [profile.postcode, profile.state].filter(Boolean).join(' ')]
+          .map(value => String(value || '').trim())
+          .filter(Boolean)
+          .join(', '),
+        heirName: String(profile.heirName || '')
+      };
+      sagMemberProfileCacheRef.current.set(key, contact);
+      return contact;
+    } catch (error) {
+      console.warn('Butiran profil ahli tidak dapat dimuatkan untuk Surat Akuan Gadaian:', error);
+      return null;
+    }
+  };
 
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -10052,6 +10094,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           sagDocuments={sagDocuments}
           assets={visibleAssets}
           resolveTransactionAssets={resolveTransactionAssets}
+          loadMemberProfile={loadSagMemberProfile}
           onClose={() => setSagFormDocument(null)}
           onSave={handleSaveSagDocument}
         />
