@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
+  BadgePercent,
+  Coins,
   FileText,
+  Gavel,
   Layers,
   Pencil,
   Plus,
@@ -29,6 +32,16 @@ import {
 
 const PAGE_SIZE = 10;
 
+/** Tindakan susulan lejar yang boleh dimulakan terus daripada surat. */
+export type SagCorrectionAction = 'TS' | 'TKS' | 'US' | 'Lelong';
+
+/** Ringkasan penunjuk AI/analitik lejar untuk dipaparkan bersama surat. */
+export type SagLetterIndicator = {
+  presumption?: string;
+  readinessScore?: number | null;
+  prediction?: string | null;
+};
+
 const inputClass =
   'w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none transition-all focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500';
 const labelClass = 'text-[11px] font-bold uppercase tracking-wide text-slate-500';
@@ -41,7 +54,9 @@ export function SagDocumentsTab({
   onCreate,
   onEdit,
   onDelete,
-  onFollowUp,
+  onCorrection,
+  indicators,
+  onSyncLedger,
   onOpenSettings
 }: {
   documents: SagDocument[];
@@ -51,7 +66,12 @@ export function SagDocumentsTab({
   onCreate: () => void;
   onEdit: (document: SagDocument) => void;
   onDelete: (document: SagDocument) => void;
-  onFollowUp: (document: SagDocument) => void;
+  /** Mulakan tindakan susulan lejar (TS/TKS/US/Lelong) daripada surat ini. */
+  onCorrection?: (document: SagDocument, action: SagCorrectionAction) => void;
+  /** Penunjuk AI/analitik lejar (dikunci mengikut id transaksi) untuk setiap surat. */
+  indicators?: Record<string, SagLetterIndicator>;
+  /** Selaraskan surat dengan lejar SAG (modul lama) semasa peralihan. */
+  onSyncLedger?: () => void;
   onOpenSettings: () => void;
 }) {
   const [query, setQuery] = useState('');
@@ -141,6 +161,17 @@ export function SagDocumentsTab({
               <Settings2 size={15} />
               <span>Tetapan Letterhead</span>
             </button>
+            {canManage && onSyncLedger && (
+              <button
+                type="button"
+                onClick={onSyncLedger}
+                title="Selaraskan setiap surat dengan lejar SAG (modul Pengurusan Surat Gadaian)"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3.5 py-2 text-xs font-semibold text-white backdrop-blur-md transition-all hover:bg-white/20 active:scale-95 sm:text-sm"
+              >
+                <ArrowRightLeft size={15} />
+                <span>Segerak Lejar</span>
+              </button>
+            )}
             {canManage && (
               <button
                 type="button"
@@ -276,7 +307,20 @@ export function SagDocumentsTab({
                         {document.member?.icNumber || '-'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 font-mono text-slate-600">{document.transactionRefNo || '-'}</td>
+                    <td className="px-4 py-3">
+                      <span className="block font-mono text-slate-600">{document.transactionRefNo || '-'}</span>
+                      {document.status === 'Draf' ? (
+                        <span className="mt-1 inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">
+                          Draf · belum ke lejar
+                        </span>
+                      ) : (
+                        <span className={`mt-1 inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-bold ${document.transactionId
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                          : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+                          {document.transactionId ? 'Lejar selari' : 'Belum disegerakkan'}
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-slate-600">{document.institutionName || '-'}</td>
                     <td className="px-4 py-3">
                       <span className="block font-mono text-slate-700">{formatSagDate(document.financingDate)}</span>
@@ -293,19 +337,69 @@ export function SagDocumentsTab({
                         {statusMeta.label}
                       </span>
                       <span className="mt-1 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{document.copyType}</span>
+                      {document.transactionId != null && indicators?.[String(document.transactionId)] && (() => {
+                        const indicator = indicators[String(document.transactionId)];
+                        const score = indicator.readinessScore;
+                        const dotClass = indicator.presumption === 'Petunjuk shortfall'
+                          ? 'bg-rose-500'
+                          : indicator.presumption === 'Potensi overlap'
+                            ? 'bg-amber-500'
+                            : score !== null && score !== undefined && score >= 80
+                              ? 'bg-emerald-500'
+                              : 'bg-slate-400';
+                        return (
+                          <span
+                            title={indicator.prediction || 'Penunjuk AI lejar SAG'}
+                            className="mt-1 flex items-center gap-1 text-[10px] font-bold text-slate-500"
+                          >
+                            <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />
+                            AI {score !== null && score !== undefined ? `${Math.round(Number(score))}/100` : '—'}
+                            <span className="truncate">· {indicator.presumption || 'Data belum mencukupi'}</span>
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className="px-4 py-3" onClick={event => event.stopPropagation()}>
                       <div className="flex items-center justify-center gap-1">
-                        {document.transactionRefNo && document.pledgeStatus === 'Aktif' && (
-                          <button
-                            type="button"
-                            onClick={() => onFollowUp(document)}
-                            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
-                            title="Transaksi surat susulan (OL, Pusing, Tebus atau Lelong)"
-                            aria-label={`Transaksi susulan untuk surat ${document.documentNo}`}
-                          >
-                            <ArrowRightLeft size={15} />
-                          </button>
+                        {document.transactionId && document.pledgeStatus === 'Aktif' && onCorrection && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onCorrection(document, 'TS')}
+                              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-emerald-50 hover:text-emerald-700"
+                              title="Tebus penuh (TS)"
+                              aria-label={`Tebus penuh untuk surat ${document.documentNo}`}
+                            >
+                              <Coins size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onCorrection(document, 'TKS')}
+                              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-amber-50 hover:text-amber-700"
+                              title="Tebus sebahagian (TKS)"
+                              aria-label={`Tebus sebahagian untuk surat ${document.documentNo}`}
+                            >
+                              <BadgePercent size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onCorrection(document, 'US')}
+                              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-corporate-teal-50 hover:text-corporate-teal-700"
+                              title="Bayar upah simpan (US)"
+                              aria-label={`Upah simpan untuk surat ${document.documentNo}`}
+                            >
+                              <Wallet size={15} />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => onCorrection(document, 'Lelong')}
+                              className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-700"
+                              title="Lelong (lelong marhun)"
+                              aria-label={`Lelong untuk surat ${document.documentNo}`}
+                            >
+                              <Gavel size={15} />
+                            </button>
+                          </>
                         )}
                         <button
                           type="button"

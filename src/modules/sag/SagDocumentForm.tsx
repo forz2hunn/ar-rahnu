@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import {
   SAG_COPY_TYPES,
+  SAG_FEE_BASIS_OPTIONS,
   SAG_KARAT_OPTIONS,
   SAG_PLEDGE_STATUSES,
   SAG_PLEDGE_TYPES,
@@ -19,10 +20,13 @@ import {
   SAG_STATUS_OPTIONS,
   SAG_TAWARRUQ_CLAUSES,
   addMonthsToDateOnly,
+  calculateSagFinancing,
+  calculateSagStorageFee,
   createSagMarhunItem,
   formatSagDate,
   formatSagMoney,
   normalizeSagDocument,
+  normalizeSagFeeBasis,
   resolveSagPledgeStatus,
   resolveSagPledgeType,
   roundMoney,
@@ -119,6 +123,28 @@ export function SagDocumentForm({
     [members, form.member.userId]
   );
   const memberHasContact = Boolean(form.member.phone || form.member.address || form.member.heirName);
+
+  // Formula upah simpan diselaraskan dengan modul lejar SAG (kadar % sebulan × asas × tempoh).
+  const feeSummary = useMemo(
+    () => calculateSagStorageFee({
+      feeRate: form.feeRate,
+      feeBasis: form.feeBasis,
+      termMonths: form.paymentTermMonths,
+      marhunValue: derived.marhunValue,
+      purchasePrice: form.purchasePrice
+    }),
+    [form.feeRate, form.feeBasis, form.paymentTermMonths, form.purchasePrice, derived.marhunValue]
+  );
+  const financingFromMargin = useMemo(
+    () => calculateSagFinancing(derived.marhunValue, form.margin),
+    [derived.marhunValue, form.margin]
+  );
+  const applyCalculatedFinancing = () => {
+    update({
+      purchasePrice: financingFromMargin,
+      totalProfit: feeSummary.total
+    });
+  };
   const marhunSummary = useMemo(() => summarizeSagMarhunItems(derived.marhunItems), [derived.marhunItems]);
   const usedDocumentNumbers = useMemo(
     () => existingNumbers.filter(number => number !== initialDocument.documentNo),
@@ -289,6 +315,14 @@ export function SagDocumentForm({
       financingDate,
       maturityDate: toDateOnly(transaction.redemptionDate) || previous.maturityDate,
       paymentTermMonths: Number(transaction.feeTermMonths) > 0 ? Number(transaction.feeTermMonths) : previous.paymentTermMonths,
+      margin: roundMoney(transaction.margin ?? institution?.maxMargin ?? previous.margin),
+      feeRate: roundMoney(transaction.feeRate ?? previous.feeRate),
+      feeBasis: transaction.feeBasis !== undefined
+        ? normalizeSagFeeBasis(transaction.feeBasis)
+        : previous.feeBasis,
+      previousRedemption: String(transaction.transactionStatus || transaction.type || '').toLowerCase().includes('pajakan')
+        ? 0
+        : roundMoney(transaction.redemption ?? previous.previousRedemption),
       purchasePrice: roundMoney(transaction.loan ?? previous.purchasePrice),
       totalProfit: roundMoney(transaction.fee ?? previous.totalProfit),
       marhunValue: items.length
@@ -511,7 +545,11 @@ export function SagDocumentForm({
                     const previousDocument = previousDocumentOptions.find(document => document.documentNo === event.target.value);
                     update({
                       previousDocumentNo: previousDocument?.documentNo || '',
-                      previousTransactionRefNo: previousDocument?.transactionRefNo || ''
+                      previousTransactionRefNo: previousDocument?.transactionRefNo || '',
+                      // Jumlah tebus surat asal menjadi asas unjuran lebihan tunai surat susulan.
+                      previousRedemption: previousDocument
+                        ? previousDocument.sellingPrice || previousDocument.purchasePrice + previousDocument.totalProfit
+                        : 0
                     });
                   }}
                   className={fieldClass}
@@ -782,6 +820,59 @@ export function SagDocumentForm({
                 />
               </div>
               <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-margin">Margin Pembiayaan (%)</label>
+                <input
+                  id="sag-margin"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  max={100}
+                  value={formatInputNumber(form.margin)}
+                  onChange={event => update({ margin: Math.max(0, Math.min(100, Number(event.target.value) || 0)) })}
+                  className={`${fieldClass} font-mono`}
+                />
+                <p className="text-[11px] font-medium text-slate-500">Pembiayaan = nilai marhun × margin.</p>
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-fee-rate">Kadar Upah Simpan (% sebulan)</label>
+                <input
+                  id="sag-fee-rate"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={formatInputNumber(form.feeRate)}
+                  onChange={event => update({ feeRate: Math.max(0, Number(event.target.value) || 0) })}
+                  className={`${fieldClass} font-mono`}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-fee-basis">Asas Kiraan Upah Simpan</label>
+                <select
+                  id="sag-fee-basis"
+                  value={form.feeBasis}
+                  onChange={event => update({ feeBasis: event.target.value as typeof form.feeBasis })}
+                  className={fieldClass}
+                >
+                  <option value="">Belum ditetapkan</option>
+                  {SAG_FEE_BASIS_OPTIONS.map(option => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-previous-redemption">Jumlah Tebus Surat Asal (RM)</label>
+                <input
+                  id="sag-previous-redemption"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={formatInputNumber(form.previousRedemption)}
+                  onChange={event => update({ previousRedemption: Math.max(0, Number(event.target.value) || 0) })}
+                  className={`${fieldClass} font-mono`}
+                />
+                <p className="text-[11px] font-medium text-slate-500">Asas unjuran lebihan tunai surat susulan (0 untuk Pajakan Asal).</p>
+              </div>
+              <div className="space-y-1.5">
                 <label className={labelClass} htmlFor="sag-selling-price">Harga Jualan (RM)</label>
                 <input
                   id="sag-selling-price"
@@ -810,6 +901,37 @@ export function SagDocumentForm({
                   className={fieldClass}
                   placeholder="Nota pegawai (tidak dicetak)"
                 />
+              </div>
+            </div>
+
+            <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] font-bold uppercase tracking-wide text-emerald-900">
+                  Kiraan automatik · selaras formula lejar SAG
+                </p>
+                <button
+                  type="button"
+                  onClick={applyCalculatedFinancing}
+                  title="Gunakan pembiayaan (nilai marhun × margin) dan jumlah upah simpan pada surat ini"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-[11px] font-bold text-emerald-800 transition-colors hover:bg-emerald-50"
+                >
+                  <RefreshCw size={13} /> Guna Kiraan Ini
+                </button>
+              </div>
+              <div className="mt-2 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2 lg:grid-cols-5">
+                {[
+                  { label: 'Pembiayaan (margin)', value: formatSagMoney(financingFromMargin), hint: `${formatInputNumber(form.margin)}% × ${formatSagMoney(derived.marhunValue)}` },
+                  { label: 'Upah simpan sebulan', value: formatSagMoney(feeSummary.monthly), hint: `${formatInputNumber(form.feeRate)}% × ${formatSagMoney(feeSummary.basisAmount)}` },
+                  { label: 'Jumlah upah (tempoh)', value: formatSagMoney(feeSummary.total), hint: `${form.paymentTermMonths} bulan` },
+                  { label: 'Anggaran jumlah tebus', value: formatSagMoney(feeSummary.redemption), hint: 'Pembiayaan + upah' },
+                  { label: 'Unjuran lebihan tunai', value: formatSagMoney(derived.projectedProfit), hint: 'Pembiayaan − tebus asal − fi' }
+                ].map(item => (
+                  <div key={item.label} className="rounded-lg border border-emerald-100 bg-white px-2.5 py-2">
+                    <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{item.label}</p>
+                    <p className="font-mono text-sm font-bold text-emerald-900">{item.value}</p>
+                    <p className="text-[10px] font-medium text-slate-500">{item.hint}</p>
+                  </div>
+                ))}
               </div>
             </div>
 

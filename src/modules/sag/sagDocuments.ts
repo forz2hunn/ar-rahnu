@@ -6,6 +6,8 @@
 
 export type SagDocumentStatus = 'Draf' | 'Dikeluarkan' | 'Batal';
 export type SagCopyType = 'Salinan Pelanggan' | 'Salinan Ar-Rahnu';
+/** Asas kiraan upah simpan, sama seperti modul lejar SAG. */
+export type SagFeeBasis = '' | 'nilaiMarhun' | 'jumlahPembiayaan';
 
 export type SagAuditActor = {
   id: string;
@@ -86,14 +88,24 @@ export type SagDocument = SagAuditFields & {
   /** Surat Akuan Gadaian terdahulu yang di transaksi untuk menghasilkan surat ini. */
   previousDocumentNo: string;
   previousTransactionRefNo: string;
+  /** Jumlah tebus surat terdahulu (asas unjuran lebihan tunai surat susulan). */
+  previousRedemption: number;
   financingDate: string;
   maturityDate: string;
   paymentDueOverride: string;
   paymentTermMonths: number;
   member: SagMemberSnapshot;
   marhunValue: number;
+  /** Margin pembiayaan (% daripada nilai marhun), selaras dengan modul lejar SAG. */
+  margin: number;
   purchasePrice: number;
   totalProfit: number;
+  /** Kadar upah simpan (% sebulan) seperti direkod dalam lejar SAG. */
+  feeRate: number;
+  /** Asas kiraan upah simpan: nilai marhun atau jumlah pembiayaan. */
+  feeBasis: SagFeeBasis;
+  /** Unjuran lebihan tunai (loan − tebus − fi) untuk surat susulan. */
+  projectedProfit: number;
   sellingPrice: number;
   profitSchedule: SagProfitPeriod[];
   tawarruq: SagTawarruqAgreement;
@@ -191,6 +203,73 @@ export const toDateOnly = (value?: string | null): string => {
   if (match) return `${match[1]}-${match[2]}-${match[3]}`;
   const parsed = new Date(text);
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString().slice(0, 10);
+};
+
+// --- Formula pajakan yang diselaraskan dengan modul lejar SAG ---
+export const SAG_FEE_BASIS_OPTIONS: { value: Exclude<SagFeeBasis, ''>; label: string }[] = [
+  { value: 'nilaiMarhun', label: 'Nilai Marhun' },
+  { value: 'jumlahPembiayaan', label: 'Jumlah Pembiayaan' }
+];
+
+export const normalizeSagFeeBasis = (value: unknown): SagFeeBasis => {
+  const text = String(value ?? '').trim();
+  if (text === 'nilaiMarhun' || text === 'Nilai Marhun') return 'nilaiMarhun';
+  if (text === 'jumlahPembiayaan' || text === 'Jumlah Pembiayaan') return 'jumlahPembiayaan';
+  return '';
+};
+
+export const getSagFeeBasisLabel = (value: unknown): string =>
+  SAG_FEE_BASIS_OPTIONS.find(option => option.value === normalizeSagFeeBasis(value))?.label || 'Belum ditetapkan';
+
+/** Nilai marhun = berat × kadar taksiran per gram. */
+export const calculateSagMarhunValue = (weight: unknown, ratePerGram: unknown): number =>
+  roundMoney((Number(weight) || 0) * (Number(ratePerGram) || 0));
+
+/** Pembiayaan = nilai marhun × margin %. */
+export const calculateSagFinancing = (marhunValue: unknown, margin: unknown): number =>
+  roundMoney((Number(marhunValue) || 0) * ((Number(margin) || 0) / 100));
+
+/** Unjuran lebihan tunai: surat asal/tebus tidak menghasilkan lebihan. */
+export const calculateSagProjectedProfit = (
+  pledgeType: unknown,
+  purchasePrice: unknown,
+  redemption: unknown,
+  totalProfit: unknown
+): number => {
+  const type = String(pledgeType || '');
+  if (type === 'Pajakan Asal' || type.includes('Tebus')) return 0;
+  return roundMoney((Number(purchasePrice) || 0) - (Number(redemption) || 0) - (Number(totalProfit) || 0));
+};
+
+/** Upah simpan: kadar sebulan × asas kiraan × tempoh, berserta jumlah tebus. */
+export const calculateSagStorageFee = ({
+  feeRate,
+  feeBasis,
+  termMonths,
+  marhunValue,
+  purchasePrice
+}: {
+  feeRate: unknown;
+  feeBasis: unknown;
+  termMonths: unknown;
+  marhunValue: unknown;
+  purchasePrice: unknown;
+}) => {
+  const basis = normalizeSagFeeBasis(feeBasis);
+  const basisAmount = basis === 'nilaiMarhun'
+    ? Number(marhunValue) || 0
+    : basis === 'jumlahPembiayaan'
+      ? Number(purchasePrice) || 0
+      : 0;
+  const monthly = roundMoney(basisAmount * ((Number(feeRate) || 0) / 100));
+  const months = Math.max(0, Number(termMonths) || 0);
+  const total = roundMoney(monthly * months);
+  return {
+    basisAmount: roundMoney(basisAmount),
+    monthly,
+    total,
+    redemption: roundMoney((Number(purchasePrice) || 0) + total)
+  };
 };
 
 const parseDateOnly = (value?: string | null): Date | null => {
@@ -424,6 +503,8 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
   const marhunSummary = summarizeSagMarhunItems(marhunItems);
   const purchasePrice = roundMoney(document.purchasePrice);
   const totalProfit = roundMoney(document.totalProfit);
+  const pledgeType = String(document.pledgeType || '').trim();
+  const previousRedemption = roundMoney(document.previousRedemption);
   const paymentTermMonths = Math.max(1, Math.min(24, Math.round(Number(document.paymentTermMonths) || SAG_DEFAULT_PAYMENT_TERM_MONTHS)));
   const financingDate = toDateOnly(document.financingDate) || toDateOnly(new Date().toISOString());
   const maturityDate = toDateOnly(document.maturityDate) ||
@@ -437,11 +518,16 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
     pledgeStatus: String(document.pledgeStatus || 'Aktif').trim(),
     previousDocumentNo: String(document.previousDocumentNo || '').trim().toUpperCase(),
     previousTransactionRefNo: String(document.previousTransactionRefNo || '').trim(),
+    previousRedemption,
     financingDate,
     maturityDate,
     paymentTermMonths,
     marhunItems,
     marhunValue: marhunItems.length ? marhunSummary.value : roundMoney(document.marhunValue),
+    margin: Math.max(0, Math.min(100, roundMoney(document.margin))),
+    feeRate: Math.max(0, roundMoney(document.feeRate)),
+    feeBasis: normalizeSagFeeBasis(document.feeBasis),
+    projectedProfit: calculateSagProjectedProfit(pledgeType, purchasePrice, previousRedemption, totalProfit),
     purchasePrice,
     totalProfit,
     sellingPrice: roundMoney(purchasePrice + totalProfit),
@@ -451,6 +537,119 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
       totalProfit,
       paymentTermMonths
     })
+  };
+};
+
+/** Medan lejar SAG (modul transaksi) yang ditulis daripada Surat Akuan Gadaian. */
+export type SagLedgerFields = {
+  refNo: string;
+  date: string;
+  redemptionDate: string;
+  type: string;
+  institution: string;
+  weight: number;
+  purity: string;
+  marhunPrice: number;
+  margin: number;
+  marhunValue: number;
+  loan: number;
+  fee: number;
+  /** Kadar upah simpan (% sebulan) dan asas kiraannya. */
+  feeRate: number;
+  feeBasis: SagFeeBasis;
+  /** Unjuran lebihan tunai untuk surat susulan. */
+  profit: number;
+  redemption: number;
+  feeTermMonths: number;
+  transactionStatus: string;
+  selectedAssetIds: (string | number)[];
+  remarks: string;
+};
+
+/**
+ * Terjemah Surat Akuan Gadaian kepada medan lejar SAG supaya surat menjadi
+ * rekod master dan lejar menyimpan angka yang sama. Medan khusus lejar
+ * (feeRate, feeBasis, profit, status, lampiran) tidak disentuh.
+ */
+export const buildSagLedgerFieldsFromDocument = (
+  document: SagDocument,
+  existingTransaction?: any | null
+): SagLedgerFields => {
+  const marhunItems = document.marhunItems || [];
+  const summary = summarizeSagMarhunItems(marhunItems);
+  const marhunValue = summary.value || roundMoney(document.marhunValue);
+  const weight = summary.weight;
+  const loan = roundMoney(document.purchasePrice);
+  const fee = roundMoney(document.totalProfit);
+  const pledgeType = SAG_PLEDGE_TYPES.includes(String(document.pledgeType || ''))
+    ? String(document.pledgeType)
+    : '';
+  const karatList = Array.from(new Set(marhunItems.map(item => String(item.karat || '')).filter(Boolean)));
+  const assetIds = marhunItems
+    .map(item => item.assetId)
+    .filter(value => value !== null && value !== undefined && String(value) !== '');
+  return {
+    refNo: String(existingTransaction?.refNo || document.transactionRefNo || document.documentNo || ''),
+    date: toDateOnly(document.financingDate),
+    redemptionDate: toDateOnly(document.maturityDate),
+    type: String(existingTransaction?.type || pledgeType || 'Pajakan Asal'),
+    institution: String(document.institutionName || existingTransaction?.institution || ''),
+    weight,
+    purity: karatList.join(' / ') || String(existingTransaction?.purity || ''),
+    marhunPrice: weight > 0
+      ? roundMoney(marhunValue / weight)
+      : roundMoney(marhunItems[0]?.ratePerGram || 0),
+    margin: roundMoney(document.margin) || (marhunValue > 0
+      ? roundMoney((loan / marhunValue) * 100)
+      : roundMoney(existingTransaction?.margin ?? 0)),
+    marhunValue,
+    loan,
+    fee,
+    feeRate: roundMoney(document.feeRate ?? existingTransaction?.feeRate ?? 0),
+    feeBasis: normalizeSagFeeBasis(document.feeBasis || existingTransaction?.feeBasis),
+    profit: roundMoney(document.projectedProfit ?? existingTransaction?.profit ?? 0),
+    redemption: document.previousRedemption > 0
+      ? roundMoney(document.previousRedemption)
+      : roundMoney(loan + fee),
+    feeTermMonths: Math.max(1, Number(document.paymentTermMonths) || SAG_DEFAULT_PAYMENT_TERM_MONTHS),
+    transactionStatus: pledgeType || String(existingTransaction?.transactionStatus || 'Pajakan Asal'),
+    selectedAssetIds: assetIds,
+    remarks: String(existingTransaction?.remarks || `Dijana daripada Surat Akuan Gadaian ${document.documentNo}`)
+  };
+};
+
+/**
+ * Terjemah semula perubahan lejar kepada surat supaya surat sentiasa
+ * memaparkan institusi, tarikh, nilai dan status pajakan terkini.
+ */
+export const buildSagDocumentPatchFromLedger = (
+  document: SagDocument,
+  transaction: any
+): Partial<SagDocument> => {
+  const ledgerPledgeType = resolveSagPledgeType(transaction);
+  // 'Lain-lain' ialah nilai sandaran: jangan timpa jenis pajakan yang sudah ditetapkan pada surat.
+  const resolvedPledgeType = ledgerPledgeType && ledgerPledgeType !== 'Lain-lain' && SAG_PLEDGE_TYPES.includes(ledgerPledgeType)
+    ? ledgerPledgeType
+    : document.pledgeType;
+  return {
+    transactionId: transaction?.id ?? document.transactionId ?? null,
+    transactionRefNo: String(transaction?.refNo || document.transactionRefNo || ''),
+    institutionName: String(transaction?.institution || document.institutionName || ''),
+    financingDate: toDateOnly(transaction?.date) || document.financingDate,
+    maturityDate: toDateOnly(transaction?.redemptionDate) || document.maturityDate,
+    purchasePrice: roundMoney(transaction?.loan ?? document.purchasePrice),
+    totalProfit: roundMoney(transaction?.fee ?? document.totalProfit),
+    marhunValue: roundMoney(transaction?.marhunValue ?? document.marhunValue),
+    margin: roundMoney(transaction?.margin ?? document.margin),
+    feeRate: roundMoney(transaction?.feeRate ?? document.feeRate),
+    feeBasis: transaction?.feeBasis !== undefined && transaction?.feeBasis !== null
+      ? normalizeSagFeeBasis(transaction.feeBasis)
+      : document.feeBasis,
+    previousRedemption: resolvedPledgeType === 'Pajakan Asal'
+      ? document.previousRedemption
+      : roundMoney(transaction?.redemption ?? document.previousRedemption),
+    pledgeType: resolvedPledgeType,
+    pledgeStatus: resolveSagPledgeStatus(transaction)
   };
 };
 
@@ -543,6 +742,9 @@ export const buildSagDocumentDraft = ({
     pledgeStatus: resolveSagPledgeStatus(transaction),
     previousDocumentNo: String(previousDocument?.documentNo || ''),
     previousTransactionRefNo: String(previousDocument?.transactionRefNo || transaction?.parentRefNo || ''),
+    previousRedemption: roundMoney(
+      previousDocument?.sellingPrice ?? transaction?.redemption ?? 0
+    ),
     financingDate,
     maturityDate: maturityDate || addMonthsToDateOnly(financingDate, SAG_DEFAULT_PAYMENT_TERM_MONTHS * 3),
     paymentDueOverride: '',
@@ -551,6 +753,9 @@ export const buildSagDocumentDraft = ({
       : SAG_DEFAULT_PAYMENT_TERM_MONTHS,
     member: mergeSagMemberContact(member),
     marhunValue: linkedItems.length ? marhunValueFromAssets : fallbackMarhunValue,
+    margin: roundMoney(transaction?.margin ?? institution?.maxMargin ?? 0),
+    feeRate: roundMoney(transaction?.feeRate ?? 0),
+    feeBasis: normalizeSagFeeBasis(transaction?.feeBasis),
     purchasePrice,
     totalProfit,
     sellingPrice: roundMoney(purchasePrice + totalProfit),
@@ -593,6 +798,7 @@ export const createEmptySagDocument = (
     pledgeStatus: 'Aktif',
     previousDocumentNo: '',
     previousTransactionRefNo: '',
+    previousRedemption: 0,
     financingDate,
     maturityDate: addMonthsToDateOnly(financingDate, SAG_DEFAULT_PAYMENT_TERM_MONTHS * 3),
     paymentDueOverride: '',
@@ -608,6 +814,9 @@ export const createEmptySagDocument = (
       poBox: ''
     },
     marhunValue: 0,
+    margin: 0,
+    feeRate: 0,
+    feeBasis: '' as SagFeeBasis,
     purchasePrice: 0,
     totalProfit: 0,
     sellingPrice: 0,

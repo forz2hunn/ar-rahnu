@@ -80,8 +80,11 @@ import { buildGoldForecast, getMalaysiaDateKey, type GoldPriceSnapshot } from '.
 import {
   SAG_DEFAULT_SETTINGS,
   buildSagDocumentDraft,
+  buildSagDocumentPatchFromLedger,
+  buildSagLedgerFieldsFromDocument,
   createEmptySagDocument,
   normalizeSagDocument,
+  resolveSagPledgeStatus,
   type SagDocument,
   type SagLetterhead,
   type SagMemberSnapshot,
@@ -2580,6 +2583,25 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     });
   }, [isDataReady, profilePhotoPath, recordActor, user.id]);
 
+  // Status pajakan setiap surat menjejaki status rekod lejar yang dipautkan, termasuk
+  // tindakan TS/TKS/Lelong yang direkodkan melalui aliran pembetulan lejar.
+  useEffect(() => {
+    if (!isDataReady) return;
+    setSagDocuments(previous => {
+      let changed = false;
+      const next = previous.map(document => {
+        if (document.deletedAt || !document.transactionId) return document;
+        const transaction = transactions.find(item => String(item.id) === String(document.transactionId));
+        if (!transaction) return document;
+        const nextStatus = resolveSagPledgeStatus(transaction);
+        if (document.pledgeStatus === nextStatus) return document;
+        changed = true;
+        return { ...document, pledgeStatus: nextStatus };
+      });
+      return changed ? next : previous;
+    });
+  }, [isDataReady, transactions]);
+
   const runUserAdminAction = async (body, successMessage) => {
     setUserManagementBusy(true);
     setUserManagementError('');
@@ -3559,6 +3581,24 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     if (sagFilter === 'ready') return sagAiIndicators.filter(i => (i.readinessScore ?? 0) >= 80);
     return sagAiIndicators;
   }, [sagAiIndicators, sagFilter]);
+
+  // Penunjuk AI/analitik lejar dipetakan mengikut id transaksi supaya modul surat
+  // memaparkan unjuran yang sama tanpa mengira semula.
+  const sagLetterIndicators = useMemo(() => {
+    const map: Record<string, { presumption: string; readinessScore: number | null; prediction: string | null }> = {};
+    sagAiIndicators.forEach(indicator => {
+      const transactionId = indicator?.transaction?.id;
+      if (transactionId === undefined || transactionId === null) return;
+      map[String(transactionId)] = {
+        presumption: String(indicator.presumption || ''),
+        readinessScore: indicator.readinessScore === null || indicator.readinessScore === undefined
+          ? null
+          : Number(indicator.readinessScore),
+        prediction: indicator.prediction ? String(indicator.prediction) : null
+      };
+    });
+    return map;
+  }, [sagAiIndicators]);
   const selectedScenarioTransaction = activePortfolioTransactions.find(
     transaction => String(transaction.id) === String(scenarioTransactionId)
   ) || activePortfolioTransactions[0] || null;
@@ -3815,7 +3855,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     }));
   };
 
-  const handleFollowUpSagDocument = (document: SagDocument) => {
+  /**
+   * Tindakan susulan lejar (TS/TKS/US/Lelong) dimulakan daripada surat, supaya modul
+   * surat menjadi pintu masuk tunggal tanpa menduplikasi borang pembetulan lejar.
+   */
+  const handleSagCorrection = (document: SagDocument, action: 'TS' | 'TKS' | 'US' | 'Lelong') => {
     const transaction = visibleTransactions.find(item => String(item.id) === String(document.transactionId));
     if (!transaction) {
       setToastMessage('Rekod SAG yang dipautkan tidak lagi tersedia. Kemaskini pautan transaksi surat ini.');
@@ -3828,14 +3872,66 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return;
     }
     setSagPreviewDocument(null);
-    handleOpenCorrection(transaction);
+    handleOpenCorrection(transaction, action);
+  };
+
+  /**
+   * Surat Akuan Gadaian ialah rekod master pajakan: setiap kali surat disimpan,
+   * rekod lejar SAG (modul lama) ditulis atau dikemas kini supaya kedua-dua modul
+   * memaparkan angka, tarikh dan status pajakan yang sama.
+   */
+  const syncSagDocumentToLedger = (document: SagDocument, savedAt: string) => {
+    const existingTransaction = transactions.find(transaction =>
+      isRecordVisible(transaction) && (
+        String(transaction.id) === String(document.transactionId) ||
+        (!document.transactionId && document.transactionRefNo &&
+          String(transaction.refNo || '') === String(document.transactionRefNo))
+      )
+    ) || null;
+    const ledgerFields = buildSagLedgerFieldsFromDocument(document, existingTransaction);
+    const transactionStatus = getTransactionStatus({ ...ledgerFields, transactionStatus: ledgerFields.transactionStatus });
+    if (existingTransaction) {
+      setTransactions(previous => previous.map(transaction =>
+        String(transaction.id) === String(existingTransaction.id)
+          ? {
+              ...transaction,
+              ...ledgerFields,
+              id: transaction.id,
+              status: transaction.status || 'Aktif',
+              transactionStatus,
+              sourceSagDocumentId: document.id,
+              ...auditUpdate('transaction', savedAt)
+            }
+          : transaction
+      ));
+      return { transactionId: existingTransaction.id, transactionRefNo: ledgerFields.refNo, created: false };
+    }
+    const newTransactionId = Date.now();
+    setTransactions(previous => [...previous, {
+      ...ledgerFields,
+      id: newTransactionId,
+      status: 'Aktif',
+      transactionStatus,
+      sourceSagDocumentId: document.id,
+      ...auditCreate('transaction', savedAt)
+    }]);
+    return { transactionId: newTransactionId, transactionRefNo: ledgerFields.refNo, created: true };
   };
 
   const handleSaveSagDocument = (document: SagDocument) => {
     const savedAt = new Date().toISOString();
     const isUpdate = sagDocuments.some(entry => String(entry.id) === String(document.id));
     const audit = isUpdate ? auditUpdate('sagDocument', savedAt) : auditCreate('sagDocument', savedAt);
-    const normalized = normalizeSagDocument({ ...document, ...audit } as SagDocument);
+    // Draf belum menjadi pajakan sebenar: lejar hanya ditulis apabila surat dikeluarkan
+    // (atau sudah pun dipautkan kepada rekod lejar sedia ada).
+    const shouldSyncLedger = document.status !== 'Draf' || Boolean(document.transactionId);
+    const ledger = shouldSyncLedger ? syncSagDocumentToLedger(document, savedAt) : null;
+    const normalized = normalizeSagDocument({
+      ...document,
+      transactionId: ledger ? ledger.transactionId : document.transactionId,
+      transactionRefNo: ledger ? ledger.transactionRefNo : document.transactionRefNo,
+      ...audit
+    } as SagDocument);
 
     setSagDocuments(previous => isUpdate
       ? previous.map(entry => String(entry.id) === String(document.id)
@@ -3876,6 +3972,70 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     );
     setToastMessage(`Surat Akuan Gadaian ${document.documentNo} ditandakan sebagai dipadam.`);
     setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  /**
+   * Selaraskan semua surat dengan lejar SAG: surat tanpa pautan transaksi dipautkan
+   * melalui No. rujukan, dan surat yang belum mempunyai rekod lejar akan mencipta
+   * satu rekod transaksi daripada kandungan surat (rekod sedia ada tidak disentuh).
+   */
+  const handleSyncSagLedger = () => {
+    const savedAt = new Date().toISOString();
+    const ledger = [...transactions];
+    let created = 0;
+    let linked = 0;
+    let alreadySynced = 0;
+    const nextDocuments = sagDocuments.map(document => {
+      if (document.deletedAt) return document;
+      const linkedTransaction = ledger.find(transaction =>
+        isRecordVisible(transaction) && String(transaction.id) === String(document.transactionId)
+      );
+      if (linkedTransaction) {
+        alreadySynced += 1;
+        return document;
+      }
+      const matchedByRef = document.transactionRefNo
+        ? ledger.find(transaction =>
+            isRecordVisible(transaction) && String(transaction.refNo || '') === String(document.transactionRefNo)
+          )
+        : null;
+      if (matchedByRef) {
+        linked += 1;
+        return normalizeSagDocument({
+          ...document,
+          ...buildSagDocumentPatchFromLedger(document, matchedByRef),
+          ...auditUpdate('sagDocument', savedAt)
+        } as SagDocument);
+      }
+      if (document.status === 'Draf') {
+        alreadySynced += 1;
+        return document;
+      }
+      const ledgerFields = buildSagLedgerFieldsFromDocument(document, null);
+      const newTransactionId = Date.now() + created;
+      ledger.push({
+        ...ledgerFields,
+        id: newTransactionId,
+        status: 'Aktif',
+        transactionStatus: getTransactionStatus({ ...ledgerFields, transactionStatus: ledgerFields.transactionStatus }),
+        sourceSagDocumentId: document.id,
+        ...auditCreate('transaction', savedAt)
+      });
+      created += 1;
+      return normalizeSagDocument({
+        ...document,
+        transactionId: newTransactionId,
+        transactionRefNo: ledgerFields.refNo,
+        ...auditUpdate('sagDocument', savedAt)
+      } as SagDocument);
+    });
+
+    if (created) setTransactions(ledger);
+    setSagDocuments(nextDocuments);
+    setToastMessage(
+      `Penyelarasan lejar SAG selesai: ${created} transaksi baharu dicipta, ${linked} surat dipautkan melalui No. rujukan, ${alreadySynced} surat sudah selari.`
+    );
+    setTimeout(() => setToastMessage(null), 7000);
   };
 
   const handleSaveSagSettings = (settings: SagModuleSettings) => {
@@ -4406,20 +4566,31 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     const selectedAssetIds = !updatedTx.type.includes('Tebus') ? (updatedTx.selectedAssetIds || []) : [];
     const { selectedAssetId, ...transactionData } = updatedTx;
     const transactionStatus = getTransactionStatus({ ...transactionData, transactionStatus: undefined });
+    const nextTransaction = {
+      ...transactionData,
+      id: editingTransaction.id,
+      status: editingTransaction.status,
+      ...audit,
+      transactionStatus,
+      selectedAssetIds
+    };
 
     setTransactions(prev => prev.map(transaction =>
       transaction.id === editingTransaction.id
-        ? {
-            ...transaction,
-            ...transactionData,
-            id: transaction.id,
-            status: transaction.status,
-            ...audit,
-            transactionStatus,
-            selectedAssetIds
-          }
+        ? { ...transaction, ...nextTransaction }
         : transaction
     ));
+
+    // Surat Akuan Gadaian yang dipautkan disegerakkan semula supaya angka dan status sama.
+    setSagDocuments(prev => prev.map(entry => {
+      if (entry.deletedAt || String(entry.transactionId) !== String(editingTransaction.id)) return entry;
+      return normalizeSagDocument({
+        ...entry,
+        ...buildSagDocumentPatchFromLedger(entry, nextTransaction),
+        ...auditUpdate('sagDocument', updatedAt)
+      } as SagDocument);
+    }));
+
     setToastMessage(`Transaksi #${updatedTx.refNo} berjaya dikemaskini!`);
     setIsModalOpen(false);
     setEditingTransaction(null);
@@ -5231,7 +5402,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           <th className="px-4 py-3 font-bold">Peranan</th>
                           <th className="px-4 py-3 font-bold">Status</th>
                           <th className="px-4 py-3 text-center font-bold">Surat Akuan</th>
-                          <th className="px-4 py-3 text-center font-bold">Tindakan</th>
+                          <th className="px-2 py-3 text-center font-bold">Tindakan</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
@@ -5304,23 +5475,25 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 <span className="text-slate-300">-</span>
                               )}
                             </td>
-                            <td className="px-4 py-3 text-center" onClick={event => event.stopPropagation()}>
-                              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                            <td className="px-2 py-3 text-center" onClick={event => event.stopPropagation()}>
+                              <div role="group" aria-label="Tindakan ahli" className="inline-flex items-center gap-1">
                                 <button
                                   type="button"
                                   onClick={() => void handleOpenMemberProfile(member.id)}
-                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-corporate-teal-200 hover:bg-corporate-teal-50 hover:text-corporate-teal-700"
+                                  title="Lihat profil ahli"
                                   aria-label={`Lihat profil ${member.registry?.fullName || member.email || 'ahli'}`}
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition-colors hover:border-corporate-teal-300 hover:bg-corporate-teal-50 hover:text-corporate-teal-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500 focus-visible:ring-offset-1"
                                 >
-                                  <UserRound size={13} /> Profil
+                                  <UserRound size={15} />
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => setEditingMember(member)}
-                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+                                  title="Kemaskini maklumat ahli"
                                   aria-label={`Kemaskini nama, IC dan no. keahlian ${member.email || ''}`}
+                                  className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition-colors hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-1"
                                 >
-                                  <Pencil size={13} /> Kemaskini
+                                  <Pencil size={15} />
                                 </button>
                               </div>
                             </td>
@@ -5586,9 +5759,26 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           )}
 
           {activeTab === 'users' && canManageOrganizationUsers && (() => {
+            const registryByUserId = new Map(memberRegistry.map(entry => [String(entry.userId), entry]));
+            /**
+             * Akaun pengguna dipautkan dengan rekod keahlian/profil ahli supaya nama penuh,
+             * No. Keahlian dan gambar profil dipaparkan di sini, bukan hanya e-mel akaun.
+             */
+            const describeMember = (member: any) => {
+              const registryEntry = registryByUserId.get(String(member?.id));
+              return {
+                registryEntry,
+                fullName: String(registryEntry?.fullName || member?.fullName || ''),
+                memberNo: String(registryEntry?.memberNo || member?.memberNo || ''),
+                photoPath: String(member?.avatarPhotoPath || registryEntry?.photoPath || '')
+              };
+            };
             const filteredUsers = organizationUsers.filter(member => {
+              const identity = describeMember(member);
+              const haystack = [member.email, identity.fullName, identity.memberNo, member.id]
+                .map(value => String(value || '').toLowerCase());
               const matchesSearch = !userSearchTerm.trim() ||
-                (member.email || '').toLowerCase().includes(userSearchTerm.toLowerCase().trim());
+                haystack.some(value => value.includes(userSearchTerm.toLowerCase().trim()));
               const matchesRole = userRoleFilter === 'ALL' || member.role === userRoleFilter;
               const matchesStatus = userStatusFilter === 'ALL' ||
                 (userStatusFilter === 'active' && member.active) ||
@@ -5811,7 +6001,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             type="text"
                             value={userSearchTerm}
                             onChange={e => { setUserSearchTerm(e.target.value); setUserPage(1); }}
-                            placeholder="Cari e-mel atau ID pengguna..."
+                            placeholder="Cari nama, e-mel atau no. keahlian..."
                             className="w-full pl-9 pr-3 py-2 text-xs sm:text-sm rounded-xl border border-slate-200 outline-none focus:border-corporate-teal-500 focus:ring-2 focus:ring-corporate-teal-500/20"
                           />
                           {userSearchTerm && (
@@ -5882,26 +6072,42 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             {paginatedUsers.map(member => {
                               const isCurrentUser = member.id === user.id;
                               const initials = (member.email || 'AR').slice(0, 2).toUpperCase();
+                              const identity = describeMember(member);
+                              const displayName = identity.fullName || member.email || 'Pengguna';
+                              const roleAvatarClass = member.role === 'Admin'
+                                ? 'bg-gradient-to-br from-corporate-magenta-600 to-corporate-magenta-800'
+                                : member.role === 'Manager'
+                                  ? 'bg-gradient-to-br from-corporate-teal-600 to-corporate-teal-800'
+                                  : 'bg-gradient-to-br from-slate-600 to-slate-800';
 
                               return (
                                 <tr key={member.id} className="hover:bg-slate-50/70 transition-colors">
                                   {/* User & Email */}
                                   <td className="p-4 sm:px-6">
                                     <div className="flex items-center gap-3">
-                                      <div className={`h-10 w-10 shrink-0 rounded-2xl flex items-center justify-center font-black text-xs text-white shadow-sm ${
-                                        member.role === 'Admin'
-                                          ? 'bg-gradient-to-br from-corporate-magenta-600 to-corporate-magenta-800'
-                                          : member.role === 'Manager'
-                                            ? 'bg-gradient-to-br from-corporate-teal-600 to-corporate-teal-800'
-                                            : 'bg-gradient-to-br from-slate-600 to-slate-800'
-                                      }`}>
-                                        {initials}
-                                      </div>
+                                      <MemberAvatar
+                                        userId={String(member.id)}
+                                        path={identity.photoPath}
+                                        label={displayName}
+                                        supabaseClient={supabaseClient}
+                                        size="h-10 w-10"
+                                        roundedClass="rounded-2xl"
+                                        fallback={
+                                          <div className={`h-10 w-10 shrink-0 rounded-2xl flex items-center justify-center font-black text-xs text-white shadow-sm ${roleAvatarClass}`}>
+                                            {initials}
+                                          </div>
+                                        }
+                                      />
                                       <div className="min-w-0">
                                         <div className="flex items-center gap-1.5 flex-wrap">
                                           <p className="font-bold text-slate-800 text-sm truncate max-w-xs sm:max-w-sm">
-                                            {member.email || 'E-mel tidak tersedia'}
+                                            {displayName}
                                           </p>
+                                          {identity.memberNo && (
+                                            <span className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-800">
+                                              {identity.memberNo}
+                                            </span>
+                                          )}
                                           {isCurrentUser && (
                                             <span className="rounded-full bg-corporate-teal-100 px-2 py-0.5 text-[10px] font-bold text-corporate-teal-800">
                                               Akaun Anda
@@ -5913,7 +6119,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                             </span>
                                           )}
                                         </div>
-                                        <p className="text-[11px] text-slate-400 font-mono mt-0.5">
+                                        <p className="text-[11px] text-slate-500 truncate max-w-xs sm:max-w-sm">
+                                          {member.email || 'E-mel tidak tersedia'}
+                                        </p>
+                                        <p className="text-[10px] text-slate-400 font-mono mt-0.5">
                                           ID: {member.id.slice(0, 8)}...
                                         </p>
                                       </div>
@@ -6032,6 +6241,16 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                   {/* Actions */}
                                   <td className="p-4 text-center">
                                     <div className="flex items-center justify-center gap-1">
+                                      {isOrganizationAdmin && (
+                                        <button
+                                          type="button"
+                                          onClick={() => void handleOpenMemberProfile(member.id)}
+                                          title="Lihat profil pengguna (Butiran Peribadi, Waris, Bank & PDPA)"
+                                          className="p-2 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
+                                        >
+                                          <UserRound size={15} />
+                                        </button>
+                                      )}
                                       {isOrganizationAdmin && !isCurrentUser && (
                                         <button
                                           type="button"
@@ -7964,7 +8183,9 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               onCreate={handleCreateSagDocument}
               onEdit={document => handleOpenSagDocumentForm(document)}
               onDelete={handleDeleteSagDocument}
-              onFollowUp={handleFollowUpSagDocument}
+              onCorrection={handleSagCorrection}
+              indicators={sagLetterIndicators}
+              onSyncLedger={handleSyncSagLedger}
               onOpenSettings={() => setIsSagLetterheadOpen(true)}
             />
           )}
@@ -13161,7 +13382,17 @@ function useMemberPhotoPath(supabaseClient: SupabaseClient, userId: string, hint
   return state;
 }
 
-function MemberAvatar({ path, userId, label, supabaseClient, size = 'h-9 w-9' }: { path?: string; userId?: string; label?: string; supabaseClient: SupabaseClient; size?: string }) {
+function MemberAvatar({ path, userId, label, supabaseClient, size = 'h-9 w-9', roundedClass = 'rounded-full', fallback }: {
+  path?: string;
+  userId?: string;
+  label?: string;
+  supabaseClient: SupabaseClient;
+  size?: string;
+  /** Bentuk bekas gambar (bulat untuk direktori, rounded-2xl untuk jadual pengguna). */
+  roundedClass?: string;
+  /** Elemen pilihan apabila ahli tiada gambar profil. */
+  fallback?: React.ReactNode;
+}) {
   const resolved = useMemberPhotoPath(supabaseClient, String(userId || ''), String(path || ''));
   const effectivePath = resolved.path || String(path || '');
   const image = useSignedAssetUrl(supabaseClient, effectivePath, 3600, profilePhotoBucket);
@@ -13174,23 +13405,24 @@ function MemberAvatar({ path, userId, label, supabaseClient, size = 'h-9 w-9' }:
     .toUpperCase();
 
   if (!effectivePath) {
+    if (fallback) return <>{fallback}</>;
     return (
-      <span aria-hidden="true" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-[11px] font-black text-slate-500`}>
+      <span aria-hidden="true" className={`${size} flex shrink-0 items-center justify-center ${roundedClass} border border-slate-200 bg-slate-100 text-[11px] font-black text-slate-500`}>
         {initials || <UserRound size={16} />}
       </span>
     );
   }
   if (image.path === effectivePath && image.error) {
     return (
-      <span title="Gambar profil tidak dapat dimuatkan" aria-label="Gambar profil tidak dapat dimuatkan" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-[10px] font-bold text-rose-700`}>
+      <span title="Gambar profil tidak dapat dimuatkan" aria-label="Gambar profil tidak dapat dimuatkan" className={`${size} flex shrink-0 items-center justify-center ${roundedClass} border border-rose-200 bg-rose-50 text-[10px] font-bold text-rose-700`}>
         !
       </span>
     );
   }
   if (image.path !== effectivePath || !image.url) {
-    return <span aria-label="Memuatkan gambar profil" className={`${size} shrink-0 animate-pulse rounded-full bg-slate-200`} />;
+    return <span aria-label="Memuatkan gambar profil" className={`${size} shrink-0 animate-pulse ${roundedClass} bg-slate-200`} />;
   }
-  return <img src={image.url} alt={`Gambar profil ${label || ''}`} className={`${size} shrink-0 rounded-full border border-slate-200 object-cover`} />;
+  return <img src={image.url} alt={`Gambar profil ${label || ''}`} className={`${size} shrink-0 ${roundedClass} border border-slate-200 object-cover`} />;
 }
 
 function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean; onView?: () => void }) {

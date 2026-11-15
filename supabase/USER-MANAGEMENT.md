@@ -32,6 +32,7 @@ Sign in to the app with that account after the schema and function are deployed.
 - Configure Supabase Auth email/SMTP delivery for password-reset messages.
 - Set the Auth email OTP/link expiry to `86400` seconds (24 hours) in the Supabase project's Auth email settings for password recovery.
 - Admins can edit a member's email or set a new password from the member list. Passwords are sent only to the server-side Edge Function and are never stored in the browser database.
+- The user list is linked to the member profile: each row shows the member's **profile photo** (the same image resolved for the Keahlian Ahli directory — from `avatar_photo_path` or the member's storage folder), the **full name** and **No. Keahlian** from the member registry, with the account email beneath. The search box matches name, email and membership number. The **user icon** in the actions column opens the same read-only profile viewer used in Keahlian Ahli (Butiran Peribadi & Alamat, Waris, Akaun Bank, PDPA), so an account can be inspected without leaving Pengurusan Pengguna. When a member has no photo, the initials tile coloured by role is shown instead.
 
 ## Roles
 
