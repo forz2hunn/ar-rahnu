@@ -57,6 +57,7 @@ export function SagDocumentsTab({
   onCorrection,
   indicators,
   onSyncLedger,
+  pendingLedgerCount = 0,
   onOpenSettings
 }: {
   documents: SagDocument[];
@@ -70,8 +71,10 @@ export function SagDocumentsTab({
   onCorrection?: (document: SagDocument, action: SagCorrectionAction) => void;
   /** Penunjuk AI/analitik lejar (dikunci mengikut id transaksi) untuk setiap surat. */
   indicators?: Record<string, SagLetterIndicator>;
-  /** Selaraskan surat dengan lejar SAG (modul lama) semasa peralihan. */
+  /** Import rekod lejar SAG yang belum mempunyai surat + selaraskan kedua-dua modul. */
   onSyncLedger?: () => void;
+  /** Bilangan rekod lejar SAG yang belum mempunyai Surat Akuan Gadaian. */
+  pendingLedgerCount?: number;
   onOpenSettings: () => void;
 }) {
   const [query, setQuery] = useState('');
@@ -165,11 +168,20 @@ export function SagDocumentsTab({
               <button
                 type="button"
                 onClick={onSyncLedger}
-                title="Selaraskan setiap surat dengan lejar SAG (modul Pengurusan Surat Gadaian)"
+                title={
+                  pendingLedgerCount > 0
+                    ? `Import ${pendingLedgerCount} rekod lejar SAG yang belum mempunyai surat dan selaraskan kedua-dua modul`
+                    : 'Import rekod lejar SAG yang belum mempunyai surat dan selaraskan kedua-dua modul'
+                }
                 className="inline-flex items-center gap-2 rounded-xl border border-white/15 bg-white/10 px-3.5 py-2 text-xs font-semibold text-white backdrop-blur-md transition-all hover:bg-white/20 active:scale-95 sm:text-sm"
               >
                 <ArrowRightLeft size={15} />
-                <span>Segerak Lejar</span>
+                <span>Segerak / Import Lejar</span>
+                {pendingLedgerCount > 0 && (
+                  <span className="rounded-full bg-amber-400 px-1.5 py-0.5 text-[10px] font-black text-amber-950">
+                    {pendingLedgerCount}
+                  </span>
+                )}
               </button>
             )}
             {canManage && (
@@ -441,9 +453,26 @@ export function SagDocumentsTab({
                 <tr>
                   <td colSpan={9} className="px-6 py-10 text-center text-slate-500">
                     <FileText size={26} className="mx-auto mb-2 text-slate-300" />
-                    {visibleDocuments.length === 0
-                      ? 'Belum ada Surat Akuan Gadaian. Tekan "Tambah Surat Akuan" untuk menjana surat pertama.'
-                      : 'Tiada surat akuan sepadan dengan tapisan yang dipilih.'}
+                    {visibleDocuments.length === 0 ? (
+                      <div className="space-y-3">
+                        <p>
+                          Belum ada Surat Akuan Gadaian.
+                          {pendingLedgerCount > 0
+                            ? ` Terdapat ${pendingLedgerCount} rekod SAG dalam lejar Pengurusan Surat Gadaian yang belum dijadikan surat.`
+                            : ' Tekan "Tambah Surat Akuan" untuk menjana surat pertama.'}
+                        </p>
+                        {canManage && onSyncLedger && pendingLedgerCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={onSyncLedger}
+                            className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition-all hover:bg-emerald-500 active:scale-95"
+                          >
+                            <ArrowRightLeft size={15} />
+                            Import {pendingLedgerCount} Rekod Lejar SAG
+                          </button>
+                        )}
+                      </div>
+                    ) : 'Tiada surat akuan sepadan dengan tapisan yang dipilih.'}
                   </td>
                 </tr>
               )}

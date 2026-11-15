@@ -839,6 +839,65 @@ export const createEmptySagDocument = (
   } as SagDocument);
 };
 
+export type SagDocumentFromLedgerInput = {
+  transaction: any;
+  institution?: any;
+  assets?: any[];
+  member?: Partial<SagMemberSnapshot> | null;
+  letterhead: SagLetterhead;
+  existingNumbers?: string[];
+  status?: SagDocumentStatus;
+  copyType?: SagCopyType;
+  now?: string;
+};
+
+/**
+ * Bina Surat Akuan Gadaian daripada rekod lejar SAG (modul Pengurusan Surat Gadaian).
+ * Rekod lejar lama tidak mempunyai surat, jadi surat dijana sebagai rekod
+ * `Dikeluarkan` yang sudah dipautkan kepada transaksi asal supaya senarai surat
+ * akuan sentiasa mencerminkan lejar sebenar.
+ */
+export const buildSagDocumentFromLedger = ({
+  transaction,
+  institution,
+  assets = [],
+  member = null,
+  letterhead,
+  existingNumbers = [],
+  status = 'Dikeluarkan',
+  copyType = 'Salinan Pelanggan',
+  now = new Date().toISOString()
+}: SagDocumentFromLedgerInput): SagDocument => {
+  const draft = buildSagDocumentDraft({
+    transaction,
+    institution,
+    assets,
+    member,
+    letterhead,
+    existingNumbers,
+    copyType,
+    now
+  });
+  const pledgeType = resolveSagPledgeType(transaction);
+  return normalizeSagDocument({
+    ...draft,
+    id: `ledger-${transaction?.id ?? now}`,
+    status,
+    copyType,
+    pledgeType,
+    pledgeStatus: resolveSagPledgeStatus(transaction),
+    transactionId: transaction?.id ?? null,
+    transactionRefNo: String(transaction?.refNo || draft.transactionRefNo || ''),
+    // Rekod lejar tidak menyimpan surat terdahulu: tebusan hanya relevan untuk surat susulan.
+    previousRedemption: pledgeType === 'Pajakan Asal' ? 0 : draft.previousRedemption,
+    remarks: draft.remarks || 'Diimport daripada lejar SAG',
+    recordType: 'sagDocument',
+    lastAction: 'CREATE',
+    createdAt: draft.createdAt || now,
+    updatedAt: now
+  } as SagDocument);
+};
+
 export const validateSagDocument = (document: SagDocument): string[] => {
   const errors: string[] = [];
   if (!String(document.documentNo || '').trim()) errors.push('No. SAG wajib diisi.');

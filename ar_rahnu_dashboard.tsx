@@ -80,6 +80,7 @@ import { buildGoldForecast, getMalaysiaDateKey, type GoldPriceSnapshot } from '.
 import {
   SAG_DEFAULT_SETTINGS,
   buildSagDocumentDraft,
+  buildSagDocumentFromLedger,
   buildSagDocumentPatchFromLedger,
   buildSagLedgerFieldsFromDocument,
   createEmptySagDocument,
@@ -2928,6 +2929,28 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     return permissions?.sag_delete === true;
   }, [organizationMembership, rolePermissions]);
 
+  /**
+   * Rekod lejar SAG (modul Pengurusan Surat Gadaian) yang belum mempunyai
+   * Surat Akuan Gadaian. Kiraan ini dipaparkan pada modul surat supaya rekod
+   * lejar lama tidak terus "hilang" daripada senarai surat.
+   */
+  const pendingSagLedgerCount = useMemo(() => {
+    const activeDocuments = sagDocuments.filter(document => !document.deletedAt);
+    const linkedTransactionIds = new Set(
+      activeDocuments.map(document => String(document.transactionId ?? '')).filter(Boolean)
+    );
+    const linkedRefs = new Set(
+      activeDocuments.map(document => String(document.transactionRefNo || '').trim()).filter(Boolean)
+    );
+    return visibleTransactions.filter(transaction => {
+      const transactionId = String(transaction.id ?? '');
+      if (transactionId && linkedTransactionIds.has(transactionId)) return false;
+      const refNo = String(transaction.refNo || '').trim();
+      if (refNo && linkedRefs.has(refNo)) return false;
+      return true;
+    }).length;
+  }, [sagDocuments, visibleTransactions]);
+
   const resolveTransactionAssets = (transaction: any) =>
     getTransactionAssetIds(transaction)
       .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
@@ -3975,24 +3998,38 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   /**
-   * Selaraskan semua surat dengan lejar SAG: surat tanpa pautan transaksi dipautkan
-   * melalui No. rujukan, dan surat yang belum mempunyai rekod lejar akan mencipta
-   * satu rekod transaksi daripada kandungan surat (rekod sedia ada tidak disentuh).
+   * Selaraskan modul Surat Akuan Gadaian dengan lejar SAG (modul Pengurusan Surat
+   * Gadaian) secara dua hala:
+   * 1. Surat yang dipautkan dikemas kini dengan angka lejar terkini.
+   * 2. Surat tanpa pautan dipautkan melalui No. rujukan.
+   * 3. Surat `Dikeluarkan` yang belum mempunyai rekod lejar mencipta rekod lejar.
+   * 4. Rekod lejar yang belum mempunyai surat diimport menjadi Surat Akuan Gadaian
+   *    supaya senarai surat tidak lagi kosong apabila lejar sudah berisi.
    */
   const handleSyncSagLedger = () => {
     const savedAt = new Date().toISOString();
     const ledger = [...transactions];
-    let created = 0;
+    let createdLedgerRecords = 0;
     let linked = 0;
+    let refreshed = 0;
     let alreadySynced = 0;
-    const nextDocuments = sagDocuments.map(document => {
+
+    const syncedDocuments = sagDocuments.map(document => {
       if (document.deletedAt) return document;
       const linkedTransaction = ledger.find(transaction =>
         isRecordVisible(transaction) && String(transaction.id) === String(document.transactionId)
       );
       if (linkedTransaction) {
-        alreadySynced += 1;
-        return document;
+        const refreshedDocument = normalizeSagDocument({
+          ...document,
+          ...buildSagDocumentPatchFromLedger(document, linkedTransaction)
+        } as SagDocument);
+        if (JSON.stringify(refreshedDocument) === JSON.stringify(document)) {
+          alreadySynced += 1;
+          return document;
+        }
+        refreshed += 1;
+        return { ...refreshedDocument, ...auditUpdate('sagDocument', savedAt) };
       }
       const matchedByRef = document.transactionRefNo
         ? ledger.find(transaction =>
@@ -4012,7 +4049,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         return document;
       }
       const ledgerFields = buildSagLedgerFieldsFromDocument(document, null);
-      const newTransactionId = Date.now() + created;
+      const newTransactionId = Date.now() + createdLedgerRecords;
       ledger.push({
         ...ledgerFields,
         id: newTransactionId,
@@ -4021,7 +4058,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         sourceSagDocumentId: document.id,
         ...auditCreate('transaction', savedAt)
       });
-      created += 1;
+      createdLedgerRecords += 1;
       return normalizeSagDocument({
         ...document,
         transactionId: newTransactionId,
@@ -4030,12 +4067,46 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       } as SagDocument);
     });
 
-    if (created) setTransactions(ledger);
-    setSagDocuments(nextDocuments);
-    setToastMessage(
-      `Penyelarasan lejar SAG selesai: ${created} transaksi baharu dicipta, ${linked} surat dipautkan melalui No. rujukan, ${alreadySynced} surat sudah selari.`
+    // Import rekod lejar yang belum mempunyai surat (punca utama senarai surat kosong).
+    const activeDocuments = syncedDocuments.filter(document => !document.deletedAt);
+    const knownTransactionIds = new Set(
+      activeDocuments.map(document => String(document.transactionId ?? '')).filter(Boolean)
     );
-    setTimeout(() => setToastMessage(null), 7000);
+    const knownRefs = new Set(
+      activeDocuments.map(document => String(document.transactionRefNo || '').trim()).filter(Boolean)
+    );
+    const knownNumbers = activeDocuments.map(document => document.documentNo).filter(Boolean);
+    const importedDocuments: SagDocument[] = [];
+    ledger.forEach(transaction => {
+      if (!isRecordVisible(transaction)) return;
+      const transactionId = String(transaction.id ?? '');
+      if (transactionId && knownTransactionIds.has(transactionId)) return;
+      const refNo = String(transaction.refNo || '').trim();
+      if (refNo && knownRefs.has(refNo)) return;
+      const institution = visibleInstitutions.find(item => item.name === transaction.institution);
+      const document = buildSagDocumentFromLedger({
+        transaction,
+        institution,
+        assets: resolveTransactionAssets(transaction),
+        member: null,
+        letterhead: sagLetterhead,
+        existingNumbers: knownNumbers,
+        now: savedAt
+      });
+      knownNumbers.push(document.documentNo);
+      if (transactionId) knownTransactionIds.add(transactionId);
+      if (document.transactionRefNo) knownRefs.add(document.transactionRefNo);
+      importedDocuments.push(document);
+    });
+
+    if (createdLedgerRecords) setTransactions(ledger);
+    setSagDocuments([...syncedDocuments, ...importedDocuments]);
+    setToastMessage(
+      `Penyelarasan lejar SAG selesai: ${importedDocuments.length} rekod lejar diimport menjadi surat, ` +
+      `${createdLedgerRecords} rekod lejar dicipta, ${linked} surat dipautkan melalui No. rujukan, ` +
+      `${refreshed} surat dikemas kini, ${alreadySynced} surat sudah selari.`
+    );
+    setTimeout(() => setToastMessage(null), 8000);
   };
 
   const handleSaveSagSettings = (settings: SagModuleSettings) => {
@@ -8186,6 +8257,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               onCorrection={handleSagCorrection}
               indicators={sagLetterIndicators}
               onSyncLedger={handleSyncSagLedger}
+              pendingLedgerCount={pendingSagLedgerCount}
               onOpenSettings={() => setIsSagLetterheadOpen(true)}
             />
           )}
