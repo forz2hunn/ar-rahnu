@@ -184,7 +184,7 @@ Deno.serve(async (request) => {
     const isDeleteAction = action === 'delete-user';
 
     if (!isAdmin && action !== 'list' && !isDeleteAction) {
-      return jsonResponse({ error: 'Hanya Admin boleh menambah pengguna atau mengubah maklumat, peranan dan akses.' }, 403);
+      return jsonResponse({ error: 'Hanya Admin boleh menambah pengguna, mengubah maklumat, melihat profil ahli, atau mengubah peranan dan akses.' }, 403);
     }
 
     if (action === 'list') {
@@ -212,6 +212,7 @@ Deno.serve(async (request) => {
           });
           continue;
         }
+        const userMetadata = (data.user?.user_metadata || {}) as Record<string, unknown>;
         users.push({
           id: member.user_id,
           email: data.user?.email || '',
@@ -221,9 +222,67 @@ Deno.serve(async (request) => {
           createdAt: member.created_at,
           lastSignInAt: data.user?.last_sign_in_at || null,
           emailConfirmedAt: data.user?.email_confirmed_at || null,
+          // Profil keahlian disimpan dalam metadata akaun; dihantar supaya direktori
+          // ahli boleh dipulihkan walaupun daftar keahlian portfolio kosong.
+          fullName: String(userMetadata.full_name || userMetadata.name || ''),
+          icNumber: String(userMetadata.ic_number || ''),
+          memberNo: String(userMetadata.member_no || ''),
+          avatarPhotoPath: String(userMetadata.avatar_photo_path || '')
         });
       }
       return jsonResponse({ users });
+    }
+
+    if (action === 'get-member-profile') {
+      const userId = String(body.userId || '');
+      if (!userId) {
+        return jsonResponse({ error: 'Pengguna tidak sah.' }, 400);
+      }
+
+      const { data: target, error: targetError } = await adminClient
+        .from('ar_rahnu_organization_members')
+        .select('user_id, role, active, created_at')
+        .eq('organization_id', organizationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target) return jsonResponse({ error: 'Pengguna tidak ditemui dalam organisasi.' }, 404);
+
+      const { data: targetUser, error: targetUserError } = await adminClient.auth.admin.getUserById(userId);
+      if (targetUserError) throw targetUserError;
+      const metadata = (targetUser.user?.user_metadata || {}) as Record<string, unknown>;
+      const read = (key: string) => String(metadata[key] ?? '').trim();
+
+      await recordAuthAuditEvent('VIEW_MEMBER_PROFILE', userId, null, {
+        viewed_fields: ['personal', 'address', 'heir', 'bank', 'pdpa', 'avatar_photo_path']
+      });
+
+      return jsonResponse({
+        profile: {
+          id: userId,
+          email: targetUser.user?.email || '',
+          role: target.role,
+          active: target.active,
+          memberSince: target.created_at || null,
+          lastSignInAt: targetUser.user?.last_sign_in_at || null,
+          fullName: read('full_name') || read('name'),
+          icNumber: read('ic_number'),
+          memberNo: read('member_no'),
+          phone: read('phone'),
+          addressLine: read('address_line'),
+          city: read('city'),
+          postcode: read('postcode'),
+          state: read('state'),
+          heirName: read('heir_name'),
+          heirRelationship: read('heir_relationship'),
+          heirPhone: read('heir_phone'),
+          bankName: read('bank_name'),
+          bankAccountName: read('bank_account_name'),
+          bankAccountNumber: read('bank_account_number'),
+          pdpaConsentAt: read('pdpa_consent_at'),
+          avatarPhotoPath: read('avatar_photo_path')
+        }
+      });
     }
 
     if (action === 'invite') {
@@ -410,6 +469,43 @@ Deno.serve(async (request) => {
         member_no: memberNo || previousMetadata.member_no || null,
       });
       return jsonResponse({ updated: true, memberNo: memberNo || previousMetadata.member_no || null });
+    }
+
+    if (action === 'update-member-photo') {
+      const userId = String(body.userId || '');
+      const avatarPath = body.avatarPath ? String(body.avatarPath) : '';
+      if (!userId) {
+        return jsonResponse({ error: 'Pengguna tidak sah.' }, 400);
+      }
+      if (avatarPath && !new RegExp(`^${userId}/avatar/[A-Za-z0-9._-]+$`).test(avatarPath)) {
+        return jsonResponse({ error: 'Laluan gambar profil tidak sah.' }, 400);
+      }
+
+      const { data: target, error: targetError } = await adminClient
+        .from('ar_rahnu_organization_members')
+        .select('user_id')
+        .eq('organization_id', organizationId)
+        .eq('user_id', userId)
+        .maybeSingle();
+      if (targetError) throw targetError;
+      if (!target) return jsonResponse({ error: 'Pengguna tidak ditemui dalam organisasi.' }, 404);
+
+      const { data: currentUser, error: currentUserError } = await adminClient.auth.admin.getUserById(userId);
+      if (currentUserError) throw currentUserError;
+      const previousMetadata = currentUser.user?.user_metadata || {};
+      const nextMetadata = {
+        ...previousMetadata,
+        avatar_photo_path: avatarPath || null
+      };
+
+      const { error } = await adminClient.auth.admin.updateUserById(userId, { user_metadata: nextMetadata });
+      if (error) throw error;
+      await recordAuthAuditEvent('UPDATE_MEMBER_PHOTO', userId, {
+        avatar_photo_path: previousMetadata.avatar_photo_path || null
+      }, {
+        avatar_photo_path: avatarPath || null
+      });
+      return jsonResponse({ updated: true, avatarPhotoPath: avatarPath || null });
     }
 
     if (action === 'update-role') {

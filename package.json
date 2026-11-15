@@ -6,11 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:keys": "node scripts/check-supabase-keys.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.119.0",
     "lucide-react": "^1.16.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^2.15.1"

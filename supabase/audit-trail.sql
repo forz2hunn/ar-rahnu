@@ -282,14 +282,14 @@ begin
       v_before := jsonb_build_object(
         'user_id', old.user_id,
         'organization_id', old.organization_id,
-        'data', old.data - 'transactions' - 'assets' - 'institutions' - 'suppliers'
+        'data', old.data - 'transactions' - 'assets' - 'institutions' - 'suppliers' - 'sagDocuments'
       );
     end if;
     if tg_op <> 'DELETE' then
       v_after := jsonb_build_object(
         'user_id', new.user_id,
         'organization_id', new.organization_id,
-        'data', new.data - 'transactions' - 'assets' - 'institutions' - 'suppliers'
+        'data', new.data - 'transactions' - 'assets' - 'institutions' - 'suppliers' - 'sagDocuments'
       );
     end if;
   elsif tg_table_name = 'ar_rahnu_organization_members' then
@@ -331,7 +331,7 @@ begin
   if tg_table_name = 'ar_rahnu_user_data' then
     v_changed_collections := array(
       select collection
-      from unnest(array['transactions', 'assets', 'institutions', 'suppliers']) as collection
+      from unnest(array['transactions', 'assets', 'institutions', 'suppliers', 'sagDocuments']) as collection
       where (
         case when tg_op = 'INSERT' then '[]'::jsonb
           else public.ar_rahnu_collection_records(old.data, collection) end
@@ -352,7 +352,7 @@ begin
           select collection,
             jsonb_array_length(public.ar_rahnu_collection_records(
               case when tg_op = 'DELETE' then old.data else new.data end, collection)) as total
-          from unnest(array['transactions', 'assets', 'institutions', 'suppliers']) as collection
+          from unnest(array['transactions', 'assets', 'institutions', 'suppliers', 'sagDocuments']) as collection
         ) as counted
       )
     );
@@ -405,7 +405,7 @@ security definer
 set search_path = pg_catalog, public
 as $$
 declare
-  v_collections constant text[] := array['transactions', 'assets', 'institutions', 'suppliers'];
+  v_collections constant text[] := array['transactions', 'assets', 'institutions', 'suppliers', 'sagDocuments'];
   v_collection text;
   v_before_records jsonb;
   v_after_records jsonb;
@@ -481,11 +481,12 @@ begin
 
       v_label := coalesce(
         nullif(v_after ->> 'refNo', ''),
+        nullif(v_after ->> 'documentNo', ''),
         nullif(v_after ->> 'code', ''),
         nullif(v_after ->> 'name', ''),
         v_key
       );
-      v_category := coalesce(nullif(v_after ->> 'type', ''), nullif(v_after ->> 'category', ''));
+      v_category := coalesce(nullif(v_after ->> 'type', ''), nullif(v_after ->> 'category', ''), nullif(v_after ->> 'institutionName', ''));
 
       perform public.ar_rahnu_append_audit_event(
         v_action,
@@ -517,11 +518,12 @@ begin
 
       v_label := coalesce(
         nullif(v_before ->> 'refNo', ''),
+        nullif(v_before ->> 'documentNo', ''),
         nullif(v_before ->> 'code', ''),
         nullif(v_before ->> 'name', ''),
         v_key
       );
-      v_category := coalesce(nullif(v_before ->> 'type', ''), nullif(v_before ->> 'category', ''));
+      v_category := coalesce(nullif(v_before ->> 'type', ''), nullif(v_before ->> 'category', ''), nullif(v_before ->> 'institutionName', ''));
 
       perform public.ar_rahnu_append_audit_event(
         'DELETE',

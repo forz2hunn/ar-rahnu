@@ -76,6 +76,17 @@ import {
   LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, PieChart, Pie, Cell
 } from 'recharts';
 import { buildGoldForecast, getMalaysiaDateKey, type GoldPriceSnapshot } from './src/lib/portfolio-analytics';
+import {
+  SAG_DEFAULT_SETTINGS,
+  buildSagDocumentDraft,
+  createEmptySagDocument,
+  normalizeSagDocument,
+  type SagDocument,
+  type SagLetterhead,
+  type SagModuleSettings
+} from './src/modules/sag/sagDocuments';
+import { SagDocumentForm, SagLetterOverlay, type SagMemberOption } from './src/modules/sag/SagDocumentForm';
+import { SagDocumentsTab, SagLetterheadModal } from './src/modules/sag/SagDocumentsTab';
 
 // --- MOCK DATA: PEMBEKAL & KEDAI EMAS MALAYSIA ---
 const initialSuppliers = [
@@ -125,6 +136,156 @@ type OrganizationMembership = {
   role: OrganizationRole;
   active: boolean;
   organization?: { name: string } | null;
+};
+/** Rekod keahlian ahli yang disimpan bersama portfolio organisasi. */
+type MemberRegistryEntry = {
+  userId: string;
+  fullName: string;
+  icNumber: string;
+  memberNo: string;
+  updatedAt: string;
+  updatedBy?: RecordAuditActor;
+  address?: string;
+  phone?: string;
+  heirName?: string;
+  poBox?: string;
+  photoPath?: string;
+};
+
+/**
+ * Gabungkan daftar keahlian daripada cloud (utama) dengan salinan tempatan supaya
+ * rekod ahli sedia ada tidak hilang apabila snapshot cloud kosong atau separa.
+ */
+const mergeMemberRegistries = (
+  primary: MemberRegistryEntry[] | null | undefined,
+  fallback: MemberRegistryEntry[] | null | undefined
+): MemberRegistryEntry[] => {
+  const normalize = (entry: MemberRegistryEntry, existing?: MemberRegistryEntry): MemberRegistryEntry => ({
+    userId: entry.userId,
+    fullName: entry.fullName || existing?.fullName || '',
+    icNumber: entry.icNumber || existing?.icNumber || '',
+    memberNo: entry.memberNo || existing?.memberNo || '',
+    updatedAt: entry.updatedAt || existing?.updatedAt || '',
+    updatedBy: entry.updatedBy || existing?.updatedBy,
+    address: entry.address || existing?.address,
+    phone: entry.phone || existing?.phone,
+    heirName: entry.heirName || existing?.heirName,
+    poBox: entry.poBox || existing?.poBox,
+    photoPath: entry.photoPath ?? existing?.photoPath
+  });
+  const byUser = new Map<string, MemberRegistryEntry>();
+  (Array.isArray(primary) ? primary : []).forEach(entry => {
+    if (!entry?.userId) return;
+    byUser.set(entry.userId, normalize(entry, byUser.get(entry.userId)));
+  });
+  (Array.isArray(fallback) ? fallback : []).forEach(entry => {
+    if (!entry?.userId) return;
+    const existing = byUser.get(entry.userId);
+    byUser.set(entry.userId, existing ? normalize(existing, entry) : normalize(entry));
+  });
+  return Array.from(byUser.values());
+};
+
+/**
+ * Bina direktori ahli daripada akaun organisasi dan daftar keahlian tersimpan.
+ * Rekod dalam daftar yang akaunnya tidak dikembalikan oleh senarai pengguna tetap
+ * dipaparkan (ditanda `accountMissing`) supaya rekod ahli tidak hilang dari skrin.
+ */
+const buildMemberDirectory = (
+  organizationUsers: any[],
+  memberRegistry: MemberRegistryEntry[],
+  selfProfile?: { userId: string; photoPath: string } | null
+) => {
+  const registryMap = new Map(memberRegistry.map(entry => [entry.userId, entry]));
+  const accountUserIds = new Set(organizationUsers.map(member => String(member.id)));
+  const accountRows = organizationUsers.map(member => {
+    const registered = registryMap.get(member.id);
+    const accountProfile = {
+      fullName: String(member.fullName || ''),
+      icNumber: String(member.icNumber || ''),
+      memberNo: String(member.memberNo || '')
+    };
+    const selfPhotoPath = selfProfile && String(selfProfile.userId) === String(member.id)
+      ? String(selfProfile.photoPath || '')
+      : '';
+    const hasProfile = Boolean(registered || accountProfile.fullName || accountProfile.icNumber || accountProfile.memberNo);
+    const registry = hasProfile
+      ? {
+          userId: String(member.id),
+          fullName: registered?.fullName || accountProfile.fullName,
+          icNumber: registered?.icNumber || accountProfile.icNumber,
+          memberNo: registered?.memberNo || accountProfile.memberNo,
+          updatedAt: registered?.updatedAt || '',
+          updatedBy: registered?.updatedBy,
+          address: registered?.address,
+          phone: registered?.phone,
+          heirName: registered?.heirName,
+          poBox: registered?.poBox,
+          photoPath: String(member.avatarPhotoPath || selfPhotoPath || registered?.photoPath || '')
+        }
+      : null;
+    return { ...member, registry, accountMissing: false };
+  });
+  const registryOnlyRows = memberRegistry
+    .filter(entry => entry.userId && !accountUserIds.has(String(entry.userId)))
+    .map(entry => ({
+      id: entry.userId,
+      email: '',
+      role: '',
+      active: true,
+      isOrganizationOwner: false,
+      createdAt: entry.updatedAt || '',
+      lastSignInAt: null as string | null,
+      emailConfirmedAt: null as string | null,
+      registry: entry,
+      accountMissing: true
+    }));
+  return [...accountRows, ...registryOnlyRows];
+};
+
+/**
+ * Pulihkan entri daftar keahlian daripada profil akaun (metadata auth) apabila
+ * daftar portfolio kosong atau tidak lengkap. Hanya medan yang hilang diisi.
+ */
+const reconcileMemberRegistry = (
+  organizationUsers: any[],
+  memberRegistry: MemberRegistryEntry[],
+  now: string
+): { entries: MemberRegistryEntry[]; recovered: number } => {
+  const byUser = new Map(memberRegistry.map(entry => [entry.userId, entry]));
+  let recovered = 0;
+  organizationUsers.forEach(member => {
+    if (!member?.id) return;
+    const userId = String(member.id);
+    const existing = byUser.get(userId);
+    const fullName = String(member.fullName || '').trim();
+    const icNumber = normalizeIcDigits(String(member.icNumber || ''));
+    const memberNo = String(member.memberNo || '').trim().toUpperCase();
+    if (!fullName && !icNumber && !memberNo) return;
+    if (existing?.fullName && existing?.icNumber && existing?.memberNo) return;
+    const next: MemberRegistryEntry = {
+      userId,
+      fullName: existing?.fullName || fullName,
+      icNumber: existing?.icNumber || icNumber,
+      memberNo: existing?.memberNo || memberNo,
+      updatedAt: existing?.updatedAt || now,
+      updatedBy: existing?.updatedBy,
+      address: existing?.address,
+      phone: existing?.phone,
+      heirName: existing?.heirName,
+      poBox: existing?.poBox,
+      photoPath: String(member.avatarPhotoPath || existing?.photoPath || '')
+    };
+    if (!existing ||
+        next.fullName !== existing.fullName ||
+        next.icNumber !== existing.icNumber ||
+        next.memberNo !== existing.memberNo ||
+        next.photoPath !== (existing.photoPath || '')) {
+      byUser.set(userId, next);
+      recovered += 1;
+    }
+  });
+  return { entries: Array.from(byUser.values()), recovered };
 };
 /** Identiti pengguna yang melakukan CRUD pada satu rekod. */
 type RecordAuditActor = {
@@ -232,7 +393,8 @@ const auditActionLabels: Record<string, string> = {
   CREATE_USER: 'Akaun pengguna diwujudkan',
   UPDATE_USER_AUTH: 'Maklumat akaun dikemas kini',
   DELETE_USER_ACCOUNT: 'Akaun pengguna dipadam',
-  RESET_PASSWORD_EMAIL_SENT: 'E-mel tetapan semula kata laluan dihantar'
+  RESET_PASSWORD_EMAIL_SENT: 'E-mel tetapan semula kata laluan dihantar',
+  VIEW_MEMBER_PROFILE: 'Profil ahli dilihat'
 };
 const auditModuleLabels: Record<string, string> = {
   Portfolio: 'Portfolio',
@@ -250,6 +412,7 @@ const auditResourceLabels: Record<string, string> = {
   user_activity: 'Aktiviti pengguna',
   portfolio_export: 'Eksport data portfolio',
   transactions: 'Rekod SAG (transaksi)',
+  sagDocuments: 'Surat Akuan Gadaian (SAG)',
   assets: 'Aset emas',
   institutions: 'Institusi',
   suppliers: 'Pembekal'
@@ -769,6 +932,7 @@ const isMissingUserManagementSchemaError = (error) =>
   error?.code === '42703' ||
   /(?:ar_rahnu_organization_members|ar_rahnu_organizations).*(?:does not exist|schema cache)|column .*active.*does not exist/i.test(error?.message || '');
 // --- MAIN COMPONENT ---
+export { mergeMemberRegistries, buildMemberDirectory, reconcileMemberRegistry, MemberAdminModal, MemberAvatar, MemberProfileViewer };
 export default function App() {
   if (!supabaseClient) {
     return (
@@ -1277,11 +1441,50 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     };
   });
 
-  const [memberRegistry, setMemberRegistry] = useState<{ userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string; updatedBy?: RecordAuditActor }[]>([]);
+  const [memberRegistry, setMemberRegistry] = useState<MemberRegistryEntry[]>([]);
+  const [sagDocuments, setSagDocuments] = useState<SagDocument[]>(() => {
+    try {
+      const saved = localStorage.getItem('ar_rahnu_sag_documents_v1');
+      const parsed = saved ? JSON.parse(saved) : [];
+      return Array.isArray(parsed) ? parsed.map(document => normalizeSagDocument(document)) : [];
+    } catch (error) {
+      console.error('Rekod Surat Akuan Gadaian tersimpan tidak dapat dibaca:', error);
+      return [];
+    }
+  });
+  const [sagSettings, setSagSettings] = useState<SagModuleSettings>(() => {
+    try {
+      const saved = localStorage.getItem('ar_rahnu_sag_settings_v1');
+      const parsed = saved ? JSON.parse(saved) : null;
+      if (parsed?.letterhead && typeof parsed.letterhead === 'object') {
+        return { letterhead: { ...SAG_DEFAULT_SETTINGS.letterhead, ...parsed.letterhead } };
+      }
+      return SAG_DEFAULT_SETTINGS;
+    } catch (error) {
+      console.error('Tetapan Surat Akuan Gadaian tidak dapat dibaca:', error);
+      return SAG_DEFAULT_SETTINGS;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ar_rahnu_sag_documents_v1', JSON.stringify(sagDocuments));
+    } catch (error) {
+      console.error('Rekod Surat Akuan Gadaian tidak dapat disimpan ke browser:', error);
+    }
+  }, [sagDocuments]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ar_rahnu_sag_settings_v1', JSON.stringify(sagSettings));
+    } catch (error) {
+      console.error('Tetapan Surat Akuan Gadaian tidak dapat disimpan ke browser:', error);
+    }
+  }, [sagSettings]);
 
   const appData = useMemo(
-    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry }),
-    [transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry]
+    () => ({ transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry, sagDocuments, sagSettings }),
+    [transactions, institutions, assets, suppliers, goldPriceHistory, rolePermissions, memberRegistry, sagDocuments, sagSettings]
   );
   const localSnapshotRef = useRef(appData);
   localSnapshotRef.current = appData;
@@ -1416,12 +1619,27 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         suppliers: incoming.suppliers,
         goldPriceHistory: Array.isArray(incoming.goldPriceHistory) ? incoming.goldPriceHistory : []
       };
-      const nextMemberRegistry = Array.isArray(incoming.memberRegistry) ? incoming.memberRegistry : localSnapshotRef.current.memberRegistry || [];
+      const nextMemberRegistry = mergeMemberRegistries(
+        Array.isArray(incoming.memberRegistry) ? incoming.memberRegistry : [],
+        localSnapshotRef.current.memberRegistry
+      );
       const nextRolePermissions = incoming.rolePermissions && typeof incoming.rolePermissions === 'object'
         ? incoming.rolePermissions
         : localSnapshotRef.current.rolePermissions;
+      const nextSagDocuments = Array.isArray(incoming.sagDocuments)
+        ? incoming.sagDocuments.map(document => normalizeSagDocument(document))
+        : localSnapshotRef.current.sagDocuments || [];
+      const nextSagSettings = incoming.sagSettings && typeof incoming.sagSettings === 'object' && incoming.sagSettings.letterhead
+        ? { letterhead: { ...SAG_DEFAULT_SETTINGS.letterhead, ...incoming.sagSettings.letterhead } }
+        : localSnapshotRef.current.sagSettings || SAG_DEFAULT_SETTINGS;
       // Serialize exactly like appData so the persistence effect can compare snapshots reliably.
-      const serializedData = JSON.stringify({ ...nextData, rolePermissions: nextRolePermissions, memberRegistry: nextMemberRegistry });
+      const serializedData = JSON.stringify({
+        ...nextData,
+        rolePermissions: nextRolePermissions,
+        memberRegistry: nextMemberRegistry,
+        sagDocuments: nextSagDocuments,
+        sagSettings: nextSagSettings
+      });
       cloudSnapshotRef.current = serializedData;
       if (JSON.stringify(localSnapshotRef.current) === serializedData) return;
 
@@ -1431,6 +1649,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       setSuppliers(nextData.suppliers);
       setGoldPriceHistory(nextData.goldPriceHistory);
       setMemberRegistry(nextMemberRegistry);
+      setSagDocuments(nextSagDocuments);
+      if (nextSagSettings !== localSnapshotRef.current.sagSettings) {
+        setSagSettings(nextSagSettings);
+      }
       if (nextRolePermissions !== localSnapshotRef.current.rolePermissions) {
         setRolePermissions(nextRolePermissions);
       }
@@ -1500,7 +1722,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
             institutions: initialInstitutions,
             assets: [],
             suppliers: initialSuppliers,
-            memberRegistry: []
+            memberRegistry: [],
+            sagDocuments: [],
+            sagSettings: SAG_DEFAULT_SETTINGS
           };
           applyCloudData(firstSave);
           const { error: saveError } = await supabaseClient
@@ -1640,6 +1864,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [isSupplierModalOpen, setIsSupplierModalOpen] = useState(false);
   const [memberSearch, setMemberSearch] = useState('');
   const [editingMember, setEditingMember] = useState(null);
+  const [selectedMemberProfileId, setSelectedMemberProfileId] = useState('');
+  const [viewingMemberProfile, setViewingMemberProfile] = useState<{ userId: string; loading: boolean; error: string; profile: any | null } | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [correctionTransaction, setCorrectionTransaction] = useState(null);
@@ -1648,6 +1874,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [viewingAssetImage, setViewingAssetImage] = useState<{ path: string; label: string } | null>(null);
   const [viewingAssetRecord, setViewingAssetRecord] = useState(null);
   const [viewingSagRecord, setViewingSagRecord] = useState(null);
+  const [sagFormDocument, setSagFormDocument] = useState<SagDocument | null>(null);
+  const [sagPreviewDocument, setSagPreviewDocument] = useState<SagDocument | null>(null);
+  const [isSagLetterheadOpen, setIsSagLetterheadOpen] = useState(false);
   const [viewingSupplierRecord, setViewingSupplierRecord] = useState(null);
   const [viewingInstitutionRecord, setViewingInstitutionRecord] = useState(null);
   const [editingInstitution, setEditingInstitution] = useState(null);
@@ -1785,10 +2014,17 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const isOrganizationAdmin = organizationMembership?.role === 'Admin';
 
   const handleSaveMemberProfile = async (member, payload) => {
-    setMemberRegistry(previous => [
-      ...previous.filter(entry => entry.userId !== member.id),
-      { userId: member.id, ...payload, updatedAt: new Date().toISOString(), updatedBy: recordActor }
-    ]);
+    const previousEntry = memberRegistry.find(entry => entry.userId === member.id);
+    const previousPhotoPath = previousEntry?.photoPath || '';
+    const photoPath = typeof payload.photoPath === 'string' ? payload.photoPath : previousPhotoPath;
+
+    setMemberRegistry(previous => {
+      const existing = previous.find(entry => entry.userId === member.id);
+      return [
+        ...previous.filter(entry => entry.userId !== member.id),
+        { ...existing, userId: member.id, ...payload, photoPath, updatedAt: new Date().toISOString(), updatedBy: recordActor }
+      ];
+    });
     setEditingMember(null);
     let syncWarning = '';
     try {
@@ -1799,6 +2035,20 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         icNumber: payload.icNumber,
         memberNo: payload.memberNo
       });
+      if (photoPath !== previousPhotoPath) {
+        await invokeUserAdmin({
+          action: 'update-member-photo',
+          userId: member.id,
+          avatarPath: photoPath || null
+        });
+        if (previousPhotoPath) {
+          try {
+            await supabaseClient.storage.from(profilePhotoBucket).remove([previousPhotoPath]);
+          } catch (removeError) {
+            console.warn('Gambar profil lama tidak dapat dibuang:', removeError);
+          }
+        }
+      }
     } catch (error) {
       syncWarning = ` Akaun ahli belum disegerakkan: ${error.message}`;
     }
@@ -1806,16 +2056,37 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setTimeout(() => setToastMessage(null), syncWarning ? 8000 : 4000);
   };
 
+  /** Admin sahaja: muat dan paparkan profil penuh seorang ahli. */
+  const handleOpenMemberProfile = async (userId: string) => {
+    if (!userId) return;
+    setViewingMemberProfile({ userId, loading: true, error: '', profile: null });
+    try {
+      const data = await invokeUserAdmin({ action: 'get-member-profile', userId });
+      setViewingMemberProfile({ userId, loading: false, error: '', profile: data.profile || null });
+    } catch (error) {
+      setViewingMemberProfile({
+        userId,
+        loading: false,
+        error: error instanceof Error ? error.message : 'Profil ahli tidak dapat dimuatkan.',
+        profile: null
+      });
+    }
+  };
+
   const handleGenerateAllMemberNumbers = () => {
     const usedNumbers: string[] = memberRegistry.map(entry => entry.memberNo).filter(Boolean);
-    const additions: { userId: string; fullName: string; icNumber: string; memberNo: string; updatedAt: string; updatedBy?: RecordAuditActor }[] = [];
-    organizationUsers.forEach(member => {
-      const current = memberRegistry.find(entry => entry.userId === member.id);
+    const additions: MemberRegistryEntry[] = [];
+    const memberUserIds = Array.from(new Set([
+      ...organizationUsers.map(member => String(member.id)),
+      ...memberRegistry.map(entry => String(entry.userId)).filter(Boolean)
+    ]));
+    memberUserIds.forEach(memberId => {
+      const current = memberRegistry.find(entry => entry.userId === memberId);
       if (current?.memberNo) return;
       const memberNo = generateMemberNumber(usedNumbers);
       usedNumbers.push(memberNo);
       additions.push({
-        userId: member.id,
+        userId: memberId,
         fullName: current?.fullName || '',
         icNumber: current?.icNumber || '',
         memberNo,
@@ -2160,6 +2431,31 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     return () => { active = false; };
   }, [activeTab, organizationMembership?.role]);
 
+  // Pulihkan rekod keahlian yang hilang daripada profil akaun ahli (metadata auth).
+  useEffect(() => {
+    if (!isDataReady || !organizationUsers.length) return;
+    const now = new Date().toISOString();
+    setMemberRegistry(previous => {
+      const { entries, recovered } = reconcileMemberRegistry(organizationUsers, previous, now);
+      return recovered > 0 ? entries : previous;
+    });
+  }, [isDataReady, organizationUsers]);
+
+  // Cerminkan gambar profil pengguna semasa ke daftar keahlian supaya direktori
+  // memaparkannya tanpa bergantung kepada senarai akaun.
+  useEffect(() => {
+    if (!isDataReady) return;
+    const selfPhotoPath = String(profilePhotoPath || '');
+    if (!selfPhotoPath) return;
+    setMemberRegistry(previous => {
+      const entry = previous.find(item => item.userId === user.id);
+      if (!entry || entry.photoPath === selfPhotoPath) return previous;
+      return previous.map(item => item.userId === user.id
+        ? { ...item, photoPath: selfPhotoPath, updatedAt: new Date().toISOString(), updatedBy: recordActor }
+        : item);
+    });
+  }, [isDataReady, profilePhotoPath, recordActor, user.id]);
+
   const runUserAdminAction = async (body, successMessage) => {
     setUserManagementBusy(true);
     setUserManagementError('');
@@ -2416,6 +2712,73 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     ), [assets]);
   const visibleInstitutions = useMemo(() => institutions.filter(isRecordVisible), [institutions]);
   const visibleSuppliers = useMemo(() => suppliers.filter(isRecordVisible), [suppliers]);
+
+  const sagLetterhead = useMemo<SagLetterhead>(() => ({
+    ...sagSettings.letterhead,
+    organizationName: sagSettings.letterhead.organizationName || String(organizationMembership?.organization?.name || '')
+  }), [sagSettings, organizationMembership]);
+
+  const sagMemberOptions = useMemo<SagMemberOption[]>(() => {
+    const metadata = (user.user_metadata || {}) as Record<string, string>;
+    const currentUserAddress = [
+      metadata.address_line,
+      metadata.city,
+      [metadata.postcode, metadata.state].filter(Boolean).join(' ')
+    ].filter(value => String(value || '').trim().length > 0).join(', ');
+    const options = memberRegistry.map(entry => ({
+      userId: entry.userId,
+      memberNo: entry.memberNo || '',
+      name: entry.fullName || '',
+      icNumber: entry.icNumber || '',
+      address: entry.address || '',
+      phone: entry.phone || '',
+      heirName: entry.heirName || '',
+      poBox: entry.poBox || ''
+    }));
+    const selfEntry: SagMemberOption = {
+      userId: user.id,
+      memberNo: String(metadata.member_no || ''),
+      name: String(metadata.full_name || metadata.name || ''),
+      icNumber: String(metadata.ic_number || ''),
+      address: currentUserAddress,
+      phone: String(metadata.phone || ''),
+      heirName: String(metadata.heir_name || ''),
+      poBox: ''
+    };
+    const existingSelf = options.find(option => option.userId === user.id);
+    if (existingSelf) {
+      existingSelf.memberNo = existingSelf.memberNo || selfEntry.memberNo;
+      existingSelf.name = existingSelf.name || selfEntry.name;
+      existingSelf.icNumber = existingSelf.icNumber || selfEntry.icNumber;
+      existingSelf.address = existingSelf.address || selfEntry.address;
+      existingSelf.phone = existingSelf.phone || selfEntry.phone;
+      existingSelf.heirName = existingSelf.heirName || selfEntry.heirName;
+      return options;
+    }
+    if (selfEntry.name || selfEntry.memberNo) {
+      return [...options, { ...selfEntry, email: user.email || '' }];
+    }
+    return options;
+  }, [memberRegistry, user]);
+
+  const canManageSagDocuments = useMemo(() => {
+    const role = organizationMembership?.role;
+    if (!role) return true;
+    const permissions = rolePermissions?.[role];
+    return permissions?.sag_create !== false;
+  }, [organizationMembership, rolePermissions]);
+
+  const canDeleteSagDocuments = useMemo(() => {
+    const role = organizationMembership?.role;
+    if (!role) return true;
+    const permissions = rolePermissions?.[role];
+    return permissions?.sag_delete === true;
+  }, [organizationMembership, rolePermissions]);
+
+  const resolveTransactionAssets = (transaction: any) =>
+    getTransactionAssetIds(transaction)
+      .map(assetId => visibleAssets.find(asset => String(asset.id) === String(assetId)))
+      .filter(Boolean);
 
   // State Mobile Menu & Install Prompt
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -3250,6 +3613,111 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     ));
     setToastMessage('Rekod transaksi ditandakan sebagai dipadam dan disorokkan.');
     setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleOpenSagDocumentForm = (document: SagDocument | null) => {
+    setSagFormDocument(document);
+  };
+
+  const handleCreateSagDocument = () => {
+    setSagFormDocument(createEmptySagDocument(
+      sagLetterhead,
+      sagDocuments.filter(document => !document.deletedAt).map(document => document.documentNo)
+    ));
+  };
+
+  const handleOpenSagLetterForTransaction = (transaction) => {
+    const existing = sagDocuments.find(document =>
+      !document.deletedAt && String(document.transactionId) === String(transaction.id)
+    );
+    if (existing) {
+      setSagPreviewDocument(existing);
+      return;
+    }
+    const institution = visibleInstitutions.find(item => item.name === transaction.institution);
+    const parentDocument = transaction.parentTransactionId != null
+      ? sagDocuments.find(document =>
+        !document.deletedAt && String(document.transactionId) === String(transaction.parentTransactionId))
+      : null;
+    setSagFormDocument(buildSagDocumentDraft({
+      transaction,
+      institution,
+      assets: resolveTransactionAssets(transaction),
+      member: null,
+      letterhead: sagLetterhead,
+      previousDocument: parentDocument,
+      existingNumbers: sagDocuments.map(document => document.documentNo)
+    }));
+  };
+
+  const handleFollowUpSagDocument = (document: SagDocument) => {
+    const transaction = visibleTransactions.find(item => String(item.id) === String(document.transactionId));
+    if (!transaction) {
+      setToastMessage('Rekod SAG yang dipautkan tidak lagi tersedia. Kemaskini pautan transaksi surat ini.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
+    if (['Selesai', 'Ditebus', 'Dilelong'].includes(transaction.status)) {
+      setToastMessage('Surat ini telah selesai. Mulakan surat baharu melalui modul Rekod SAG untuk transaksi seterusnya.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
+    setSagPreviewDocument(null);
+    handleOpenCorrection(transaction);
+  };
+
+  const handleSaveSagDocument = (document: SagDocument) => {
+    const savedAt = new Date().toISOString();
+    const isUpdate = sagDocuments.some(entry => String(entry.id) === String(document.id));
+    const audit = isUpdate ? auditUpdate('sagDocument', savedAt) : auditCreate('sagDocument', savedAt);
+    const normalized = normalizeSagDocument({ ...document, ...audit } as SagDocument);
+
+    setSagDocuments(previous => isUpdate
+      ? previous.map(entry => String(entry.id) === String(document.id)
+        ? { ...entry, ...normalized, id: entry.id, createdAt: entry.createdAt || normalized.createdAt }
+        : entry)
+      : [...previous, normalized]);
+
+    // Butiran hubungan ahli disimpan semula supaya surat seterusnya boleh diisi automatik.
+    const member = normalized.member;
+    if (member?.userId) {
+      setMemberRegistry(previous => previous.map(entry => entry.userId === member.userId
+        ? {
+            ...entry,
+            address: member.address || entry.address,
+            phone: member.phone || entry.phone,
+            heirName: member.heirName || entry.heirName,
+            poBox: member.poBox || entry.poBox
+          }
+        : entry));
+    }
+
+    setSagFormDocument(null);
+    setToastMessage(`Surat Akuan Gadaian ${normalized.documentNo} ${isUpdate ? 'berjaya dikemaskini' : 'berjaya disimpan'}.`);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const handleDeleteSagDocument = (document: SagDocument) => {
+    if (!window.confirm(`Padam Surat Akuan Gadaian ${document.documentNo}? Rekod akan disorokkan tetapi kekal dalam jejak audit.`)) {
+      return;
+    }
+    const deletedAt = new Date().toISOString();
+    const audit = auditDelete('sagDocument', deletedAt);
+    setSagDocuments(previous => previous.map(entry =>
+      String(entry.id) === String(document.id) ? { ...entry, deletedAt, ...audit } : entry
+    ));
+    setSagPreviewDocument(current =>
+      current && String(current.id) === String(document.id) ? null : current
+    );
+    setToastMessage(`Surat Akuan Gadaian ${document.documentNo} ditandakan sebagai dipadam.`);
+    setTimeout(() => setToastMessage(null), 4000);
+  };
+
+  const handleSaveSagSettings = (settings: SagModuleSettings) => {
+    setSagSettings(settings);
+    setIsSagLetterheadOpen(false);
+    setToastMessage('Tetapan letterhead Surat Akuan Gadaian disimpan.');
+    setTimeout(() => setToastMessage(null), 3500);
   };
 
   const handleExportCSV = () => {
@@ -4127,6 +4595,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           <NavItem compact={isSidebarCompact} theme={theme} icon={<LayoutDashboard size={20} />} label="Dashboard" isActive={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
           <NavItem compact={isSidebarCompact} theme={theme} icon={<Database size={20} />} label="Asset Record" isActive={activeTab === 'assets'} onClick={() => { setActiveTab('assets'); setIsSidebarOpen(false); }} />
           <NavItem compact={isSidebarCompact} theme={theme} icon={<ArrowRightLeft size={20} />} label="Pengurusan Surat Gadaian (SAG)" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<FileText size={20} />} label="Surat Akuan Gadaian" isActive={activeTab === 'sagDocuments'} badge={sagDocuments.filter(document => !document.deletedAt && document.status === 'Draf').length} onClick={() => { setActiveTab('sagDocuments'); setIsSidebarOpen(false); }} />
           <div>
             <button
               type="button"
@@ -4247,7 +4716,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               <Menu size={22} />
             </button>
             <h2 className={`min-w-0 text-base sm:text-xl md:text-2xl font-bold capitalize tracking-tight truncate flex items-center ${theme === 'dark' ? 'text-slate-800' : 'text-white'}`}>
-              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'members' ? 'Keahlian Ahli' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : 'Executive Dashboard'}
+              {activeTab === 'audit' ? 'Audit Trail' : activeTab === 'members' ? 'Keahlian Ahli' : activeTab === 'users' ? 'Pengurusan Pengguna' : activeTab === 'ai' ? 'AI Predictive Engine' : activeTab === 'institutions' ? 'Institusi & Koperasi (Bangi)' : activeTab === 'suppliers' ? 'Penyelenggaraan Pembekal' : activeTab === 'assets' ? 'Emas & Asset Inventory' : activeTab === 'transactions' ? 'Pengurusan Surat Gadaian (SAG)' : activeTab === 'sagDocuments' ? 'Pengurusan Surat Akuan Gadaian (SAG)' : 'Executive Dashboard'}
             </h2>
           </div>
           <div className="flex shrink-0 items-center gap-1 sm:gap-2 md:gap-4">
@@ -4416,8 +4885,20 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         <div className="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden p-3 sm:p-4 md:p-8 relative custom-scrollbar">
 
           {activeTab === 'members' && isOrganizationAdmin && (() => {
-            const registryMap = new Map(memberRegistry.map(entry => [entry.userId, entry]));
-            const memberRows = organizationUsers.map(member => ({ ...member, registry: registryMap.get(member.id) || null }));
+            const sagLetterCountByMember = sagDocuments.reduce((counts, document) => {
+              const memberId = document.member?.userId;
+              if (document.deletedAt || !memberId) return counts;
+              counts.set(memberId, (counts.get(memberId) || 0) + 1);
+              return counts;
+            }, new Map<string, number>());
+            const memberRows = buildMemberDirectory(organizationUsers, memberRegistry, {
+              userId: user.id,
+              photoPath: String(profilePhotoPath || '')
+            });
+            const registryOnlyCount = memberRows.filter(member => member.accountMissing).length;
+            const accountListHasPhotoField = organizationUsers.some(member =>
+              Object.prototype.hasOwnProperty.call(member, 'avatarPhotoPath')
+            );
             const query = memberSearch.trim().toLowerCase();
             const filteredMembers = memberRows.filter(member => !query || [
               member.registry?.fullName,
@@ -4453,6 +4934,43 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   </div>
                 </div>
 
+                {(userManagementError || registryOnlyCount > 0) && (
+                  <div role="status" className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <p className="flex items-center gap-2 text-sm font-bold text-amber-900">
+                      <AlertTriangle size={17} className="shrink-0 text-amber-600" />
+                      {registryOnlyCount > 0
+                        ? `${registryOnlyCount} rekod ahli dipaparkan daripada daftar keahlian tersimpan`
+                        : 'Senarai akaun ahli tidak dapat dimuatkan sepenuhnya'}
+                    </p>
+                    <p className="mt-1 text-xs font-medium leading-relaxed text-amber-800">
+                      {registryOnlyCount > 0
+                        ? 'Akaun ahli ini tidak dikembalikan oleh senarai pengguna, tetapi nama, No. MyKad dan No. Keahlian yang tersimpan dalam portfolio masih dipaparkan. Tekan "Muat semula" untuk cuba menyegerakkan semula akaun.'
+                        : 'Rekod keahlian yang tersimpan masih dipaparkan. Tekan "Muat semula" untuk mencuba lagi.'}
+                      {userManagementError ? ` Ralat: ${userManagementError}` : ''}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void refreshPageRecords()}
+                      disabled={isRefreshingRecords}
+                      className="mt-2 inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-[11px] font-bold text-amber-900 transition-colors hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      <RefreshCw size={13} className={isRefreshingRecords ? 'animate-spin' : ''} /> Muat semula
+                    </button>
+                  </div>
+                )}
+
+                {organizationUsers.length > 0 && !accountListHasPhotoField && (
+                  <div role="status" className="flex flex-col gap-2 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50 p-4">
+                    <p className="flex items-center gap-2 text-sm font-bold text-corporate-teal-900">
+                      <UserRound size={17} className="shrink-0" />
+                      Gambar profil ahli lain belum dapat dibaca
+                    </p>
+                    <p className="text-xs font-medium leading-relaxed text-corporate-teal-800">
+                      Fungsi <span className="font-mono font-bold">user-admin</span> yang sedang digunakan belum memulangkan medan gambar profil (<span className="font-mono">avatarPhotoPath</span>). Deploy semula fungsi itu supaya gambar yang sudah dimuat naik dalam Profil Saya ahli dipaparkan di sini. Gambar profil anda sendiri tetap dipaparkan.
+                    </p>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
                   <div className="flex items-center justify-between rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
                     <div>
@@ -4485,22 +5003,49 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                 </div>
 
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-                  <div className="flex flex-col gap-3 border-b border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex flex-col gap-3 border-b border-slate-100 p-4 lg:flex-row lg:items-center lg:justify-between">
                     <div>
                       <h4 className="text-sm font-bold text-slate-800">Direktori Ahli</h4>
                       <p className="text-xs text-slate-500">{filteredMembers.length} daripada {memberRows.length} ahli dipaparkan</p>
                     </div>
-                    <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 sm:w-80">
-                      <Search size={16} className="shrink-0 text-slate-400" />
-                      <input
-                        type="search"
-                        value={memberSearch}
-                        onChange={event => setMemberSearch(event.target.value)}
-                        placeholder="Cari nama, IC, no. keahlian atau e-mel"
-                        aria-label="Cari ahli"
-                        className="w-full border-0 bg-transparent text-sm outline-none"
-                      />
-                    </label>
+                    <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-center lg:w-auto">
+                      <label className="flex items-center gap-2 rounded-xl border border-slate-300 bg-white px-3 py-2 sm:w-72">
+                        <Search size={16} className="shrink-0 text-slate-400" />
+                        <input
+                          type="search"
+                          value={memberSearch}
+                          onChange={event => setMemberSearch(event.target.value)}
+                          placeholder="Cari nama, IC, no. keahlian atau e-mel"
+                          aria-label="Cari ahli"
+                          className="w-full border-0 bg-transparent text-sm outline-none"
+                        />
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <label className="sr-only" htmlFor="member-profile-select">Pilih ahli untuk dipaparkan</label>
+                        <select
+                          id="member-profile-select"
+                          value={selectedMemberProfileId}
+                          onChange={event => setSelectedMemberProfileId(event.target.value)}
+                          className="min-w-0 flex-1 rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500 sm:w-60"
+                        >
+                          <option value="">Pilih ahli untuk lihat profil...</option>
+                          {memberRows.map(member => (
+                            <option key={member.id} value={String(member.id)}>
+                              {member.registry?.memberNo ? `${member.registry.memberNo} · ` : ''}
+                              {member.registry?.fullName || member.email || String(member.id)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => void handleOpenMemberProfile(selectedMemberProfileId)}
+                          disabled={!selectedMemberProfileId}
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-xl border border-corporate-teal-200 bg-corporate-teal-50 px-3 py-2 text-xs font-bold text-corporate-teal-800 transition-colors hover:bg-corporate-teal-100 disabled:opacity-40"
+                        >
+                          <UserRound size={14} /> Lihat Profil
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   <div className="min-w-0 w-full overflow-x-auto custom-scrollbar" role="region" aria-label="Jadual keahlian ahli" tabIndex={0}>
@@ -4513,6 +5058,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           <th className="px-4 py-3 font-bold">Emel</th>
                           <th className="px-4 py-3 font-bold">Peranan</th>
                           <th className="px-4 py-3 font-bold">Status</th>
+                          <th className="px-4 py-3 text-center font-bold">Surat Akuan</th>
                           <th className="px-4 py-3 text-center font-bold">Tindakan</th>
                         </tr>
                       </thead>
@@ -4542,13 +5088,26 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               )}
                             </td>
                             <td className="px-4 py-3">
-                              <span className="block text-sm font-bold text-slate-800">{member.registry?.fullName || <span className="text-xs font-medium text-slate-400">Belum diisi</span>}</span>
-                              {member.isOrganizationOwner && <span className="text-[10px] font-bold uppercase text-emerald-700">Pemilik Organisasi</span>}
+                              <div className="flex items-center gap-2.5">
+                                <MemberAvatar
+                                  path={member.registry?.photoPath}
+                                  label={member.registry?.fullName || member.email}
+                                  supabaseClient={supabaseClient}
+                                />
+                                <div className="min-w-0">
+                                  <span className="block text-sm font-bold text-slate-800">{member.registry?.fullName || <span className="text-xs font-medium text-slate-400">Belum diisi</span>}</span>
+                                  {member.isOrganizationOwner && <span className="text-[10px] font-bold uppercase text-emerald-700">Pemilik Organisasi</span>}
+                                </div>
+                              </div>
                             </td>
                             <td className="px-4 py-3 font-mono text-slate-600">{maskIcNumber(member.registry?.icNumber || '')}</td>
                             <td className="px-4 py-3 text-slate-600">{member.email || '-'}</td>
                             <td className="px-4 py-3">
-                              <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-bold text-slate-700">{member.role}</span>
+                              {member.role ? (
+                                <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] font-bold text-slate-700">{member.role}</span>
+                              ) : (
+                                <span className="rounded-md border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-800">Akaun tidak dimuatkan</span>
+                              )}
                             </td>
                             <td className="px-4 py-3">
                               <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-bold ${member.active ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-slate-300 bg-slate-100 text-slate-600'}`}>
@@ -4556,21 +5115,47 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                 {member.active ? 'Aktif' : 'Digantung'}
                               </span>
                             </td>
+                            <td className="px-4 py-3 text-center">
+                              {(sagLetterCountByMember.get(member.id) || 0) > 0 ? (
+                                <button
+                                  type="button"
+                                  onClick={event => { event.stopPropagation(); setActiveTab('sagDocuments'); }}
+                                  className="inline-flex items-center gap-1 rounded-lg border border-corporate-teal-200 bg-corporate-teal-50 px-2 py-1 text-[11px] font-bold text-corporate-teal-800 transition-colors hover:bg-corporate-teal-100"
+                                  title="Buka modul Surat Akuan Gadaian"
+                                  aria-label={`Buka Surat Akuan Gadaian untuk ${member.registry?.fullName || member.email || 'ahli'}`}
+                                >
+                                  <FileText size={12} />
+                                  {sagLetterCountByMember.get(member.id)}
+                                </button>
+                              ) : (
+                                <span className="text-slate-300">-</span>
+                              )}
+                            </td>
                             <td className="px-4 py-3 text-center" onClick={event => event.stopPropagation()}>
-                              <button
-                                type="button"
-                                onClick={() => setEditingMember(member)}
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
-                                aria-label={`Kemaskini nama, IC dan no. keahlian ${member.email || ''}`}
-                              >
-                                <Pencil size={13} /> Kemaskini
-                              </button>
+                              <div className="flex flex-wrap items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleOpenMemberProfile(member.id)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-corporate-teal-200 hover:bg-corporate-teal-50 hover:text-corporate-teal-700"
+                                  aria-label={`Lihat profil ${member.registry?.fullName || member.email || 'ahli'}`}
+                                >
+                                  <UserRound size={13} /> Profil
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingMember(member)}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-[11px] font-bold text-slate-600 transition-colors hover:border-emerald-200 hover:bg-emerald-50 hover:text-emerald-700"
+                                  aria-label={`Kemaskini nama, IC dan no. keahlian ${member.email || ''}`}
+                                >
+                                  <Pencil size={13} /> Kemaskini
+                                </button>
+                              </div>
                             </td>
                           </tr>
                         ))}
                         {filteredMembers.length === 0 && (
                           <tr>
-                            <td colSpan={7} className="p-8 text-center text-slate-500">
+                            <td colSpan={8} className="p-8 text-center text-slate-500">
                               {organizationUsers.length === 0 ? 'Tiada ahli dimuatkan. Sila semak sambungan pengurusan pengguna.' : 'Tiada ahli sepadan dengan carian.'}
                             </td>
                           </tr>
@@ -6941,6 +7526,15 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                                   <div className="flex items-center justify-center gap-1">
                                     <button
                                       type="button"
+                                      onClick={() => handleOpenSagLetterForTransaction(tx)}
+                                      className="p-1.5 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
+                                      title="Surat Akuan Gadaian"
+                                      aria-label={`Buka Surat Akuan Gadaian untuk SAG ${tx.refNo || ''}`}
+                                    >
+                                      <FileText size={15} />
+                                    </button>
+                                    <button
+                                      type="button"
                                       onClick={() => handleEditTransaction(tx)}
                                       className="p-1.5 rounded-xl text-slate-400 hover:text-corporate-teal-600 hover:bg-corporate-teal-50 transition-colors"
                                       title="Edit surat gadaian"
@@ -7176,11 +7770,31 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       setViewingSagRecord(null);
                       handleOpenCorrection(record);
                     }}
+                    onOpenLetter={() => {
+                      const record = viewingSagRecord;
+                      setViewingSagRecord(null);
+                      handleOpenSagLetterForTransaction(record);
+                    }}
                   />
                 )}
               </div>
             );
           })()}
+
+          {/* TAB: SURAT AKUAN GADAIAN (SAG) */}
+          {activeTab === 'sagDocuments' && (
+            <SagDocumentsTab
+              documents={sagDocuments}
+              canManage={canManageSagDocuments}
+              canDelete={canDeleteSagDocuments}
+              onPreview={document => setSagPreviewDocument(document)}
+              onCreate={handleCreateSagDocument}
+              onEdit={document => handleOpenSagDocumentForm(document)}
+              onDelete={handleDeleteSagDocument}
+              onFollowUp={handleFollowUpSagDocument}
+              onOpenSettings={() => setIsSagLetterheadOpen(true)}
+            />
+          )}
 
           {/* TAB: ASSET RECORD / PENGURUSAN EMAS & INVENTORI */}
           {activeTab === 'assets' && (() => {
@@ -9294,6 +9908,41 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         />
       )}
 
+      {/* SURAT AKUAN GADAIAN (SAG) */}
+      {sagFormDocument && (
+        <SagDocumentForm
+          key={String(sagFormDocument.id)}
+          initialDocument={sagFormDocument}
+          transactions={visibleTransactions}
+          institutions={visibleInstitutions}
+          members={sagMemberOptions}
+          letterhead={sagLetterhead}
+          existingNumbers={sagDocuments.filter(document => !document.deletedAt).map(document => document.documentNo)}
+          sagDocuments={sagDocuments}
+          assets={visibleAssets}
+          resolveTransactionAssets={resolveTransactionAssets}
+          onClose={() => setSagFormDocument(null)}
+          onSave={handleSaveSagDocument}
+        />
+      )}
+
+      {sagPreviewDocument && (
+        <SagLetterOverlay
+          document={sagPreviewDocument}
+          letterhead={sagLetterhead}
+          onClose={() => setSagPreviewDocument(null)}
+        />
+      )}
+
+      {isSagLetterheadOpen && (
+        <SagLetterheadModal
+          settings={sagSettings}
+          letterhead={sagLetterhead}
+          onClose={() => setIsSagLetterheadOpen(false)}
+          onSave={handleSaveSagSettings}
+        />
+      )}
+
       {isCorrectionModalOpen && correctionTransaction && (
         <CorrectionActionModal
           transaction={correctionTransaction}
@@ -9361,10 +10010,29 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         />
       )}
 
+      {viewingMemberProfile && (
+        <MemberProfileViewer
+          state={viewingMemberProfile}
+          supabaseClient={supabaseClient}
+          onClose={() => setViewingMemberProfile(null)}
+          onEdit={userId => {
+            const account = organizationUsers.find(item => String(item.id) === String(userId));
+            setViewingMemberProfile(null);
+            if (account) {
+              setEditingMember({
+                ...account,
+                registry: memberRegistry.find(entry => entry.userId === account.id) || null
+              });
+            }
+          }}
+        />
+      )}
+
       {editingMember && (
         <MemberAdminModal
           member={editingMember}
-          registryEntry={memberRegistry.find(entry => entry.userId === editingMember.id) || null}
+          supabaseClient={supabaseClient}
+          registryEntry={editingMember.registry || memberRegistry.find(entry => entry.userId === editingMember.id) || null}
           existingMemberNumbers={memberRegistry.filter(entry => entry.userId !== editingMember.id).map(entry => entry.memberNo).filter(Boolean)}
           existingIcNumbers={memberRegistry
             .filter(entry => entry.userId !== editingMember.id)
@@ -9390,6 +10058,15 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           onProfilePhotoChange={next => {
             setProfilePhotoUrl(next?.url || null);
             setProfilePhotoPath(next?.path || '');
+            // Kekalkan direktori Keahlian Ahli segerak dengan gambar profil ahli.
+            setMemberRegistry(previous => previous.map(entry => entry.userId === user.id
+              ? {
+                  ...entry,
+                  photoPath: next?.path || '',
+                  updatedAt: new Date().toISOString(),
+                  updatedBy: recordActor
+                }
+              : entry));
           }}
         />
       )}
@@ -9454,10 +10131,270 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
 // --- SUB-COMPONENTS ---
 
-function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existingIcNumbers, onClose, onSave }) {
+function MemberProfileViewer({ state, supabaseClient, onClose, onEdit }: {
+  state: { userId: string; loading: boolean; error: string; profile: any | null };
+  supabaseClient: SupabaseClient;
+  onClose: () => void;
+  onEdit?: (userId: string) => void;
+}) {
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  const profile = state.profile;
+  const photo = useSignedAssetUrl(supabaseClient, profile?.avatarPhotoPath || '', 3600, profilePhotoBucket);
+  const maskAccount = (value?: string) => {
+    const digits = String(value || '').replace(/\s+/g, '');
+    if (!digits) return '-';
+    return digits.length <= 4 ? digits : `•••• ${digits.slice(-4)}`;
+  };
+  const address = profile
+    ? [profile.addressLine, profile.city, [profile.postcode, profile.state].filter(Boolean).join(' ')]
+      .filter(value => String(value || '').trim().length > 0)
+      .join(', ')
+    : '';
+  const field = (label: string, value?: string) => (
+    <div key={label}>
+      <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</dt>
+      <dd className="text-sm font-semibold text-slate-800">{String(value || '').trim() || '-'}</dd>
+    </div>
+  );
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Profil ahli (paparan Admin)"
+      className="fixed inset-0 z-[66] flex items-end justify-center bg-slate-950/60 backdrop-blur-sm sm:items-center sm:p-6"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[94dvh] w-full max-w-3xl flex-col overflow-hidden rounded-t-2xl border border-slate-200 bg-white text-slate-800 shadow-2xl sm:max-h-[92dvh] sm:rounded-2xl"
+        onClick={event => event.stopPropagation()}
+      >
+        <div className="shrink-0 border-b border-slate-200/70 bg-gradient-to-br from-corporate-teal-700 via-corporate-teal-800 to-corporate-green-900 px-4 pb-4 pt-4 text-white sm:px-6 sm:pb-5 sm:pt-5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-white/15 text-white">
+                {photo.url ? (
+                  <img src={photo.url} alt="Gambar profil ahli" className="h-full w-full object-cover" />
+                ) : (
+                  <UserRound size={22} className="text-white/80" />
+                )}
+              </div>
+              <div className="min-w-0">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-teal-200">Profil Ahli · Paparan Admin</p>
+                <h2 className="truncate text-lg font-bold sm:text-xl">
+                  {profile?.fullName || (state.loading ? 'Memuatkan profil...' : 'Profil tidak tersedia')}
+                </h2>
+                <p className="truncate text-xs text-teal-100">{profile?.email || state.userId}</p>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {profile?.memberNo && (
+                    <span className="inline-flex items-center gap-1 rounded-md bg-white/15 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
+                      <Tag size={11} /> {profile.memberNo}
+                    </span>
+                  )}
+                  {profile?.role && (
+                    <span className="rounded-md bg-white/15 px-2 py-0.5 text-[11px] font-bold text-white">{profile.role}</span>
+                  )}
+                  {profile && (
+                    <span className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${profile.active ? 'bg-emerald-300 text-emerald-950' : 'bg-rose-300 text-rose-950'}`}>
+                      {profile.active ? 'Aktif' : 'Digantung'}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Tutup profil ahli"
+              className="rounded-lg p-2 text-white/80 transition-colors hover:bg-white/15 hover:text-white"
+            >
+              <X size={20} />
+            </button>
+          </div>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          {state.loading && (
+            <p className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm font-semibold text-slate-500">
+              Memuatkan profil ahli...
+            </p>
+          )}
+          {state.error && (
+            <p role="alert" className="rounded-xl bg-rose-50 p-4 text-sm font-semibold text-rose-700">
+              {state.error} Pastikan fungsi user-admin terkini telah di-deploy.
+            </p>
+          )}
+          {profile && (
+            <>
+              <section className="rounded-2xl border border-slate-200 bg-white p-4">
+                <h3 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-700">Butiran Peribadi &amp; Alamat</h3>
+                <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {field('No. Telefon', profile.phone)}
+                  {field('No. Kad Pengenalan', formatIcNumber(profile.icNumber))}
+                  <div className="sm:col-span-2">
+                    <dt className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Alamat</dt>
+                    <dd className="text-sm font-semibold text-slate-800">{address || '-'}</dd>
+                  </div>
+                </dl>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-4">
+                <h3 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-700">Waris</h3>
+                <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  {field('Nama Waris', profile.heirName)}
+                  {field('Hubungan', profile.heirRelationship)}
+                  {field('No. Telefon Waris', profile.heirPhone)}
+                </dl>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-4">
+                <h3 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-700">Akaun Bank</h3>
+                <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  {field('Nama Bank', profile.bankName)}
+                  {field('Nama Akaun', profile.bankAccountName)}
+                  {field('No. Akaun', maskAccount(profile.bankAccountNumber))}
+                </dl>
+                <p className="mt-2 text-[11px] font-medium text-slate-500">Nombor akaun dipaparkan sebahagian sahaja untuk privasi ahli.</p>
+              </section>
+
+              <section className="rounded-2xl border border-slate-200 bg-white p-4">
+                <h3 className="mb-3 text-sm font-bold uppercase tracking-wide text-slate-700">PDPA &amp; Akaun</h3>
+                <dl className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  {field('Persetujuan PDPA', profile.pdpaConsentAt ? formatMalaysiaDateTime(profile.pdpaConsentAt) : 'Belum direkod')}
+                  {field('Ahli Sejak', profile.memberSince ? formatMalaysiaDateTime(profile.memberSince) : '-')}
+                  {field('Log Masuk Terakhir', profile.lastSignInAt ? formatMalaysiaDateTime(profile.lastSignInAt) : 'Belum pernah')}
+                </dl>
+              </section>
+            </>
+          )}
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 bg-slate-50 px-4 py-3 sm:flex-row sm:justify-end sm:px-6">
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto"
+          >
+            Tutup
+          </button>
+          {profile && onEdit && (
+            <button
+              type="button"
+              onClick={() => onEdit(state.userId)}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto"
+            >
+              <Pencil size={15} /> Kemaskini Maklumat Ahli
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existingIcNumbers, supabaseClient, onClose, onSave }) {
   const [fullName, setFullName] = useState(String(registryEntry?.fullName || ''));
   const [icDigits, setIcDigits] = useState(normalizeIcDigits(registryEntry?.icNumber || ''));
   const [memberNo, setMemberNo] = useState(String(registryEntry?.memberNo || ''));
+  const [photoPath, setPhotoPath] = useState(String(registryEntry?.photoPath || ''));
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const [photoError, setPhotoError] = useState('');
+  const [hasPendingPhoto, setHasPendingPhoto] = useState(false);
+  const pendingUploadRef = useRef('');
+  const savedRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    if (!photoPath) {
+      setPhotoPreview(null);
+      return () => { active = false; };
+    }
+    supabaseClient.storage
+      .from(profilePhotoBucket)
+      .createSignedUrl(photoPath, 3600)
+      .then(({ data, error }) => {
+        if (active) setPhotoPreview(error ? null : data?.signedUrl || null);
+      })
+      .catch(() => {
+        if (active) setPhotoPreview(null);
+      });
+    return () => { active = false; };
+  }, [photoPath, supabaseClient]);
+
+  useEffect(() => () => {
+    const pending = pendingUploadRef.current;
+    if (!pending || savedRef.current) return;
+    void (async () => {
+      try {
+        await supabaseClient.storage.from(profilePhotoBucket).remove([pending]);
+      } catch {
+        // fail senyap: fail yang tidak digunakan akan dibuang oleh pentadbir
+      }
+    })();
+  }, [supabaseClient]);
+
+  const discardPendingUpload = async () => {
+    const pending = pendingUploadRef.current;
+    pendingUploadRef.current = '';
+    if (!pending) return;
+    try {
+      await supabaseClient.storage.from(profilePhotoBucket).remove([pending]);
+    } catch {
+      // fail senyap
+    }
+  };
+  const handleCancelPendingPhoto = async () => {
+    await discardPendingUpload();
+    setHasPendingPhoto(false);
+    setPhotoPath(String(registryEntry?.photoPath || ''));
+    setPhotoPreview(null);
+    setPhotoError('');
+  };
+
+  const handlePhotoSelection = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!allowedAssetImageTypes.includes(file.type) || file.size === 0 || file.size > maximumProfilePhotoSize) {
+      setPhotoError('Pilih gambar JPEG, PNG atau WebP yang tidak melebihi 2 MB.');
+      return;
+    }
+    setPhotoBusy(true);
+    setPhotoError('');
+    await discardPendingUpload();
+    const path = `${member.id}/avatar/${Date.now()}-${crypto.randomUUID()}`;
+    try {
+      const { error } = await supabaseClient.storage
+        .from(profilePhotoBucket)
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (error) {
+        if (/bucket not found/i.test(error.message)) {
+          throw new Error('Storan gambar profil belum disediakan. Jalankan supabase/profile-photos.sql dalam Supabase SQL Editor, kemudian cuba lagi.');
+        }
+        if (/row-level security|permission|not authorized|denied/i.test(error.message)) {
+          throw new Error('Akses storan gambar profil ditolak. Pastikan polisi Admin/Manager dalam supabase/profile-photos.sql telah dijalankan.');
+        }
+        throw error;
+      }
+      const { data } = await supabaseClient.storage.from(profilePhotoBucket).createSignedUrl(path, 3600);
+      pendingUploadRef.current = path;
+      setHasPendingPhoto(true);
+      setPhotoPath(path);
+      setPhotoPreview(data?.signedUrl || null);
+    } catch (error) {
+      setPhotoError(error instanceof Error ? error.message : 'Gambar profil tidak dapat dimuat naik.');
+    } finally {
+      setPhotoBusy(false);
+    }
+  };
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -9491,16 +10428,16 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
       setError('No. Keahlian ini sudah digunakan. Sila jana nombor baharu.');
       return;
     }
-    onSave({ fullName: normalizedName, icNumber: icDigits, memberNo: finalMemberNo });
+    savedRef.current = true;
+    onSave({ fullName: normalizedName, icNumber: icDigits, memberNo: finalMemberNo, photoPath });
   };
-
   return (
     <div role="dialog" aria-modal="true" aria-label={`Kemaskini maklumat ahli ${member.email || ''}`} className="fixed inset-0 z-[66] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm sm:p-4" onClick={onClose}>
       <div className="flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
         <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
           <div>
             <h2 className="text-lg font-bold text-slate-800">Kemaskini Maklumat Ahli</h2>
-            <p className="text-xs text-slate-500">{member.email || '-'} · {member.role}</p>
+            <p className="text-xs text-slate-500">{member.email || '-'} · {member.role || 'Akaun tidak dimuatkan'}</p>
           </div>
           <button type="button" onClick={onClose} aria-label="Tutup kemaskini ahli" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
             <X size={20} />
@@ -9508,6 +10445,58 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
         </div>
 
         <form onSubmit={handleSubmit} className="min-h-0 flex-1 space-y-4 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3.5">
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-400">Gambar Profil Ahli</p>
+            <div className="mt-2 flex items-center gap-3">
+              <span className="h-16 w-16 shrink-0 overflow-hidden rounded-full border border-slate-200 bg-white">
+                {photoPreview ? (
+                  <img src={photoPreview} alt={`Gambar profil ${fullName || member.email || ''}`} className="h-full w-full object-cover" />
+                ) : (
+                  <span aria-hidden="true" className="flex h-full w-full items-center justify-center text-slate-400">
+                    <UserRound size={26} />
+                  </span>
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                {photoPath && !hasPendingPhoto ? (
+                  <p className="text-[11px] font-semibold leading-relaxed text-slate-600">
+                    Gambar profil ini diambil daripada <strong>Butiran Peribadi &amp; Alamat</strong> ahli dan dipaparkan sebagai rujukan sahaja.
+                  </p>
+                ) : hasPendingPhoto ? (
+                  <div>
+                    <p className="text-[11px] font-semibold leading-relaxed text-emerald-700">
+                      Gambar baharu sedia dimuat naik. Tekan <strong>Simpan Maklumat Ahli</strong> untuk menetapkannya pada profil ahli.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => { void handleCancelPendingPhoto(); }}
+                      className="mt-1 text-[11px] font-bold text-slate-500 underline transition-colors hover:text-slate-700"
+                    >
+                      Batalkan gambar baharu
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <label className={`inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800 transition-colors hover:bg-emerald-100 ${photoBusy ? 'pointer-events-none opacity-50' : ''}`}>
+                      <UploadCloud size={14} />
+                      {photoBusy ? 'Memuat naik...' : 'Tambah Gambar Profil'}
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/webp"
+                        className="sr-only"
+                        onChange={handlePhotoSelection}
+                        disabled={photoBusy}
+                      />
+                    </label>
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+                      Ahli ini belum mempunyai gambar profil. Muat naik JPEG, PNG atau WebP sehingga 2 MB — gambar akan dipaparkan pada profil ahli dan direktori keahlian.
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+            {photoError && <p role="alert" className="mt-2 rounded-lg bg-rose-50 p-2 text-xs font-semibold text-rose-700">{photoError}</p>}
+          </div>
           <label className="block text-sm font-medium text-slate-700">
             <span>Nama Penuh<span className="ml-0.5 text-rose-600">*</span></span>
             <input
@@ -9641,6 +10630,22 @@ function ProfileModal({ user, supabaseClient, theme, eligibility, profilePhotoUr
       if (nextName) setFullName(nextName);
       setIcNumber(String(fresh.ic_number || ''));
       setMemberNo(String(fresh.member_no || ''));
+      // Gambar profil mungkin dikemas kini oleh Admin melalui modul Keahlian Ahli.
+      const freshAvatar = String(fresh.avatar_photo_path || '');
+      setAvatarPath(freshAvatar);
+      if (freshAvatar) {
+        supabaseClient.storage
+          .from(profilePhotoBucket)
+          .createSignedUrl(freshAvatar, 3600)
+          .then(({ data: signed }) => {
+            if (active) setAvatarPreview(signed?.signedUrl || null);
+          })
+          .catch(() => {
+            if (active) setAvatarPreview(null);
+          });
+      } else {
+        setAvatarPreview(null);
+      }
     }).catch(() => undefined);
     return () => {
       active = false;
@@ -11708,28 +12713,62 @@ function TransactionModal({ institutions, availableAssets, pledgedAssets, source
   );
 }
 
-function useSignedAssetUrl(supabaseClient: SupabaseClient, path: string, expiresIn = 3600) {
+function useSignedAssetUrl(supabaseClient: SupabaseClient, path: string, expiresIn = 3600, bucket = transactionAttachmentsBucket) {
   const [image, setImage] = useState<{ path: string; url: string; error: boolean }>({ path: '', url: '', error: false });
 
   useEffect(() => {
+    if (!path) {
+      setImage({ path: '', url: '', error: false });
+      return;
+    }
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
     const loadImage = async () => {
       try {
-        const { data, error } = await supabaseClient.storage.from(transactionAttachmentsBucket).createSignedUrl(path, expiresIn);
+        const { data, error } = await supabaseClient.storage.from(bucket).createSignedUrl(path, expiresIn);
         if (error) throw error;
         if (active) setImage({ path, url: data.signedUrl, error: false });
       } catch (error) {
-        console.error('Gambar aset tidak dapat dimuatkan:', error);
+        console.error('Gambar tidak dapat dimuatkan:', error);
         if (active) setImage({ path, url: '', error: true });
       }
       if (active) timer = setTimeout(loadImage, Math.max(expiresIn - 600, 60) * 1000);
     };
     void loadImage();
     return () => { active = false; clearTimeout(timer); };
-  }, [path, supabaseClient, expiresIn]);
+  }, [path, supabaseClient, expiresIn, bucket]);
 
   return image;
+}
+
+function MemberAvatar({ path, label, supabaseClient, size = 'h-9 w-9' }: { path?: string; label?: string; supabaseClient: SupabaseClient; size?: string }) {
+  const image = useSignedAssetUrl(supabaseClient, path || '', 3600, profilePhotoBucket);
+  const initials = String(label || '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map(part => part[0])
+    .join('')
+    .toUpperCase();
+
+  if (!path) {
+    return (
+      <span aria-hidden="true" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-[11px] font-black text-slate-500`}>
+        {initials || <UserRound size={16} />}
+      </span>
+    );
+  }
+  if (image.path === path && image.error) {
+    return (
+      <span title="Gambar profil tidak dapat dimuatkan" aria-label="Gambar profil tidak dapat dimuatkan" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-[10px] font-bold text-rose-700`}>
+        !
+      </span>
+    );
+  }
+  if (image.path !== path || !image.url) {
+    return <span aria-label="Memuatkan gambar profil" className={`${size} shrink-0 animate-pulse rounded-full bg-slate-200`} />;
+  }
+  return <img src={image.url} alt={`Gambar profil ${label || ''}`} className={`${size} shrink-0 rounded-full border border-slate-200 object-cover`} />;
 }
 
 function AssetThumbnail({ path, label, supabaseClient, large = false, onView }: { path: string; label: string; supabaseClient: SupabaseClient; large?: boolean; onView?: () => void }) {
@@ -12066,7 +13105,7 @@ function InstitutionDetailModal({ institution, relatedTransactions = [], current
   );
 }
 
-function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGoldPrice, onClose, onEdit, onOpenCorrection }) {
+function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGoldPrice, onClose, onEdit, onOpenCorrection, onOpenLetter }) {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
@@ -12212,6 +13251,9 @@ function SagDetailModal({ transaction, statusInfo, linkedAssets = [], currentGol
           <div className="flex flex-col-reverse gap-2 sm:flex-row">
             <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-200 sm:w-auto">
               Tutup
+            </button>
+            <button type="button" onClick={onOpenLetter} className="flex w-full items-center justify-center gap-2 rounded-xl border border-corporate-teal-200 bg-corporate-teal-50 px-4 py-2.5 font-semibold text-corporate-teal-800 transition-colors hover:bg-corporate-teal-100 sm:w-auto">
+              <FileText size={15} /> Surat Akuan Gadaian
             </button>
             <button type="button" onClick={onEdit} className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 sm:w-auto">
               <Pencil size={15} /> Kemaskini SAG
