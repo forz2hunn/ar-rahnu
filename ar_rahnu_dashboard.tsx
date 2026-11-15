@@ -67,6 +67,7 @@ import {
   Lock,
   Landmark,
   Smartphone,
+  Camera,
   Pin,
   PinOff
 } from 'lucide-react';
@@ -286,6 +287,122 @@ const reconcileMemberRegistry = (
     }
   });
   return { entries: Array.from(byUser.values()), recovered };
+};
+
+/** Hasil carian gambar profil ahli di dalam bucket storan gambar profil. */
+type MemberPhotoLookup = {
+  /** Laluan objek (`<uid>/avatar/<fail>`) atau kosong jika tiada gambar. */
+  path: string;
+  /** `storage` = fail dijumpai dalam storan, `none` = tiada fail. */
+  source: 'storage' | 'none';
+  fileCount: number;
+  error: string;
+};
+
+const memberPhotoCache = new Map<string, MemberPhotoLookup>();
+const memberPhotoInflight = new Map<string, Promise<MemberPhotoLookup>>();
+
+/** Buang cache carian gambar (contohnya selepas muat naik atau tukar pengguna). */
+const clearMemberPhotoCache = () => {
+  memberPhotoCache.clear();
+  memberPhotoInflight.clear();
+};
+
+/** Nama fail gambar menggunakan prefiks masa, jadi fail terakhir mengikut susunan = terbaharu. */
+const newestStorageFileName = (entries: { name?: string; id?: string | null }[] | null | undefined) =>
+  (Array.isArray(entries) ? entries : [])
+    .filter(entry => entry && entry.name && entry.id !== null && entry.id !== undefined)
+    .map(entry => String(entry.name))
+    .sort()
+    .pop() || '';
+
+/**
+ * Cari gambar profil ahli terus dalam storan.
+ * Metadata `avatar_photo_path` boleh tertinggal (fungsi `user-admin` belum dideploy semula
+ * atau gambar dimuat naik dari peranti lain), jadi storan dijadikan sumber utama paparan.
+ */
+const findMemberPhotoInStorage = async (
+  supabaseClient: SupabaseClient,
+  userId: string,
+  refresh = false
+): Promise<MemberPhotoLookup> => {
+  const key = String(userId || '');
+  if (!key) return { path: '', source: 'none', fileCount: 0, error: '' };
+  if (refresh) {
+    memberPhotoCache.delete(key);
+    memberPhotoInflight.delete(key);
+  } else {
+    const cached = memberPhotoCache.get(key);
+    if (cached) return cached;
+    const pending = memberPhotoInflight.get(key);
+    if (pending) return pending;
+  }
+  const run = (async (): Promise<MemberPhotoLookup> => {
+    const storage = supabaseClient.storage.from(profilePhotoBucket);
+    const errors: string[] = [];
+    const readFolder = async (folder: string) => {
+      try {
+        const { data, error } = await storage.list(folder, { limit: 100, sortBy: { column: 'name', order: 'desc' } });
+        if (error) {
+          errors.push(error.message);
+          return [];
+        }
+        return Array.isArray(data) ? data : [];
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : 'Storan gambar profil tidak dapat dibaca.');
+        return [];
+      }
+    };
+    const avatarFolder = await readFolder(`${key}/avatar`);
+    const newestAvatar = newestStorageFileName(avatarFolder);
+    if (newestAvatar) {
+      const result: MemberPhotoLookup = {
+        path: `${key}/avatar/${newestAvatar}`,
+        source: 'storage',
+        fileCount: avatarFolder.filter(entry => entry.id !== null && entry.id !== undefined).length,
+        error: ''
+      };
+      memberPhotoCache.set(key, result);
+      return result;
+    }
+    const rootFolder = await readFolder(key);
+    const newestRoot = newestStorageFileName(rootFolder);
+    if (newestRoot) {
+      const result: MemberPhotoLookup = {
+        path: `${key}/${newestRoot}`,
+        source: 'storage',
+        fileCount: rootFolder.filter(entry => entry.id !== null && entry.id !== undefined).length,
+        error: ''
+      };
+      memberPhotoCache.set(key, result);
+      return result;
+    }
+    const empty: MemberPhotoLookup = { path: '', source: 'none', fileCount: 0, error: errors[0] || '' };
+    if (errors.length === 0) memberPhotoCache.set(key, empty);
+    return empty;
+  })();
+  memberPhotoInflight.set(key, run);
+  try {
+    return await run;
+  } finally {
+    memberPhotoInflight.delete(key);
+  }
+};
+
+/**
+ * Klasifikasi status gambar profil ahli untuk panel semakan Admin.
+ * Membezakan "tiada gambar" daripada "storan tidak dapat dibaca" supaya keputusan dibuat
+ * berdasarkan bukti, bukan andaian.
+ */
+const classifyMemberPhoto = (
+  metadataPath: string,
+  lookup: MemberPhotoLookup | null | undefined
+) => {
+  const hasMetadata = Boolean(String(metadataPath || '').trim());
+  if (!lookup) return 'checking' as const;
+  if (lookup.path) return hasMetadata ? 'synced' as const : 'storageOnly' as const;
+  if (lookup.error) return 'blocked' as const;
+  return hasMetadata ? 'metadataOnly' as const : 'none' as const;
 };
 /** Identiti pengguna yang melakukan CRUD pada satu rekod. */
 type RecordAuditActor = {
@@ -932,7 +1049,7 @@ const isMissingUserManagementSchemaError = (error) =>
   error?.code === '42703' ||
   /(?:ar_rahnu_organization_members|ar_rahnu_organizations).*(?:does not exist|schema cache)|column .*active.*does not exist/i.test(error?.message || '');
 // --- MAIN COMPONENT ---
-export { mergeMemberRegistries, buildMemberDirectory, reconcileMemberRegistry, MemberAdminModal, MemberAvatar, MemberProfileViewer };
+export { mergeMemberRegistries, buildMemberDirectory, reconcileMemberRegistry, MemberAdminModal, MemberAvatar, MemberProfileViewer, MemberPhotoAuditModal, findMemberPhotoInStorage, classifyMemberPhoto, clearMemberPhotoCache };
 export default function App() {
   if (!supabaseClient) {
     return (
@@ -1571,6 +1688,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   }, [user.user_metadata?.avatar_photo_path]);
 
   useEffect(() => {
+    // Cache carian gambar terikat pada sesi semasa supaya pengguna lain tidak mewarisi hasilnya.
+    clearMemberPhotoCache();
+  }, [user.id]);
+
+  useEffect(() => {
     let active = true;
     if (!profilePhotoPath) {
       setProfilePhotoUrl(null);
@@ -1866,6 +1988,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   const [editingMember, setEditingMember] = useState(null);
   const [selectedMemberProfileId, setSelectedMemberProfileId] = useState('');
   const [viewingMemberProfile, setViewingMemberProfile] = useState<{ userId: string; loading: boolean; error: string; profile: any | null } | null>(null);
+  const [photoAuditMembers, setPhotoAuditMembers] = useState<any[] | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState(null);
   const [correctionTransaction, setCorrectionTransaction] = useState(null);
@@ -4925,6 +5048,13 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       <PageRefreshButton onRefresh={() => void refreshPageRecords()} busy={isRefreshingRecords} />
                       <button
                         type="button"
+                        onClick={() => setPhotoAuditMembers(memberRows)}
+                        className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/40 bg-white/10 px-5 py-3 text-sm font-bold text-white shadow-sm transition-colors hover:bg-white/20"
+                      >
+                        <Camera size={16} /> Semak Gambar Profil
+                      </button>
+                      <button
+                        type="button"
                         onClick={handleGenerateAllMemberNumbers}
                         className="inline-flex items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-bold text-teal-900 shadow-sm transition-colors hover:bg-teal-50"
                       >
@@ -4963,10 +5093,10 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                   <div role="status" className="flex flex-col gap-2 rounded-2xl border border-corporate-teal-200 bg-corporate-teal-50 p-4">
                     <p className="flex items-center gap-2 text-sm font-bold text-corporate-teal-900">
                       <UserRound size={17} className="shrink-0" />
-                      Gambar profil ahli lain belum dapat dibaca
+                      Gambar profil ahli dibaca terus dari storan
                     </p>
                     <p className="text-xs font-medium leading-relaxed text-corporate-teal-800">
-                      Fungsi <span className="font-mono font-bold">user-admin</span> yang sedang digunakan belum memulangkan medan gambar profil (<span className="font-mono">avatarPhotoPath</span>). Deploy semula fungsi itu supaya gambar yang sudah dimuat naik dalam Profil Saya ahli dipaparkan di sini. Gambar profil anda sendiri tetap dipaparkan.
+                      Fungsi <span className="font-mono font-bold">user-admin</span> yang sedang digunakan belum memulangkan medan <span className="font-mono">avatarPhotoPath</span>, jadi aplikasi mencari fail gambar dalam folder storan setiap ahli. Gambar yang sudah dimuat naik tetap dipaparkan. Deploy semula fungsi itu supaya metadata gambar turut disegerakkan, dan tekan <span className="font-bold">Semak Gambar Profil</span> untuk pengesahan penuh.
                     </p>
                   </div>
                 )}
@@ -5091,6 +5221,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                               <div className="flex items-center gap-2.5">
                                 <MemberAvatar
                                   path={member.registry?.photoPath}
+                                  userId={member.id}
                                   label={member.registry?.fullName || member.email}
                                   supabaseClient={supabaseClient}
                                 />
@@ -10028,6 +10159,14 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
         />
       )}
 
+      {photoAuditMembers && (
+        <MemberPhotoAuditModal
+          members={photoAuditMembers}
+          supabaseClient={supabaseClient}
+          onClose={() => setPhotoAuditMembers(null)}
+        />
+      )}
+
       {editingMember && (
         <MemberAdminModal
           member={editingMember}
@@ -10146,7 +10285,8 @@ function MemberProfileViewer({ state, supabaseClient, onClose, onEdit }: {
   }, [onClose]);
 
   const profile = state.profile;
-  const photo = useSignedAssetUrl(supabaseClient, profile?.avatarPhotoPath || '', 3600, profilePhotoBucket);
+  const resolvedPhoto = useMemberPhotoPath(supabaseClient, String(state.userId || ''), String(profile?.avatarPhotoPath || ''));
+  const photo = useSignedAssetUrl(supabaseClient, resolvedPhoto.path, 3600, profilePhotoBucket);
   const maskAccount = (value?: string) => {
     const digits = String(value || '').replace(/\s+/g, '');
     if (!digits) return '-';
@@ -10299,6 +10439,197 @@ function MemberProfileViewer({ state, supabaseClient, onClose, onEdit }: {
   );
 }
 
+const memberPhotoStatusMeta: Record<string, { label: string; hint: string; className: string }> = {
+  checking: { label: 'Menyemak...', hint: 'Folder storan ahli sedang dibaca.', className: 'border-slate-200 bg-slate-50 text-slate-500' },
+  synced: { label: 'Ada gambar', hint: 'Fail dalam storan dan metadata sepadan.', className: 'border-emerald-300 bg-emerald-50 text-emerald-800' },
+  storageOnly: { label: 'Storan sahaja', hint: 'Fail gambar ada dalam storan tetapi metadata avatar kosong.', className: 'border-amber-300 bg-amber-50 text-amber-900' },
+  metadataOnly: { label: 'Fail tiada', hint: 'Metadata avatar menunjuk ke fail yang tidak ada dalam storan.', className: 'border-rose-300 bg-rose-50 text-rose-800' },
+  none: { label: 'Tiada fail', hint: 'Tiada fail gambar dalam folder storan ahli (atau folder tidak dapat dibaca).', className: 'border-slate-300 bg-slate-100 text-slate-600' },
+  blocked: { label: 'Tidak dapat dibaca', hint: 'Polisi storan menolak akses baca untuk folder ahli ini.', className: 'border-rose-300 bg-rose-50 text-rose-800' }
+};
+
+function MemberPhotoAuditModal({ members, supabaseClient, onClose }: {
+  members: any[];
+  supabaseClient: SupabaseClient;
+  onClose: () => void;
+}) {
+  const [lookups, setLookups] = useState<Record<string, MemberPhotoLookup>>({});
+  const [checkedCount, setCheckedCount] = useState(0);
+  const [isScanning, setIsScanning] = useState(true);
+  const [scanToken, setScanToken] = useState(0);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  useEffect(() => {
+    let active = true;
+    setLookups({});
+    setCheckedCount(0);
+    setIsScanning(true);
+    void (async () => {
+      for (const member of members) {
+        if (!active) return;
+        const lookup = await findMemberPhotoInStorage(supabaseClient, String(member?.id || ''), true);
+        if (!active) return;
+        setLookups(previous => ({ ...previous, [String(member.id)]: lookup }));
+        setCheckedCount(count => count + 1);
+      }
+      if (active) setIsScanning(false);
+    })();
+    return () => { active = false; };
+  }, [members, supabaseClient, scanToken]);
+
+  const rows = members.map(member => {
+    const id = String(member?.id || '');
+    const lookup = lookups[id];
+    const metadataPath = String(member?.avatarPhotoPath || member?.registry?.photoPath || '');
+    return { member, id, lookup, metadataPath, status: classifyMemberPhoto(metadataPath, lookup) };
+  });
+  const countByStatus = (status: string) => rows.filter(row => row.status === status).length;
+  const storageError = rows.map(row => row.lookup?.error || '').find(Boolean) || '';
+  const summary: { status: string; value: number }[] = [
+    { status: 'synced', value: countByStatus('synced') },
+    { status: 'storageOnly', value: countByStatus('storageOnly') },
+    { status: 'metadataOnly', value: countByStatus('metadataOnly') },
+    { status: 'none', value: countByStatus('none') },
+    { status: 'blocked', value: countByStatus('blocked') }
+  ];
+
+  return (
+    <div role="dialog" aria-modal="true" aria-label="Semakan gambar profil ahli" className="fixed inset-0 z-[67] flex items-center justify-center bg-slate-900/70 p-2 backdrop-blur-sm sm:p-4" onClick={onClose}>
+      <div className="flex max-h-[92dvh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl bg-white text-slate-800 shadow-2xl animate-in zoom-in-95 duration-200" onClick={event => event.stopPropagation()}>
+        <div className="flex items-start justify-between gap-3 border-b border-slate-100 bg-slate-50 px-4 py-4 sm:px-6">
+          <div className="min-w-0">
+            <h2 className="text-lg font-bold text-slate-800">Semakan Gambar Profil Ahli</h2>
+            <p className="text-xs text-slate-500">
+              Membaca folder <span className="font-mono">ar-rahnu-profile-photos/&lt;uid&gt;/avatar</span> setiap ahli dan membandingkannya dengan metadata avatar.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Tutup semakan gambar profil" className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700">
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4 custom-scrollbar sm:p-6">
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <div className="flex items-center justify-between gap-3 text-xs font-bold text-slate-600">
+              <span>{isScanning ? `Menyemak ${checkedCount} daripada ${members.length} ahli...` : `Semakan selesai untuk ${members.length} ahli`}</span>
+              <span className="font-mono text-[11px] text-slate-400">{isScanning ? `${members.length ? Math.round((checkedCount / members.length) * 100) : 100}%` : '100%'}</span>
+            </div>
+            <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-slate-200">
+              <div className="h-full rounded-full bg-emerald-500 transition-all" style={{ width: `${members.length ? Math.round((checkedCount / members.length) * 100) : 100}%` }} />
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {summary.map(item => (
+              <span key={item.status} className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-bold ${memberPhotoStatusMeta[item.status].className}`}>
+                {memberPhotoStatusMeta[item.status].label}
+                <span className="font-mono">{item.value}</span>
+              </span>
+            ))}
+          </div>
+
+          {storageError && (
+            <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs font-semibold leading-relaxed text-rose-800">
+              Folder gambar tidak dapat dibaca sepenuhnya: <span className="font-mono">{storageError}</span>. Jalankan semula <span className="font-mono">supabase/profile-photos.sql</span> supaya polisi Admin/Manager organisasi memberi akses baca kepada folder ahli.
+            </p>
+          )}
+
+          {!storageError && !isScanning && countByStatus('synced') + countByStatus('storageOnly') === 0 && rows.length > 1 && (
+            <p role="status" className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs font-semibold leading-relaxed text-amber-900">
+              Tiada fail gambar dijumpai dalam mana-mana folder ahli. Jika anda percaya gambar sudah dimuat naik, pastikan polisi <span className="font-mono">Organization managers can read member profile photos</span> telah dipasang dengan menjalankan semula <span className="font-mono">supabase/profile-photos.sql</span> — tanpa polisi itu, folder ahli lain kelihatan kosong walaupun fail wujud.
+            </p>
+          )}
+
+          <div className="overflow-hidden rounded-xl border border-slate-200">
+            <div className="w-full overflow-x-auto custom-scrollbar">
+              <table className="w-full min-w-max border-collapse text-left text-xs">
+                <thead className="bg-slate-50 text-[10px] uppercase tracking-wider text-slate-500">
+                  <tr>
+                    <th className="px-3 py-2.5 font-bold">Ahli</th>
+                    <th className="px-3 py-2.5 font-bold">No. Keahlian</th>
+                    <th className="px-3 py-2.5 font-bold">Metadata avatar</th>
+                    <th className="px-3 py-2.5 font-bold">Fail dalam storan</th>
+                    <th className="px-3 py-2.5 font-bold">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                  {rows.map(row => (
+                    <tr key={row.id || Math.random().toString(36)}>
+                      <td className="px-3 py-2.5">
+                        <div className="flex items-center gap-2">
+                          <MemberAvatar
+                            path={row.metadataPath}
+                            userId={row.id}
+                            label={row.member?.registry?.fullName || row.member?.email || ''}
+                            supabaseClient={supabaseClient}
+                            size="h-8 w-8"
+                          />
+                          <div className="min-w-0">
+                            <span className="block max-w-[180px] truncate text-sm font-bold text-slate-800">
+                              {row.member?.registry?.fullName || row.member?.email || 'Ahli tanpa nama'}
+                            </span>
+                            <span className="block max-w-[180px] truncate text-[11px] text-slate-500">{row.member?.email || '-'}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-3 py-2.5 font-mono text-[11px] text-slate-600">{row.member?.registry?.memberNo || '-'}</td>
+                      <td className="px-3 py-2.5">
+                        {row.metadataPath ? (
+                          <span className="block max-w-[210px] truncate font-mono text-[11px] text-slate-600" title={row.metadataPath}>{row.metadataPath}</span>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">Tiada</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        {row.lookup?.path ? (
+                          <div>
+                            <span className="block max-w-[210px] truncate font-mono text-[11px] text-slate-600" title={row.lookup.path}>{row.lookup.path}</span>
+                            <span className="text-[10px] font-bold uppercase text-slate-400">{row.lookup.fileCount} fail</span>
+                          </div>
+                        ) : (
+                          <span className="text-[11px] text-slate-400">{row.lookup ? 'Tiada' : 'Menyemak...'}</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2.5">
+                        <span title={memberPhotoStatusMeta[row.status].hint} className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-bold ${memberPhotoStatusMeta[row.status].className}`}>
+                          {memberPhotoStatusMeta[row.status].label}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <p className="text-[11px] font-medium leading-relaxed text-slate-500">
+            Status <span className="font-bold">Storan sahaja</span> bermaksud gambar memang sudah dimuat naik oleh ahli tetapi metadata avatar belum disegerakkan; gambar tetap dipaparkan dalam direktori. Status <span className="font-bold">Fail tiada</span> bermaksud metadata masih menyimpan laluan fail yang telah dibuang.
+          </p>
+        </div>
+
+        <div className="flex flex-col-reverse gap-2 border-t border-slate-100 px-4 py-3 sm:flex-row sm:justify-end sm:px-6">
+          <button type="button" onClick={onClose} className="w-full rounded-xl px-4 py-2.5 font-semibold text-slate-600 transition-colors hover:bg-slate-100 sm:w-auto">Tutup</button>
+          <button
+            type="button"
+            onClick={() => setScanToken(token => token + 1)}
+            disabled={isScanning}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 font-semibold text-white shadow-sm transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+          >
+            <RefreshCw size={15} className={isScanning ? 'animate-spin' : ''} /> Semak semula
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existingIcNumbers, supabaseClient, onClose, onSave }) {
   const [fullName, setFullName] = useState(String(registryEntry?.fullName || ''));
   const [icDigits, setIcDigits] = useState(normalizeIcDigits(registryEntry?.icNumber || ''));
@@ -10307,6 +10638,7 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [photoBusy, setPhotoBusy] = useState(false);
   const [photoError, setPhotoError] = useState('');
+  const [photoStorageNote, setPhotoStorageNote] = useState('');
   const [hasPendingPhoto, setHasPendingPhoto] = useState(false);
   const pendingUploadRef = useRef('');
   const savedRef = useRef(false);
@@ -10328,6 +10660,24 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
       });
     return () => { active = false; };
   }, [photoPath, supabaseClient]);
+
+  // Gambar mungkin sudah ada dalam storan walaupun metadata profil belum disegerakkan.
+  useEffect(() => {
+    let active = true;
+    if (hasPendingPhoto || !member?.id) return () => { active = false; };
+    void findMemberPhotoInStorage(supabaseClient, String(member.id), true).then(lookup => {
+      if (!active) return;
+      if (lookup.path) {
+        setPhotoPath(lookup.path);
+        setPhotoStorageNote('');
+        return;
+      }
+      setPhotoStorageNote(lookup.error
+        ? `Folder gambar ahli tidak dapat dibaca: ${lookup.error}`
+        : 'Tiada fail gambar dalam folder storan ahli ini.');
+    });
+    return () => { active = false; };
+  }, [hasPendingPhoto, member?.id, supabaseClient]);
 
   useEffect(() => () => {
     const pending = pendingUploadRef.current;
@@ -10386,6 +10736,7 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
       }
       const { data } = await supabaseClient.storage.from(profilePhotoBucket).createSignedUrl(path, 3600);
       pendingUploadRef.current = path;
+      clearMemberPhotoCache();
       setHasPendingPhoto(true);
       setPhotoPath(path);
       setPhotoPreview(data?.signedUrl || null);
@@ -10495,6 +10846,9 @@ function MemberAdminModal({ member, registryEntry, existingMemberNumbers, existi
                 )}
               </div>
             </div>
+            {photoStorageNote && !hasPendingPhoto && (
+              <p className="mt-2 rounded-lg bg-amber-50 p-2 text-[11px] font-semibold leading-relaxed text-amber-900">{photoStorageNote}</p>
+            )}
             {photoError && <p role="alert" className="mt-2 rounded-lg bg-rose-50 p-2 text-xs font-semibold text-rose-700">{photoError}</p>}
           </div>
           <label className="block text-sm font-medium text-slate-700">
@@ -12741,8 +13095,33 @@ function useSignedAssetUrl(supabaseClient: SupabaseClient, path: string, expires
   return image;
 }
 
-function MemberAvatar({ path, label, supabaseClient, size = 'h-9 w-9' }: { path?: string; label?: string; supabaseClient: SupabaseClient; size?: string }) {
-  const image = useSignedAssetUrl(supabaseClient, path || '', 3600, profilePhotoBucket);
+function useMemberPhotoPath(supabaseClient: SupabaseClient, userId: string, hintPath: string, enabled = true) {
+  const [state, setState] = useState<{ path: string; lookup: MemberPhotoLookup | null }>({
+    path: hintPath || '',
+    lookup: null
+  });
+
+  useEffect(() => {
+    let active = true;
+    if (!enabled || !userId) {
+      setState({ path: hintPath || '', lookup: null });
+      return () => { active = false; };
+    }
+    if (hintPath) setState({ path: hintPath, lookup: null });
+    void findMemberPhotoInStorage(supabaseClient, userId).then(lookup => {
+      if (!active) return;
+      setState({ path: lookup.path || hintPath || '', lookup });
+    });
+    return () => { active = false; };
+  }, [supabaseClient, userId, hintPath, enabled]);
+
+  return state;
+}
+
+function MemberAvatar({ path, userId, label, supabaseClient, size = 'h-9 w-9' }: { path?: string; userId?: string; label?: string; supabaseClient: SupabaseClient; size?: string }) {
+  const resolved = useMemberPhotoPath(supabaseClient, String(userId || ''), String(path || ''));
+  const effectivePath = resolved.path || String(path || '');
+  const image = useSignedAssetUrl(supabaseClient, effectivePath, 3600, profilePhotoBucket);
   const initials = String(label || '')
     .split(/\s+/)
     .filter(Boolean)
@@ -12751,21 +13130,21 @@ function MemberAvatar({ path, label, supabaseClient, size = 'h-9 w-9' }: { path?
     .join('')
     .toUpperCase();
 
-  if (!path) {
+  if (!effectivePath) {
     return (
       <span aria-hidden="true" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-[11px] font-black text-slate-500`}>
         {initials || <UserRound size={16} />}
       </span>
     );
   }
-  if (image.path === path && image.error) {
+  if (image.path === effectivePath && image.error) {
     return (
       <span title="Gambar profil tidak dapat dimuatkan" aria-label="Gambar profil tidak dapat dimuatkan" className={`${size} flex shrink-0 items-center justify-center rounded-full border border-rose-200 bg-rose-50 text-[10px] font-bold text-rose-700`}>
         !
       </span>
     );
   }
-  if (image.path !== path || !image.url) {
+  if (image.path !== effectivePath || !image.url) {
     return <span aria-label="Memuatkan gambar profil" className={`${size} shrink-0 animate-pulse rounded-full bg-slate-200`} />;
   }
   return <img src={image.url} alt={`Gambar profil ${label || ''}`} className={`${size} shrink-0 rounded-full border border-slate-200 object-cover`} />;
