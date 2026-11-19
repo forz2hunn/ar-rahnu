@@ -1294,6 +1294,12 @@ export type SagExternalImportInput = {
   accountNo?: string;
   /** No. kotak/peti marhun pada surat asal. */
   poBox?: string;
+  /** No. telefon ahli pada surat asal. */
+  memberPhone?: string;
+  /** Alamat ahli pada surat asal. */
+  memberAddress?: string;
+  /** Nama waris pada surat asal. */
+  heirName?: string;
   /** Keuntungan jualan (ribh) yang tercetak pada surat asal. */
   profitAmount?: number;
   /** No. Sijil Komoditi pada surat asal. */

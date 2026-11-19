@@ -9,6 +9,7 @@ import {
   Save,
   ScanText,
   Trash2,
+  Upload,
   X
 } from 'lucide-react';
 import {
@@ -142,6 +143,9 @@ export function SagDocumentForm({
   const [errors, setErrors] = useState<string[]>([]);
   const [isScanningAttachment, setIsScanningAttachment] = useState(false);
   const [scanFeedback, setScanFeedback] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
+  const [isImportingMarhun, setIsImportingMarhun] = useState(false);
+  const [marhunImportFeedback, setMarhunImportFeedback] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
+  const marhunImportInputRef = useRef<HTMLInputElement | null>(null);
   const [assetPickerId, setAssetPickerId] = useState('');
   const [isLoadingMemberProfile, setIsLoadingMemberProfile] = useState(false);
   const selectedMemberUserIdRef = useRef('');
@@ -276,6 +280,9 @@ export function SagDocumentForm({
       const memberPatch: Partial<SagMemberSnapshot> = {};
       if (fields.memberName) memberPatch.name = fields.memberName;
       if (fields.memberIcNumber) memberPatch.icNumber = fields.memberIcNumber;
+      if (fields.memberPhone) memberPatch.phone = fields.memberPhone;
+      if (fields.memberAddress) memberPatch.address = fields.memberAddress;
+      if (fields.heirName) memberPatch.heirName = fields.heirName;
       if (fields.poBox) memberPatch.poBox = fields.poBox;
       if (Object.keys(memberPatch).length) next.member = { ...next.member, ...memberPatch };
       if (fields.marhunValue && fields.marhunValue > 0) {
@@ -335,6 +342,69 @@ export function SagDocumentForm({
       });
     } finally {
       setIsScanningAttachment(false);
+    }
+  };
+
+  /**
+   * Import HANYA jadual Keterangan Marhun daripada fail surat institusi lain
+   * (PDF/imej). Medan lain pada borang tidak diubah.
+   */
+  const handleImportMarhunFiles = async (files: File[]) => {
+    if (!files.length || isImportingMarhun) return;
+    setIsImportingMarhun(true);
+    setMarhunImportFeedback({ tone: 'info', message: 'Membaca jadual Keterangan Marhun...' });
+    try {
+      const extraction = await extractSagImportText(files, (message, progress) => {
+        setMarhunImportFeedback({
+          tone: 'info',
+          message: progress !== undefined ? `${message} (${Math.round(progress * 100)}%)` : message
+        });
+      });
+      const parsed = parseSagImportText(extraction.text);
+      const importedFromLetter = parsed.fields.marhunItems || [];
+      if (!importedFromLetter.length) {
+        setMarhunImportFeedback({
+          tone: 'error',
+          message: 'Jadual Keterangan Marhun tidak ditemui dalam fail ini. Gunakan PDF asal atau imej yang lebih jelas.'
+        });
+        return;
+      }
+      const importedItems: SagMarhunItem[] = importedFromLetter.map((item, index) => ({
+        id: `import-marhun-${Date.now()}-${index}`,
+        assetId: null,
+        description: item.description,
+        quantity: item.quantity,
+        karat: item.karat,
+        ratePerGram: roundMoney(item.ratePerGram),
+        weight: roundMoney(item.weight),
+        marhunValue: roundMoney(item.marhunValue),
+        fineness: item.fineness ?? undefined
+      }));
+      const totals = summarizeSagMarhunItems(importedItems);
+      const letterTotal = Number(parsed.fields.marhunValue) > 0
+        ? roundMoney(parsed.fields.marhunValue)
+        : roundMoney(totals.value);
+      setForm(previous => ({
+        ...previous,
+        marhunItems: importedItems,
+        marhunValue: letterTotal,
+        marhunValueOverride: letterTotal
+      }));
+      setErrors([]);
+      const mismatch = Math.abs(totals.value - letterTotal) > 0.05;
+      setMarhunImportFeedback({
+        tone: mismatch ? 'info' : 'success',
+        message: `Keterangan Marhun diimport: ${importedItems.length} item · ${totals.weight.toFixed(2)} g · ` +
+          `${formatSagMoney(totals.value)}` +
+          (mismatch ? ` (surat: ${formatSagMoney(letterTotal)} — sila semak item).` : '.')
+      });
+    } catch (error) {
+      setMarhunImportFeedback({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Import Keterangan Marhun gagal.'
+      });
+    } finally {
+      setIsImportingMarhun(false);
     }
   };
 
@@ -1337,8 +1407,42 @@ export function SagDocumentForm({
                 >
                   <Plus size={13} /> Item Manual
                 </button>
+                <button
+                  type="button"
+                  onClick={() => marhunImportInputRef.current?.click()}
+                  disabled={isImportingMarhun}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-2 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-40"
+                >
+                  <Upload size={13} /> {isImportingMarhun ? 'Mengimport...' : 'Import Keterangan Marhun'}
+                </button>
+                <input
+                  ref={marhunImportInputRef}
+                  type="file"
+                  accept="application/pdf,image/*"
+                  multiple
+                  className="hidden"
+                  onChange={event => {
+                    const selected = Array.from(event.target.files || []);
+                    event.target.value = '';
+                    void handleImportMarhunFiles(selected);
+                  }}
+                />
               </div>
             </div>
+
+            {marhunImportFeedback && (
+              <p
+                className={`mb-2 rounded-lg px-3 py-2 text-[11px] font-semibold ${
+                  marhunImportFeedback.tone === 'error'
+                    ? 'bg-rose-50 text-rose-800'
+                    : marhunImportFeedback.tone === 'success'
+                      ? 'bg-emerald-50 text-emerald-800'
+                      : 'bg-cyan-50 text-cyan-900'
+                }`}
+              >
+                {marhunImportFeedback.message}
+              </p>
+            )}
 
             {assetOptions.others.length > 0 && (
               <p className="mb-2 text-[11px] font-medium text-slate-500">

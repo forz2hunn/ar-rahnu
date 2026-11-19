@@ -9,6 +9,8 @@
  */
 
 export type SagImportMarhunItem = {
+  /** Nombor Bil pada jadual surat asal (untuk susunan semula). */
+  bil?: number;
   description: string;
   quantity: number;
   karat: string;
@@ -47,6 +49,12 @@ export type SagImportParsedFields = {
   accountNo?: string;
   /** No. kotak/peti tempat marhun disimpan. */
   poBox?: string;
+  /** No. telefon ahli pada surat asal. */
+  memberPhone?: string;
+  /** Alamat ahli pada surat asal. */
+  memberAddress?: string;
+  /** Nama waris pada surat asal. */
+  heirName?: string;
   /** No. Sijil Komoditi (tawarruq). */
   commodityCertificateNo?: string;
   /** Jumlah bayaran keuntungan setiap selang tempoh (RM). */
@@ -62,19 +70,52 @@ export type SagImportParseResult = {
   /** Label medan (untuk paparan) yang berjaya dipadankan. */
   matchedLabels: string[];
   notes: string[];
+  /** Profil institusi yang dikesan daripada teks surat. */
+  profile: SagImportProfile;
+};
+
+export type SagImportProfile = {
+  id: 'kpdrm' | 'xchange' | 'bank-rakyat' | 'pos' | 'generic';
+  label: string;
+  /** Padanan nama institusi dalam teks surat. */
+  matches?: RegExp;
+  /**
+   * Susunan lajur jadual marhun:
+   *  - `weight-value`: ... Karat | Berat | Nilai
+   *  - `rate-weight-value`: ... Karat | Harga (RM/g) | Berat | Nilai
+   */
+  marhunColumns: 'weight-value' | 'rate-weight-value';
+};
+
+/** Daftar profil institusi — memudahkan format surat berbeza dikendalikan berasingan. */
+export const SAG_IMPORT_PROFILES: SagImportProfile[] = [
+  { id: 'kpdrm', label: 'Ar-Rahnu KPDRM', matches: /kpdrm/i, marhunColumns: 'rate-weight-value' },
+  { id: 'xchange', label: 'Ar-Rahnu XChange', matches: /x\s*-?\s*change|overlap/i, marhunColumns: 'weight-value' },
+  { id: 'bank-rakyat', label: 'Bank Rakyat Ar-Rahnu', matches: /bank\s*rakyat/i, marhunColumns: 'weight-value' },
+  { id: 'pos', label: 'Pos Ar-Rahnu', matches: /pos\s*ar-?rahnu/i, marhunColumns: 'weight-value' },
+  { id: 'generic', label: 'Umum', marhunColumns: 'weight-value' }
+];
+
+export const detectSagImportProfile = (text: string): SagImportProfile => {
+  const haystack = String(text || '');
+  return SAG_IMPORT_PROFILES.find(profile => profile.matches?.test(haystack))
+    || SAG_IMPORT_PROFILES[SAG_IMPORT_PROFILES.length - 1];
 };
 
 /** Label lazim pada surat Ar-Rahnu; turutan menentukan keutamaan. */
 const FIELD_LABELS = {
   institutionName: ['Cawangan/Kedai', 'Cawangan', 'Nama Institusi', 'Institusi', 'Koperasi'],
   documentNo: [
-    'No. Surat', 'No Surat', 'No Sir', 'No. Sijil', 'No Sijil',
+    'No. Surat', 'No Surat', 'No Sir', 'No. Sijil', 'No Sijil', 'No. SAG', 'No SAG',
     'No. Rujukan', 'No Rujukan', 'No. Gadaian', 'No Gadaian'
   ],
   accountNo: ['No. Akaun', 'No Akaun', 'Nombor Akaun', 'No. Akaun Gadaian'],
   poBox: ['No. Kotak', 'No Kotak', 'No. Peti', 'No Peti', 'Kotak Simpanan'],
+  memberPhone: ['No. Telefon', 'No Telefon', 'No. Tel', 'Telefon', 'Tel'],
+  memberAddress: ['Alamat Surat Menyurat', 'Alamat Tetap', 'Alamat'],
+  heirName: ['Nama Waris', 'Waris'],
   commodityCertificateNo: ['No. Sijil Komoditi', 'No Sijil Komoditi', 'Sijil Komoditi', 'No. Sijil'],
-  profitPaymentAmount: ['Jumlah Bayaran Keuntungan', 'Bayaran Keuntungan'],
+  profitPaymentAmount: ['Jumlah Bayaran Keuntungan', 'Bayaran Keuntungan', 'Jumlah Keuntungan Yang Perlu Dibayar'],
   profitPaymentMonths: ['Cara Bayaran Keuntungan', 'Cara Bayaran'],
   memberName: ['Nama Ahli', 'Nama Pelanggan', 'Nama Penggadai', 'Nama Pemilik', 'Nama'],
   memberIcNumber: [
@@ -264,8 +305,12 @@ const parseMoneyToken = (raw: string): number | null => {
   return Number.isFinite(numeric) ? roundMoneyValue(numeric) : null;
 };
 
+/** "RM 3 020.00" → "RM 3020.00" (pemisah ribuan ruang). */
+const normalizeSpacedThousands = (value: string) =>
+  String(value || '').replace(/\b\d{1,3}(?:\s\d{3})+(?:[.,]\d{1,2})?\b/g, token => token.replace(/\s+/g, ''));
+
 const parseMoneyValue = (raw: string): number | null => {
-  const text = String(raw || '');
+  const text = normalizeSpacedThousands(String(raw || ''));
   // Token calon: huruf digit-like dibenarkan, tetapi token mesti mengandungi
   // digit sebenar supaya perkataan seperti "Price" tidak dibaca sebagai 1.
   const tokenRegex = new RegExp(`(?:RM|R\\s?M|RN)?\\s*[\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*`, 'gi');
@@ -449,10 +494,20 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
   const fields: SagImportParsedFields = {};
   const notes: string[] = [];
 
-  const institution = extractField(lines, FIELD_LABELS.institutionName, {
-    validate: value => cleanInstitution(value) !== ''
-  });
-  if (institution) fields.institutionName = cleanInstitution(institution.value);
+  // Kepala surat institusi (contoh: "AR-RAHNU KPDRM - BANGI") lebih tepat
+  // daripada label medan yang mungkin menangkap baris alamat syarikat.
+  const headerLine = lines.slice(0, 10).find(line =>
+    /ar-?rahnu/i.test(line) &&
+    !/surat|perjanjian|akuan|telah|adalah/i.test(line) &&
+    line.length <= 70
+  );
+  if (headerLine) fields.institutionName = cleanInstitution(headerLine) || headerLine;
+  if (!fields.institutionName) {
+    const institution = extractField(lines, FIELD_LABELS.institutionName, {
+      validate: value => cleanInstitution(value) !== ''
+    });
+    if (institution) fields.institutionName = cleanInstitution(institution.value);
+  }
 
   const documentNo = extractField(lines, FIELD_LABELS.documentNo, {
     validate: value => cleanDocumentNo(value) !== '',
@@ -481,8 +536,9 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
   const paymentCadence = extractField(lines, FIELD_LABELS.profitPaymentMonths, {
     validate: value => /bulan/i.test(value) && /\d/.test(value)
   });
-  const cadenceMatch = (paymentCadence?.value || '').match(/(\d{1,2})\s*bulan/i)
-    || String(text || '').match(/(?:setiap|every)\s*(\d{1,2})\s*bulan/i);
+  const cadenceMatch = (paymentCadence?.value || '').match(/(?:setiap|every)\s*(\d{1,2})\s*bulan/i)
+    || String(text || '').match(/(?:setiap|every)\s*(\d{1,2})\s*bulan/i)
+    || String(text || '').match(/(\d{1,2})\s*bulan\s*sekali/i);
   if (cadenceMatch) {
     const cadenceMonths = Number(cadenceMatch[1]);
     if (cadenceMonths >= 1 && cadenceMonths <= 24) fields.profitPaymentMonths = cadenceMonths;
@@ -497,6 +553,32 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     validate: value => cleanName(value) !== ''
   });
   if (memberName) fields.memberName = cleanName(memberName.value);
+
+  const memberPhone = extractField(lines, FIELD_LABELS.memberPhone, {
+    validate: value => value.replace(/\D/g, '').length >= 7
+  });
+  if (memberPhone) fields.memberPhone = memberPhone.value.replace(/[^\d+]/g, '');
+
+  const heir = extractField(lines, FIELD_LABELS.heirName, {
+    validate: value => cleanName(value) !== ''
+  });
+  if (heir) fields.heirName = cleanName(heir.value);
+
+  const address = extractField(lines, FIELD_LABELS.memberAddress, {
+    validate: value => /[A-Za-z]{3}/.test(value)
+  });
+  if (address) {
+    // Alamat sering terbungkus beberapa baris; sambung sehingga label baharu.
+    const parts = [address.value];
+    for (let index = address.lineIndex + 1; index < Math.min(lines.length, address.lineIndex + 4); index += 1) {
+      const nextLine = lines[index];
+      if (isLabelLine(nextLine)) break;
+      if (!/[A-Za-z0-9]/.test(nextLine)) break;
+      if (parts.join(' ').length > 140) break;
+      parts.push(nextLine);
+    }
+    fields.memberAddress = parts.join(', ').replace(/\s+/g, ' ').trim();
+  }
 
   const ic = extractField(lines, FIELD_LABELS.memberIcNumber, {
     validate: value => normalizeIc(value) !== ''
@@ -537,8 +619,9 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
 
   const profit = extractField(lines, FIELD_LABELS.profitAmount, {
     validate: value => parseMoneyValue(value) !== null,
-    // "Jumlah Bayaran Keuntungan" ialah bayaran berkala, bukan jumlah ribh.
+    // Baris bayaran berkala / jadual bukan jumlah ribh keseluruhan.
     acceptLine: line => !/bayaran\s+(?:keuntungan|profit)/i.test(line)
+      && !/perlu\s*dibayar|terkumpul|tempoh/i.test(line)
   });
   if (profit) fields.profitAmount = parseMoneyValue(profit.value) || undefined;
 
@@ -882,16 +965,56 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     }
     const sectionLines = lines.slice(marhunSectionStart + 1, marhunSectionEnd);
     const sectionText = sectionLines.join(' ');
-    const rowTailPattern = new RegExp(
-      `(\\d{1,2})\\s+(\\d{1,2}(?:[.,]\\d+)?)\\s*K\\s+([\\d${DIGIT_LIKE_CLASS}.,]+)\\s+(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}.,]+)`,
-      'i'
-    );
-    const buildMarhunItem = (descriptionRaw: string, qtyRaw: unknown, karatRaw: unknown, weightRaw: string, valueRaw: string): SagImportMarhunItem | null => {
+    // Jadual dihurai melalui sauh karat (contoh "24.0K") kerana susunan lajur
+    // berbeza antara institusi (ada lajur Harga/g, ada Kuantiti dahulu).
+    const buildMarhunItemFromLine = (line: string): SagImportMarhunItem | null => {
+      const karatMatch = line.match(/(\d{1,2}(?:[.,]\d+)?)\s*K\b/i);
+      if (!karatMatch || karatMatch.index === undefined) return null;
+      const bil = line.match(/^\s*(\d{1,2})[.)]?\s+/)?.[1];
+      const description = line
+        .slice(0, karatMatch.index)
+        .replace(/^\s*\d{1,2}[.)]?\s*/, '')
+        .trim();
+      const tail = line.slice(karatMatch.index + karatMatch[0].length);
+      // Hadkan kepada nombor baris ini sahaja: berhenti pada perkataan label
+      // (contoh "Nilai Marhun", "Jumlah Pembiayaan") yang mungkin tergabung.
+      const numericTail = tail.split(/\s+(?=[A-Za-z]{4,})/)[0] || tail;
+      const numbers = (numericTail.match(new RegExp(`[\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*`, 'g')) || [])
+        .map(token => parseMoneyToken(token))
+        .filter((value): value is number => typeof value === 'number' && value > 0);
+      if (numbers.length < 2) return null;
+      const value = numbers[numbers.length - 1];
+      const quantity = numbers.length >= 3 ? Math.min(100, Math.max(1, Math.round(numbers[0]))) : 1;
+      const weightCandidate = numbers[numbers.length - 2];
+      // Kesan lajur Harga (RM/g): rate × berat ≈ nilai.
+      let rate: number | null = null;
+      for (let index = 0; index < numbers.length - 2; index += 1) {
+        const candidate = numbers[index];
+        if (candidate < 20) continue;
+        if (Math.abs(candidate * weightCandidate - value) <= Math.max(1, value * 0.01)) {
+          rate = candidate;
+          break;
+        }
+      }
+      return buildMarhunItem(
+        description,
+        quantity,
+        karatMatch[1],
+        String(weightCandidate),
+        String(value),
+        bil,
+        rate !== null ? String(rate) : undefined
+      );
+    };
+    const buildMarhunItem = (descriptionRaw: string, qtyRaw: unknown, karatRaw: unknown, weightRaw: string, valueRaw: string, bilRaw?: unknown, rateRaw?: unknown): SagImportMarhunItem | null => {
       const description = String(descriptionRaw || '')
         .replace(/\s+/g, ' ')
         .trim()
         // Buang kuantiti yang tercicir di hujung keterangan (kes sauh karat).
-        .replace(/\s+\d{1,2}$/, '');
+        .replace(/\s+\d{1,2}$/, '')
+        // Buang sisa nombor/nilai di awal keterangan (baris tanpa Bil).
+        .replace(/^[\d.,\s]+/, '')
+        .trim();
       if (!description || description.length < 2) return null;
       if (/^(?:jumlah|bil|marhun|kuantiti|karat|berat|nilai)/i.test(description)) return null;
       const quantity = Math.max(1, Math.min(100, Number(qtyRaw) || 1));
@@ -901,9 +1024,14 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
       const marhunValue = parseMoneyToken(valueRaw);
       if (!weight || !marhunValue || weight <= 0 || marhunValue <= 0) return null;
       if (weight > 5000 || marhunValue > 50000000) return null;
-      const ratePerGram = roundMoneyValue(marhunValue / (quantity * weight));
+      const explicitRate = parseMoneyToken(String(rateRaw ?? ''));
+      const ratePerGram = explicitRate && explicitRate > 0
+        ? roundMoneyValue(explicitRate)
+        : roundMoneyValue(marhunValue / (quantity * weight));
       if (!(ratePerGram > 0)) return null;
+      const bilNumber = Number(bilRaw);
       return {
+        bil: Number.isFinite(bilNumber) && bilNumber > 0 ? bilNumber : undefined,
         description,
         quantity,
         karat: `${karatNumber.toFixed(1)}K`,
@@ -919,14 +1047,8 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     let pendingRow = '';
     const flushRow = () => {
       if (!pendingRow) return;
-      const tail = pendingRow.match(rowTailPattern);
-      if (tail && tail.index !== undefined) {
-        const description = pendingRow
-          .slice(0, tail.index)
-          .replace(/^\s*\d{1,2}[.)]?\s*/, '');
-        const item = buildMarhunItem(description, tail[1], tail[2], tail[3], tail[4]);
-        if (item) marhunItems.push(item);
-      }
+      const item = buildMarhunItemFromLine(pendingRow);
+      if (item) marhunItems.push(item);
       pendingRow = '';
     };
     sectionLines.forEach(line => {
@@ -954,7 +1076,7 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
       );
       let rowMatch: RegExpExecArray | null;
       while ((rowMatch = fallbackPattern.exec(sectionText)) !== null) {
-        const item = buildMarhunItem(rowMatch[2], rowMatch[3], rowMatch[4], rowMatch[5], rowMatch[6]);
+        const item = buildMarhunItem(rowMatch[2], rowMatch[3], rowMatch[4], rowMatch[5], rowMatch[6], rowMatch[1]);
         if (item) target.push(item);
       }
       return target;
@@ -974,7 +1096,7 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
         const qtyMatches = Array.from(before.matchAll(/\b(\d{1,2})\b/g));
         const qtyMatch = qtyMatches[qtyMatches.length - 1];
         if (!qtyMatch || qtyMatch.index === undefined) return;
-        const bilMatches = Array.from(before.matchAll(/\b\d{1,2}\s+(?=[A-Za-z])/g));
+        const bilMatches = Array.from(before.matchAll(/\b(?<![\d.,])(\d{1,2})\s+(?=[A-Za-z])/g));
         const bilMatch = bilMatches[bilMatches.length - 1];
         let description = bilMatch && bilMatch.index !== undefined && bilMatch.index < qtyMatch.index
           ? before.slice(bilMatch.index)
@@ -986,13 +1108,85 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
         const tail = after.match(new RegExp(
           `^\\s*(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*)\\s+(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*)`
         ));
-        if (!tail) return;
-        const item = buildMarhunItem(description, qtyMatch[1], karatMatch[1], tail[1], tail[2]);
+        const triple = after.match(new RegExp(
+          `^\\s*(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*)\\s+(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*)\\s+(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}][\\d${DIGIT_LIKE_CLASS}.,]*)`
+        ));
+        const bilCandidate = bilMatch ? bilMatch[0] : undefined;
+        let item: SagImportMarhunItem | null = null;
+        if (triple) {
+          const rate = parseMoneyToken(triple[1]);
+          const weight = parseMoneyToken(triple[2]);
+          const value = parseMoneyToken(triple[3]);
+          const qtyNumber = Number(qtyMatch[1]) || 1;
+          // Lajur harga/g sah hanya jika rate × berat ≈ nilai.
+          if (rate && weight && value &&
+            Math.abs(rate - value / (qtyNumber * weight)) <= Math.max(1, rate * 0.02)) {
+            item = buildMarhunItem(description, qtyMatch[1], karatMatch[1], triple[2], triple[3], bilCandidate, triple[1]);
+          }
+        }
+        if (!item && tail) {
+          item = buildMarhunItem(description, qtyMatch[1], karatMatch[1], tail[1], tail[2], bilCandidate);
+        }
         if (item) target.push(item);
       });
       return target;
     };
+    /**
+     * Betulkan berat item yang hilang titik perpuluhan (contoh 6.73 → 673)
+     * berdasarkan kadar per gram karat yang konsisten dalam surat yang sama.
+     */
+    const repairMarhunWeights = (items: SagImportMarhunItem[], expectedWeight: number) => {
+      if (!items.length) return false;
+      const totalWeightOf = () => roundMoneyValue(items.reduce((sum, item) => sum + item.quantity * item.weight, 0));
+      if (expectedWeight > 0 &&
+        Math.abs(totalWeightOf() - expectedWeight) <= Math.max(0.2, expectedWeight * 0.03)) {
+        return false;
+      }
+      const rateOf = (item: SagImportMarhunItem) =>
+        item.quantity > 0 && item.weight > 0 ? item.marhunValue / (item.quantity * item.weight) : 0;
+      const ratesByKarat = new Map<string, number[]>();
+      items.forEach(item => {
+        const rate = rateOf(item);
+        if (rate > 1 && rate < 5000) {
+          const list = ratesByKarat.get(item.karat) || [];
+          list.push(rate);
+          ratesByKarat.set(item.karat, list);
+        }
+      });
+      let repaired = false;
+      items.forEach(item => {
+        const rates = ratesByKarat.get(item.karat) || [];
+        if (rates.length < 2) return;
+        const reference = Math.max(...rates);
+        const rate = rateOf(item);
+        if (!(reference > 0 && rate > 0 && rate < reference * 0.6)) return;
+        const correctedWeight = roundMoneyValue(item.marhunValue / (item.quantity * reference));
+        if (correctedWeight > 0 && correctedWeight < 1000) {
+          item.weight = correctedWeight;
+          item.ratePerGram = roundMoneyValue(reference);
+          repaired = true;
+        }
+      });
+      if (repaired) {
+        notes.push('Berat item marhun dibetulkan berdasarkan kadar per gram karat yang konsisten (titik perpuluhan hilang semasa OCR).');
+      }
+      return repaired;
+    };
+
+    const runFallbackRateRows = (target: SagImportMarhunItem[]) => {
+      const pattern = new RegExp(
+        `(\\d{1,2})\\s+([A-Za-z][A-Za-z0-9 ()/'.,&+#\\-]*?)\\s+(\\d{1,2})\\s+(\\d{1,2}(?:[.,]\\d+)?)\\s*K\\s+([\\d${DIGIT_LIKE_CLASS}.,]+)\\s+([\\d${DIGIT_LIKE_CLASS}.,]+)\\s+(?:RM\\s*)?([\\d${DIGIT_LIKE_CLASS}.,]+)`,
+        'gi'
+      );
+      let rowMatch: RegExpExecArray | null;
+      while ((rowMatch = pattern.exec(sectionText)) !== null) {
+        const item = buildMarhunItem(rowMatch[2], rowMatch[3], rowMatch[4], rowMatch[6], rowMatch[7], rowMatch[1], rowMatch[5]);
+        if (item) target.push(item);
+      }
+      return target;
+    };
     // Sandaran: sesetengah OCR mencetak seluruh jadual dalam satu baris.
+    if (!marhunItems.length) runFallbackRateRows(marhunItems);
     if (!marhunItems.length) runFallbackRows(marhunItems);
     if (!marhunItems.length) runKaratAnchoredRows(marhunItems);
 
@@ -1004,8 +1198,11 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
         .map(token => parseMoneyToken(token))
         .filter((value): value is number => value !== null && value > 0);
       if (jumlahValues.length >= 2) {
-        const expectedWeight = Math.min(jumlahValues[0], jumlahValues[1]);
-        const expectedValue = Math.max(jumlahValues[0], jumlahValues[1]);
+        // Baris JUMLAH boleh mengandungi [kuantiti] [berat] [nilai]. Ambil dua
+        // nilai terbesar: nilai marhun (terbesar) dan berat (kedua terbesar).
+        const sortedJumlah = [...jumlahValues].sort((left, right) => right - left);
+        const expectedValue = sortedJumlah[0];
+        const expectedWeight = sortedJumlah[1] ?? sortedJumlah[0];
         const toleranceWeight = Math.max(0.2, expectedWeight * 0.03);
         const toleranceValue = Math.max(1, expectedValue * 0.02);
         const errorOf = (totals: { weight: number; value: number }) =>
@@ -1016,7 +1213,7 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
 
         let totals = totalsOf(marhunItems);
         if (!matchesJumlah(totals)) {
-          const candidates = [runKaratAnchoredRows([]), runFallbackRows([])];
+          const candidates = [runKaratAnchoredRows([]), runFallbackRateRows([]), runFallbackRows([])];
           for (const candidate of candidates) {
             if (!candidate.length) continue;
             const candidateTotals = totalsOf(candidate);
@@ -1027,6 +1224,10 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
               if (matchesJumlah(totals)) break;
             }
           }
+        }
+        if (!matchesJumlah(totals)) {
+          repairMarhunWeights(marhunItems, expectedWeight);
+          totals = totalsOf(marhunItems);
         }
         if (!matchesJumlah(totals)) {
           notes.push(
@@ -1043,6 +1244,15 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
         marhunItems.length = 0;
         marhunItems.push(...anchoredItems);
       }
+      repairMarhunWeights(marhunItems, 0);
+    }
+    // Susun semula ikut nombor Bil surat asal apabila semua Bil boleh dipercayai.
+    const bilNumbers = marhunItems.map(item => item.bil).filter((bil): bil is number => typeof bil === 'number');
+    const canSortByBil = bilNumbers.length === marhunItems.length &&
+      new Set(bilNumbers).size === bilNumbers.length &&
+      bilNumbers.every(bil => bil >= 1 && bil <= 50);
+    if (canSortByBil) {
+      marhunItems.sort((left, right) => (left.bil ?? 0) - (right.bil ?? 0));
     }
   }
   if (marhunItems.length) {
@@ -1050,6 +1260,9 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     const totalWeight = marhunItems.reduce((sum, item) => sum + item.quantity * item.weight, 0);
     notes.push(`Keterangan marhun: ${marhunItems.length} item (${formatNumberForNote(totalWeight)} g) dipetakan ke surat.`);
   }
+
+  const profile = detectSagImportProfile(String(text || ''));
+  notes.push(`Profil import dikesan: ${profile.label}.`);
 
   const matchedLabels = FIELD_WEIGHTS
     .filter(entry => {
@@ -1059,6 +1272,9 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     .map(entry => entry.label);
   if (fields.accountNo) matchedLabels.push('No. akaun institusi');
   if (fields.poBox) matchedLabels.push('No. kotak marhun');
+  if (fields.memberPhone) matchedLabels.push('No. telefon ahli');
+  if (fields.memberAddress) matchedLabels.push('Alamat ahli');
+  if (fields.heirName) matchedLabels.push('Waris');
   if (fields.commodityCertificateNo) matchedLabels.push('No. sijil komoditi');
   if (fields.profitPaymentAmount !== undefined) matchedLabels.push('Bayaran keuntungan berkala');
   const confidence = Math.min(1, FIELD_WEIGHTS
@@ -1068,5 +1284,5 @@ export const parseSagImportText = (text: string): SagImportParseResult => {
     })
     .reduce((total, entry) => total + entry.weight, 0));
 
-  return { fields, confidence, matchedLabels, notes };
+  return { fields, confidence, matchedLabels, notes, profile };
 };

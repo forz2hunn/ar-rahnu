@@ -4252,6 +4252,9 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
           ...base.member,
           name: input.memberName.trim(),
           icNumber: input.memberIcNumber.trim(),
+          phone: String(input.memberPhone || base.member.phone || '').trim(),
+          address: String(input.memberAddress || base.member.address || '').trim(),
+          heirName: String(input.heirName || base.member.heirName || '').trim(),
           poBox: String(input.poBox || base.member.poBox || '').trim()
         },
         pledgeType: input.pledgeType || 'Pajakan Asal',

@@ -806,7 +806,10 @@ export function SagExternalImportModal({
     profitAmount: null as number | null,
     commodityCertificateNo: '',
     profitPaymentAmount: null as number | null,
-    profitPaymentMonths: null as number | null
+    profitPaymentMonths: null as number | null,
+    memberPhone: '',
+    memberAddress: '',
+    heirName: ''
   });
   const [marhunRows, setMarhunRows] = useState<MarhunRowDraft[]>([]);
 
@@ -893,7 +896,10 @@ export function SagExternalImportModal({
         profitAmount: parsed.fields.profitAmount ?? null,
         commodityCertificateNo: parsed.fields.commodityCertificateNo || '',
         profitPaymentAmount: parsed.fields.profitPaymentAmount ?? null,
-        profitPaymentMonths: parsed.fields.profitPaymentMonths ?? null
+        profitPaymentMonths: parsed.fields.profitPaymentMonths ?? null,
+        memberPhone: parsed.fields.memberPhone || '',
+        memberAddress: parsed.fields.memberAddress || '',
+        heirName: parsed.fields.heirName || ''
       });
       setMarhunRows((parsed.fields.marhunItems || []).map((item, index) => ({
         id: `scan-${Date.now()}-${index}`,
@@ -926,7 +932,7 @@ export function SagExternalImportModal({
       });
     } catch (scanError) {
       if (analyseRunRef.current !== runId) return;
-      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null });
+      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null, memberPhone: '', memberAddress: '', heirName: '' });
       setMarhunRows([]);
       setScan({
         status: 'error',
@@ -947,7 +953,7 @@ export function SagExternalImportModal({
     setFiles(nextFiles);
     if (!nextFiles.length) {
       analyseRunRef.current += 1;
-      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null });
+      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null, memberPhone: '', memberAddress: '', heirName: '' });
       setMarhunRows([]);
       setScan({ status: 'idle', message: '', progress: null, method: '', matchedLabels: [], missingLabels: [], confidence: 0, notes: [], rawText: '' });
     }
@@ -1079,7 +1085,10 @@ export function SagExternalImportModal({
         profitAmount: derived.profitAmount ?? undefined,
         commodityCertificateNo: derived.commodityCertificateNo || undefined,
         profitPaymentAmount: derived.profitPaymentAmount ?? undefined,
-        profitPaymentMonths: derived.profitPaymentMonths ?? undefined
+        profitPaymentMonths: derived.profitPaymentMonths ?? undefined,
+        memberPhone: derived.memberPhone || undefined,
+        memberAddress: derived.memberAddress || undefined,
+        heirName: derived.heirName || undefined
       });
       onClose();
     } catch (submitError) {
@@ -1226,6 +1235,13 @@ export function SagExternalImportModal({
                       {derived.profitPaymentAmount !== null && (
                         <span className="mt-0.5 block">
                           Bayaran Keuntungan {derived.profitPaymentMonths ? `setiap ${derived.profitPaymentMonths} bulan` : 'berkala'}: <b>RM {derived.profitPaymentAmount.toFixed(2)}</b>.
+                        </span>
+                      )}
+                      {(derived.memberPhone || derived.heirName || derived.memberAddress) && (
+                        <span className="mt-0.5 block">
+                          {derived.memberPhone ? <>Telefon ahli: <b>{derived.memberPhone}</b>. </> : null}
+                          {derived.heirName ? <>Waris: <b>{derived.heirName}</b>. </> : null}
+                          {derived.memberAddress ? <span className="block break-words">Alamat: <b>{derived.memberAddress}</b>.</span> : null}
                         </span>
                       )}
                     </div>
@@ -1470,8 +1486,14 @@ export function SagExternalImportModal({
                     ))}
                     <tr className="border-t border-cyan-300 font-bold text-cyan-950">
                       <td colSpan={4} className="px-1 py-1.5 text-right">Jumlah</td>
-                      <td className="px-1 py-1.5 text-right font-mono">{marhunRowTotals.weight.toFixed(2)}</td>
-                      <td className="px-1 py-1.5 text-right font-mono">{marhunRowTotals.value.toFixed(2)}</td>
+                      <td className="px-1 py-1.5 text-right">
+                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Berat (g)</span>
+                        <span className="font-mono">{marhunRowTotals.weight.toFixed(2)}</span>
+                      </td>
+                      <td className="px-1 py-1.5 text-right">
+                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Nilai (RM)</span>
+                        <span className="font-mono">{marhunRowTotals.value.toFixed(2)}</span>
+                      </td>
                       <td />
                     </tr>
                   </tbody>
