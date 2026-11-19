@@ -53,7 +53,9 @@ export function SagLetter({
     ? formatSagDate(sagDocument.paymentDueOverride)
     : `SEBELUM ${formatSagDate(sagDocument.maturityDate)}`;
   const verificationCode = buildSagVerificationCode(sagDocument);
-  const totalMarhun = marhunItems.length ? marhunSummary.value : roundMoney(sagDocument.marhunValue);
+  // Nilai marhun dokumen diutamakan supaya sama dengan nilai yang tercetak pada
+  // surat asal (termasuk surat import institusi lain).
+  const totalMarhun = roundMoney(sagDocument.marhunValue) || marhunSummary.value;
   const totalWeight = marhunItems.length ? marhunSummary.weight : 0;
 
   return (
@@ -145,8 +147,8 @@ export function SagLetter({
               <td className="is-num is-value">{formatSagMoney(sagDocument.totalProfit)}</td>
             </tr>
             <tr>
-              <td className="is-label" />
-              <td />
+              <td className="is-label">No. Akaun</td>
+              <td className="is-value">{sagDocument.accountNo || '-'}</td>
               <td className="is-label">Harga Jualan (tanpa upah)</td>
               <td className="is-num is-value">{formatSagMoney(sagDocument.sellingPrice)}</td>
             </tr>
@@ -161,6 +163,12 @@ export function SagLetter({
               <td />
               <td className="is-label">Jumlah Tebus (Jualan + Upah)</td>
               <td className="is-num is-value">{formatSagMoney(sagDocument.redemptionTotal)}</td>
+            </tr>
+            <tr>
+              <td className="is-label">No. Sijil Komoditi</td>
+              <td className="is-value">{sagDocument.commodityCertificateNo || '-'}</td>
+              <td className="is-label">Bayaran Keuntungan ({sagDocument.profitPaymentMonths || 6} bulan)</td>
+              <td className="is-num is-value">{formatSagMoney(sagDocument.profitPaymentAmount)}</td>
             </tr>
             <tr>
               <td className="is-label" />

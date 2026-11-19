@@ -91,6 +91,7 @@ import { CUSTODY_ACTION_LABELS, evaluateDualCustody, requiresCustodyApproval } f
 import {
   SAG_CONTRACT_VERSION,
   SAG_DEFAULT_SETTINGS,
+  addMonthsToDateOnly,
   buildSagContractConsent,
   buildSagDocumentDraft,
   buildSagDocumentFromLedger,
@@ -101,7 +102,10 @@ import {
   evaluateSagCustomerExposure,
   normalizeSagDocument,
   resolveSagPledgeStatus,
+  toDateOnly,
   type SagDocument,
+  type SagDocumentAttachment,
+  type SagExternalImportInput,
   type SagLetterhead,
   type SagMemberSnapshot,
   type SagModuleSettings
@@ -4170,6 +4174,162 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   /**
+   * Import salinan Surat Akuan Gadaian daripada institusi lain (contoh: surat
+   * pindah gadaian / pusing). Fail imbasan dimuat naik ke storan lampiran dan
+   * didaftarkan sebagai rekod surat `Draf` bertanda `source: 'external'`.
+   * Rekod ini tidak diselaraskan dengan lejar koperasi ini secara automatik.
+   */
+  const handleImportExternalSagDocuments = async (input: SagExternalImportInput) => {
+    if (!hasPermission('sag_create')) {
+      denyPermission('sag_create', 'untuk mengimport surat institusi lain');
+      throw new Error('Akses ditolak: anda tiada kebenaran untuk mengimport surat institusi lain.');
+    }
+    const savedAt = new Date().toISOString();
+    const uploadedAttachments: SagDocumentAttachment[] = [];
+    try {
+      for (const file of input.files) {
+        const safeFileName = file.name.replace(/[^\w.-]+/g, '_').slice(-120) || 'surat';
+        const path = `${dataOwnerUserIdRef.current}/sag-external/${crypto.randomUUID()}-${safeFileName}`;
+        const { error } = await supabaseClient.storage
+          .from(transactionAttachmentsBucket)
+          .upload(path, file, { upsert: false, contentType: file.type || 'application/octet-stream' });
+        if (error) throw new Error(`Gagal memuat naik "${file.name}": ${error.message}`);
+        uploadedAttachments.push({
+          id: path.split('/').pop(),
+          name: file.name,
+          path,
+          size: file.size,
+          type: file.type || 'application/octet-stream',
+          uploadedAt: savedAt
+        });
+      }
+
+      const base = createEmptySagDocument(
+        sagLetterhead,
+        sagDocuments.filter(document => !document.deletedAt).map(document => document.documentNo),
+        savedAt
+      );
+      const requestedNumber = String(input.documentNo || '').trim().toUpperCase();
+      if (requestedNumber && sagDocuments.some(document =>
+        !document.deletedAt && String(document.documentNo || '').trim().toUpperCase() === requestedNumber
+      )) {
+        throw new Error(`No. surat ${requestedNumber} telah digunakan oleh rekod sedia ada.`);
+      }
+
+      const financingDate = toDateOnly(input.financingDate) || base.financingDate;
+      const maturityDate = toDateOnly(input.maturityDate) ||
+        addMonthsToDateOnly(financingDate, base.paymentTermMonths * 3);
+      const marhunValue = roundMoney(input.marhunValue);
+      const financingAmount = roundMoney(input.financingAmount);
+      const importedMarhunItems: SagDocument['marhunItems'] = (input.marhunItems || [])
+        .filter(item => item && Number(item.quantity) > 0 && Number(item.weight) > 0 && Number(item.ratePerGram) > 0)
+        .map((item, index) => ({
+          id: `external-marhun-${savedAt}-${index}`,
+          assetId: null,
+          description: String(item.description || `Marhun ${index + 1}`),
+          quantity: Math.max(1, Number(item.quantity) || 1),
+          karat: String(item.karat || '-'),
+          ratePerGram: roundMoney(item.ratePerGram),
+          weight: roundMoney(item.weight),
+          marhunValue: roundMoney(item.marhunValue),
+          fineness: Number(item.fineness) > 0 ? Number(Number(item.fineness).toFixed(4)) : undefined
+        }));
+      const document = normalizeSagDocument({
+        ...base,
+        id: `external-${savedAt}-${Math.random().toString(36).slice(2, 7)}`,
+        documentNo: requestedNumber || base.documentNo,
+        status: 'Draf',
+        source: 'external',
+        institutionId: null,
+        institutionName: input.institutionName.trim(),
+        accountNo: String(input.accountNo || '').trim(),
+        commodityCertificateNo: String(input.commodityCertificateNo || '').trim(),
+        profitPaymentAmount: roundMoney(input.profitPaymentAmount ?? 0),
+        profitPaymentMonths: input.profitPaymentMonths && input.profitPaymentMonths > 0
+          ? Math.max(1, Math.min(24, Math.round(input.profitPaymentMonths)))
+          : 6,
+        member: {
+          ...base.member,
+          name: input.memberName.trim(),
+          icNumber: input.memberIcNumber.trim(),
+          poBox: String(input.poBox || base.member.poBox || '').trim()
+        },
+        pledgeType: input.pledgeType || 'Pajakan Asal',
+        pledgeStatus: 'Aktif',
+        financingDate,
+        maturityDate,
+        marhunValue,
+        marhunItems: importedMarhunItems,
+        margin: marhunValue > 0 ? roundMoney((financingAmount / marhunValue) * 100) : 0,
+        purchasePrice: financingAmount,
+        totalProfit: roundMoney(input.profitAmount ?? 0),
+        feeRate: input.feeRate ?? 0,
+        feeBasis: (input.feeBasis || '') as SagDocument['feeBasis'],
+        ujrahFixedMonthly: 0,
+        previousRedemption: input.previousRedemption ?? 0,
+        // Nilai marhun yang tercetak pada surat asal diutamakan daripada jumlah item.
+        marhunValueOverride: marhunValue > 0 ? marhunValue : null,
+        // Selang tempoh bayaran default 6 bulan (bukan jumlah tempoh surat).
+        paymentTermMonths: base.paymentTermMonths,
+        remarks: input.remarks ||
+          `Salinan Surat Akuan Gadaian diimport daripada ${input.institutionName.trim()}.`,
+        attachments: uploadedAttachments,
+        transactionId: null,
+        transactionRefNo: '',
+        ...auditCreate('sagDocument', savedAt)
+      } as SagDocument);
+
+      setSagDocuments(previous => [...previous, document]);
+      setToastMessage(
+        `Surat ${document.documentNo} daripada ${document.institutionName} diimport sebagai draf rujukan bersama ${uploadedAttachments.length} fail.`
+      );
+      setTimeout(() => setToastMessage(null), 6000);
+    } catch (error) {
+      if (uploadedAttachments.length) {
+        const { error: cleanupError } = await supabaseClient.storage
+          .from(transactionAttachmentsBucket)
+          .remove(uploadedAttachments.map(attachment => attachment.path));
+        if (cleanupError) console.error('Fail import surat luaran tidak dapat dibersihkan:', cleanupError.message);
+      }
+      throw error;
+    }
+  };
+
+  /** Buka fail imbasan surat yang disimpan dalam storan lampiran. */
+  const handleOpenSagAttachment = async (attachment: SagDocumentAttachment) => {
+    if (!attachment?.path) return;
+    const { data, error } = await supabaseClient.storage
+      .from(transactionAttachmentsBucket)
+      .createSignedUrl(attachment.path, 60);
+    if (error || !data?.signedUrl) {
+      setToastMessage(`Fail "${attachment.name}" tidak dapat dibuka: ${error?.message || 'pautan tidak tersedia'}.`);
+      setTimeout(() => setToastMessage(null), 6000);
+      return;
+    }
+    window.open(data.signedUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  /** Muat turun fail lampiran surat untuk imbasan semula dalam borang SAG. */
+  const loadSagAttachmentFiles = async (document: SagDocument): Promise<File[]> => {
+    const attachments = document.attachments || [];
+    const files: File[] = [];
+    for (const attachment of attachments) {
+      if (!attachment?.path) continue;
+      const { data, error } = await supabaseClient.storage
+        .from(transactionAttachmentsBucket)
+        .download(attachment.path);
+      if (error || !data) {
+        console.error(`Lampiran ${attachment.name} tidak dapat dimuat turun:`, error?.message);
+        continue;
+      }
+      files.push(new File([data], attachment.name || `surat-${files.length + 1}`, {
+        type: attachment.type || data.type || 'application/octet-stream'
+      }));
+    }
+    return files;
+  };
+
+  /**
    * Selaraskan modul Surat Akuan Gadaian dengan lejar SAG (modul Pengurusan Surat
    * Gadaian) secara dua hala:
    * 1. Surat yang dipautkan dikemas kini dengan angka lejar terkini.
@@ -4192,13 +4352,29 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
 
     const syncedDocuments = sagDocuments.map(document => {
       if (document.deletedAt) return document;
+      // Tebus surat asal sentiasa merujuk surat terdahulu (harga jualan + ujrah),
+      // bukan tebus surat ini daripada rekod lejar.
+      const resolvePreviousRedemption = () => {
+        if (!document.previousDocumentNo) return document.previousRedemption;
+        const previousDocument = sagDocuments.find(entry =>
+          !entry.deletedAt &&
+          String(entry.documentNo || '').trim() === String(document.previousDocumentNo || '').trim()
+        );
+        if (!previousDocument) return document.previousRedemption;
+        return roundMoney(
+          previousDocument.redemptionTotal ||
+          previousDocument.sellingPrice ||
+          roundMoney((previousDocument.purchasePrice || 0) + (previousDocument.totalProfit || 0))
+        );
+      };
       const linkedTransaction = ledger.find(transaction =>
         isRecordVisible(transaction) && String(transaction.id) === String(document.transactionId)
       );
       if (linkedTransaction) {
         const refreshedDocument = normalizeSagDocument({
           ...document,
-          ...buildSagDocumentPatchFromLedger(document, linkedTransaction)
+          ...buildSagDocumentPatchFromLedger(document, linkedTransaction),
+          previousRedemption: resolvePreviousRedemption()
         } as SagDocument);
         if (JSON.stringify(refreshedDocument) === JSON.stringify(document)) {
           alreadySynced += 1;
@@ -4217,6 +4393,7 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         return normalizeSagDocument({
           ...document,
           ...buildSagDocumentPatchFromLedger(document, matchedByRef),
+          previousRedemption: resolvePreviousRedemption(),
           ...auditUpdate('sagDocument', savedAt)
         } as SagDocument);
       }
@@ -4260,11 +4437,19 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       const refNo = String(transaction.refNo || '').trim();
       if (refNo && knownRefs.has(refNo)) return;
       const institution = visibleInstitutions.find(item => item.name === transaction.institution);
+      const parentDocument = (transaction.parentTransactionId != null
+        ? syncedDocuments.find(entry => !entry.deletedAt &&
+            String(entry.transactionId) === String(transaction.parentTransactionId))
+        : null) || (transaction.parentRefNo
+        ? syncedDocuments.find(entry => !entry.deletedAt &&
+            String(entry.transactionRefNo || '') === String(transaction.parentRefNo))
+        : null);
       const document = buildSagDocumentFromLedger({
         transaction,
         institution,
         assets: resolveTransactionAssets(transaction),
         member: null,
+        previousDocument: parentDocument || null,
         letterhead: sagLetterhead,
         existingNumbers: knownNumbers,
         now: savedAt
@@ -5123,6 +5308,29 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       return asset.status === nextAssetStatus ? asset : { ...asset, status: nextAssetStatus, ...assetAudit };
     }));
     patchLinkedSagDocuments(actionNextTransaction, updatedAt);
+
+    // OL/Pusing: surat baharu mesti merekod surat asal yang diselesaikan supaya
+    // "Jumlah Tebus Surat Asal" dan unjuran lebihan tunai dikira dengan betul.
+    if (isLinkedRollover && linkedTransactionId) {
+      const previousLetter = sagDocuments.find(entry =>
+        !entry.deletedAt && String(entry.transactionId) === String(actionTransaction.id)
+      );
+      const previousRedemption = roundMoney(
+        previousLetter?.redemptionTotal ||
+        previousLetter?.sellingPrice ||
+        getCurrentRedemption(actionTransaction)
+      );
+      setSagDocuments(previous => previous.map(entry => {
+        if (entry.deletedAt || String(entry.transactionId) !== String(linkedTransactionId)) return entry;
+        return normalizeSagDocument({
+          ...entry,
+          previousDocumentNo: previousLetter?.documentNo || entry.previousDocumentNo,
+          previousTransactionRefNo: String(actionTransaction.refNo || entry.previousTransactionRefNo || ''),
+          previousRedemption,
+          ...auditUpdate('sagDocument', updatedAt)
+        } as SagDocument);
+      }));
+    }
 
     if (custodyApproval) {
       void recordAuditActivity(supabaseClient, 'CUSTODY_APPROVED', 'Vault Management', 'assets', selectedAssetIds.join(','), {
@@ -8912,6 +9120,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               indicators={sagLetterIndicators}
               onSyncLedger={handleSyncSagLedger}
               pendingLedgerCount={pendingSagLedgerCount}
+              onImportExternal={handleImportExternalSagDocuments}
+              onOpenAttachment={handleOpenSagAttachment}
               onOpenSettings={() => setIsSagLetterheadOpen(true)}
             />
           )}
@@ -11045,6 +11255,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           acceptanceActor={recordActor}
           onClose={() => setSagFormDocument(null)}
           onSave={handleSaveSagDocument}
+          onLoadAttachmentFiles={
+            sagFormDocument.attachments && sagFormDocument.attachments.length
+              ? () => loadSagAttachmentFiles(sagFormDocument)
+              : undefined
+          }
         />
       )}
 

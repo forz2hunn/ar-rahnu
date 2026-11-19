@@ -108,6 +108,19 @@ export type SagContractConsent = {
   termsHash: string;
 };
 
+/** Fail salinan surat fizikal (imbasan PDF/imej) yang dilampirkan pada rekod surat akuan. */
+export type SagDocumentAttachment = {
+  id?: string;
+  name: string;
+  path: string;
+  size: number;
+  type: string;
+  uploadedAt: string;
+};
+
+/** Sumber rekod surat: dijana dalam sistem ini atau diimport daripada institusi lain. */
+export type SagDocumentSource = 'internal' | 'external';
+
 export type SagDocument = SagAuditFields & {
   id: string | number;
   documentNo: string;
@@ -116,6 +129,14 @@ export type SagDocument = SagAuditFields & {
   product: string;
   transactionId: string | number | null;
   transactionRefNo: string;
+  /** No. akaun institusi bagi gadaian ini (relationship kepada pemilik surat). */
+  accountNo?: string;
+  /** No. Sijil Komoditi (tawarruq) seperti pada surat asal. */
+  commodityCertificateNo?: string;
+  /** Jumlah bayaran keuntungan bagi setiap selang tempoh (RM). */
+  profitPaymentAmount?: number;
+  /** Selang bayaran keuntungan dalam bulan (contoh: 6 = setiap 6 bulan). */
+  profitPaymentMonths?: number;
   institutionId: string | number | null;
   institutionName: string;
   /** Jenis pajakan yang di transaksi pada surat ini (Pajakan Asal, Salin, OL, Pusing, dll). */
@@ -174,6 +195,19 @@ export type SagDocument = SagAuditFields & {
   marhunItems: SagMarhunItem[];
   signatures: SagSignatureBlock;
   remarks: string;
+  /**
+   * Sumber surat. `external` menandakan salinan surat akuan gadaian yang
+   * diimport daripada institusi lain (arkib rujukan, bukan surat terbitan sistem).
+   */
+  source?: SagDocumentSource;
+  /** Fail salinan surat fizikal bagi surat yang diimport daripada institusi lain. */
+  attachments?: SagDocumentAttachment[];
+  /**
+   * Nilai marhun seperti yang TERCETAK pada surat asal. Apabila ditetapkan,
+   * nilai ini diutamakan daripada jumlah item supaya import kekal sama dengan
+   * nilai asal walaupun kadar per gram dibundarkan.
+   */
+  marhunValueOverride?: number | null;
 };
 
 export type SagLetterhead = {
@@ -829,7 +863,11 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
     address: document.member?.address,
     memberUserId: document.member?.userId
   });
-  const marhunValue = marhunItems.length ? marhunSummary.value : roundMoney(document.marhunValue);
+  const marhunValue = Number(document.marhunValueOverride) > 0
+    ? roundMoney(document.marhunValueOverride)
+    : marhunItems.length
+      ? marhunSummary.value
+      : roundMoney(document.marhunValue);
   const sellingPrice = roundMoney(purchasePrice + totalProfit);
   const ujrahFixedMonthly = Math.max(0, roundMoney(document.ujrahFixedMonthly));
 
@@ -847,6 +885,10 @@ export const normalizeSagDocument = (document: SagDocument): SagDocument => {
   return {
     ...document,
     documentNo,
+    accountNo: String(document.accountNo || '').trim(),
+    commodityCertificateNo: String(document.commodityCertificateNo || '').trim().toUpperCase(),
+    profitPaymentAmount: Math.max(0, roundMoney(document.profitPaymentAmount)),
+    profitPaymentMonths: Math.min(24, Math.max(1, Math.round(Number(document.profitPaymentMonths) || SAG_DEFAULT_PAYMENT_TERM_MONTHS))),
     product: String(document.product || SAG_PRODUCT_DEFAULT).trim(),
     pledgeType: String(document.pledgeType || '').trim(),
     pledgeStatus: String(document.pledgeStatus || 'Aktif').trim(),
@@ -933,7 +975,8 @@ export const buildSagLedgerFieldsFromDocument = (
 ): SagLedgerFields => {
   const marhunItems = document.marhunItems || [];
   const summary = summarizeSagMarhunItems(marhunItems);
-  const marhunValue = summary.value || roundMoney(document.marhunValue);
+  // Nilai marhun dokumen diutamakan (termasuk nilai terkunci daripada surat import).
+  const marhunValue = roundMoney(document.marhunValue) || summary.value;
   const weight = summary.weight;
   const loan = roundMoney(document.purchasePrice);
   // Ujrah sahaja — JANGAN gunakan totalProfit (ribh) sebagai caj simpanan.
@@ -965,9 +1008,9 @@ export const buildSagLedgerFieldsFromDocument = (
     feeRate: roundMoney(document.feeRate ?? existingTransaction?.feeRate ?? 0),
     feeBasis: normalizeSagFeeBasis(document.feeBasis || existingTransaction?.feeBasis),
     profit: roundMoney(document.projectedProfit ?? existingTransaction?.profit ?? 0),
-    redemption: document.previousRedemption > 0
-      ? roundMoney(document.previousRedemption)
-      : roundMoney(document.redemptionTotal || (loan + fee)),
+    // `redemption` lejar ialah jumlah tebus surat INI (harga jualan + ujrah),
+    // bukan jumlah tebus surat asal (`previousRedemption`).
+    redemption: roundMoney(document.redemptionTotal || (loan + fee)),
     feeTermMonths: Math.max(1, Number(document.paymentTermMonths) || SAG_DEFAULT_PAYMENT_TERM_MONTHS),
     transactionStatus: pledgeType || String(existingTransaction?.transactionStatus || 'Pajakan Asal'),
     selectedAssetIds: assetIds,
@@ -1004,9 +1047,8 @@ export const buildSagDocumentPatchFromLedger = (
     feeBasis: transaction?.feeBasis !== undefined && transaction?.feeBasis !== null
       ? normalizeSagFeeBasis(transaction.feeBasis)
       : document.feeBasis,
-    previousRedemption: resolvedPledgeType === 'Pajakan Asal'
-      ? document.previousRedemption
-      : roundMoney(transaction?.redemption ?? document.previousRedemption),
+    // `previousRedemption` kekal daripada surat: tebus surat asal tidak boleh
+    // ditimpa dengan tebus surat ini daripada rekod lejar.
     pledgeType: resolvedPledgeType,
     pledgeStatus: resolveSagPledgeStatus(transaction)
   };
@@ -1100,9 +1142,15 @@ export const buildSagDocumentDraft = ({
     pledgeStatus: resolveSagPledgeStatus(transaction),
     previousDocumentNo: String(previousDocument?.documentNo || ''),
     previousTransactionRefNo: String(previousDocument?.transactionRefNo || transaction?.parentRefNo || ''),
-    previousRedemption: roundMoney(
-      previousDocument?.sellingPrice ?? transaction?.redemption ?? 0
-    ),
+    // Jumlah tebus surat asal = harga jualan + upah simpan surat terdahulu.
+    // JANGAN guna `transaction.redemption` kerana itu tebus surat INI.
+    previousRedemption: previousDocument
+      ? roundMoney(
+        previousDocument.redemptionTotal ||
+        previousDocument.sellingPrice ||
+        roundMoney((previousDocument.purchasePrice || 0) + (previousDocument.totalProfit || 0))
+      )
+      : 0,
     financingDate,
     maturityDate: maturityDate || addMonthsToDateOnly(financingDate, SAG_DEFAULT_PAYMENT_TERM_MONTHS * 3),
     paymentDueOverride: '',
@@ -1206,11 +1254,63 @@ export const createEmptySagDocument = (
   } as SagDocument);
 };
 
+/** Item marhun yang dibaca daripada jadual Keterangan Marhun surat institusi lain. */
+export type SagExternalMarhunItem = {
+  description: string;
+  quantity: number;
+  karat: string;
+  weight: number;
+  marhunValue: number;
+  ratePerGram: number;
+  fineness?: number | null;
+};
+
+/** Input borang import salinan Surat Akuan Gadaian daripada institusi lain. */
+export type SagExternalImportInput = {
+  /** Nama institusi asal surat (contoh: Ar-Rahnu XChange, Bank Rakyat, Pos Ar-Rahnu). */
+  institutionName: string;
+  /** No. surat pada dokumen asal (pilihan; jika kosong No. SAG baharu dijana). */
+  documentNo: string;
+  memberName: string;
+  memberIcNumber: string;
+  financingDate: string;
+  maturityDate: string;
+  pledgeType: string;
+  marhunValue: number;
+  financingAmount: number;
+  remarks: string;
+  files: File[];
+  /** Nilai terbitan daripada jadual tempoh matang surat (jika dapat dibaca). */
+  feeBasis?: SagFeeBasis;
+  /** Kadar upah simpan (% sebulan) yang dikira daripada jadual tempoh. */
+  feeRate?: number;
+  /** Jumlah tebus surat asal (RM) yang dikira daripada jadual tempoh. */
+  previousRedemption?: number;
+  /** Tempoh surat dalam bulan (dijumlahkan daripada jadual tempoh). */
+  paymentTermMonths?: number;
+  /** Item Keterangan Marhun yang dibaca daripada surat asal. */
+  marhunItems?: SagExternalMarhunItem[];
+  /** No. akaun institusi pada surat asal. */
+  accountNo?: string;
+  /** No. kotak/peti marhun pada surat asal. */
+  poBox?: string;
+  /** Keuntungan jualan (ribh) yang tercetak pada surat asal. */
+  profitAmount?: number;
+  /** No. Sijil Komoditi pada surat asal. */
+  commodityCertificateNo?: string;
+  /** Jumlah bayaran keuntungan setiap selang tempoh (RM). */
+  profitPaymentAmount?: number;
+  /** Selang bayaran keuntungan dalam bulan. */
+  profitPaymentMonths?: number;
+};
+
 export type SagDocumentFromLedgerInput = {
   transaction: any;
   institution?: any;
   assets?: any[];
   member?: Partial<SagMemberSnapshot> | null;
+  /** Surat asal bagi transaksi susulan (OL/Pusing) supaya tebus surat asal dapat dipautkan. */
+  previousDocument?: SagDocument | null;
   letterhead: SagLetterhead;
   existingNumbers?: string[];
   status?: SagDocumentStatus;
@@ -1229,6 +1329,7 @@ export const buildSagDocumentFromLedger = ({
   institution,
   assets = [],
   member = null,
+  previousDocument = null,
   letterhead,
   existingNumbers = [],
   status = 'Dikeluarkan',
@@ -1241,6 +1342,7 @@ export const buildSagDocumentFromLedger = ({
     assets,
     member,
     letterhead,
+    previousDocument,
     existingNumbers,
     copyType,
     now
@@ -1277,17 +1379,23 @@ export const SAG_UJRAH_EXEMPT_PLEDGE_TYPES = ['Tebus Cash', 'Tebus EDT', 'TS', '
 export const validateSagDocument = (document: SagDocument): string[] => {
   const errors: string[] = [];
   if (!String(document.documentNo || '').trim()) errors.push('No. SAG wajib diisi.');
-  // KYC/AML: identiti (nama + No. KP sah) dan umur minimum 18 tahun.
-  evaluateCustomerKyc({
-    name: document.member?.name,
-    icNumber: document.member?.icNumber,
-    phone: document.member?.phone,
-    address: document.member?.address,
-    memberUserId: document.member?.userId
-  }).violations.forEach(violation => errors.push(violation));
-  // Maklumat hubungan diperlukan untuk pengesahan identiti & notifikasi.
-  if (!String(document.member?.address || '').trim()) errors.push('Alamat ahli wajib diisi.');
-  if (!String(document.member?.phone || '').trim()) errors.push('No. telefon ahli wajib diisi.');
+  const isIssued = document.status !== 'Draf';
+  // KYC/AML dan maklumat hubungan hanya wajib apabila surat benar-benar
+  // dikeluarkan. Draf (termasuk salinan surat institusi lain yang diimport)
+  // mesti boleh dikemas kini tanpa melengkapkan keseluruhan kontrak dahulu.
+  if (isIssued) {
+    // KYC/AML: identiti (nama + No. KP sah) dan umur minimum 18 tahun.
+    evaluateCustomerKyc({
+      name: document.member?.name,
+      icNumber: document.member?.icNumber,
+      phone: document.member?.phone,
+      address: document.member?.address,
+      memberUserId: document.member?.userId
+    }).violations.forEach(violation => errors.push(violation));
+    // Maklumat hubungan diperlukan untuk pengesahan identiti & notifikasi.
+    if (!String(document.member?.address || '').trim()) errors.push('Alamat ahli wajib diisi.');
+    if (!String(document.member?.phone || '').trim()) errors.push('No. telefon ahli wajib diisi.');
+  }
   if (!String(document.pledgeType || '').trim()) errors.push('Jenis pajakan mesti dipilih mengikut transaksi surat ini.');
   if (!document.financingDate) errors.push('Tarikh pembiayaan wajib diisi.');
   if (!document.maturityDate) errors.push('Tarikh matang wajib diisi.');
@@ -1305,7 +1413,6 @@ export const validateSagDocument = (document: SagDocument): string[] => {
   // --- Semakan Shariah: upah simpan (akad ijarah) ---
   const feeBasis = normalizeSagFeeBasis(document.feeBasis);
   const ujrahExempt = SAG_UJRAH_EXEMPT_PLEDGE_TYPES.includes(String(document.pledgeType || ''));
-  const isIssued = document.status !== 'Draf';
   if (feeBasis === 'jumlahPembiayaan') {
     // Dilarang sama sekali: ujrah sebagai peratusan hutang ialah riba.
     errors.push(SAG_UJRAH_DISALLOWED_MESSAGE);
@@ -1326,7 +1433,8 @@ export const validateSagDocument = (document: SagDocument): string[] => {
   }
 
   // --- Semakan akad: akad jualan & gadai mesti diterima secara eksplisit ---
-  if (!document.tawarruq?.saleAgreed || !document.tawarruq?.pledgeAgreed) {
+  // Draf boleh disimpan separa lengkap; pengesahan akad hanya perlu sebelum dikeluarkan.
+  if (isIssued && (!document.tawarruq?.saleAgreed || !document.tawarruq?.pledgeAgreed)) {
     errors.push('Akad jualan dan akad gadai perlu disahkan.');
   }
 
@@ -1453,7 +1561,22 @@ export const evaluateSagCustomerExposure = ({
   dailyLimit?: number;
 }): SagCustomerExposure => {
   const customerKey = resolveSagCustomerKey(candidate);
-  const candidateFinancing = roundMoney(candidate.purchasePrice);
+  /**
+   * Pembiayaan yang dikira untuk had pendedahan.
+   *
+   * OL/Pusing (atau surat yang mempunyai tebus surat asal) menampung surat
+   * lama, jadi hanya baki BERSIH (pembiayaan − tebus surat asal) ialah wang
+   * baharu yang benar-benar keluar. Mengira jumlah kasar akan melanggar had
+   * harian/terkumpul walaupun tiada pendedahan tambahan.
+   */
+  const financingForExposure = (document: SagDocument) => {
+    const gross = roundMoney(document?.purchasePrice);
+    const previous = roundMoney(document?.previousRedemption);
+    const pledgeType = String(document?.pledgeType || '');
+    const isRollover = previous > 0 || pledgeType === 'OL' || pledgeType === 'Pusing';
+    return isRollover ? Math.max(0, roundMoney(gross - previous)) : gross;
+  };
+  const candidateFinancing = financingForExposure(candidate);
   const empty: SagCustomerExposure = {
     customerKey,
     customerLabel: String(candidate.member?.name || candidate.member?.memberNo || ''),
@@ -1474,12 +1597,26 @@ export const evaluateSagCustomerExposure = ({
   let activeLetters = 0;
   let todayFinancing = 0;
 
+  // Surat yang telah digantikan oleh surat susulan (OL/Pusing/Salin) atau oleh
+  // calon semasa tidak boleh dikira dua kali dalam pendedahan pelanggan.
+  const supersededNumbers = new Set(
+    documents
+      .filter(document => document && !document.deletedAt && document.status !== 'Batal')
+      .map(document => String(document.previousDocumentNo || '').trim().toUpperCase())
+      .filter(Boolean)
+  );
+  const candidatePreviousNo = String(candidate.previousDocumentNo || '').trim().toUpperCase();
+
   documents.forEach(document => {
     if (!document || document.deletedAt) return;
     if (String(document.id) === String(candidate.id)) return;
     if (document.status === 'Batal') return;
     if (resolveSagCustomerKey(document) !== customerKey) return;
-    const financing = roundMoney(document.purchasePrice);
+    const documentNo = String(document.documentNo || '').trim().toUpperCase();
+    if (documentNo && (supersededNumbers.has(documentNo) || (candidatePreviousNo && documentNo === candidatePreviousNo))) {
+      return;
+    }
+    const financing = financingForExposure(document);
     if (String(document.pledgeStatus || '') === 'Aktif') {
       activeFinancing += financing;
       activeLetters += 1;
@@ -1493,12 +1630,18 @@ export const evaluateSagCustomerExposure = ({
   const todayAfter = roundMoney(todayFinancing + candidateFinancing);
   const violations: string[] = [];
 
-  if (cumulativeAfter > singleCustomerLimit + 0.005) {
+  // Salinan surat daripada institusi lain (`source: 'external'`) ialah ARKIB
+  // rujukan: wang tidak dikeluarkan oleh sistem ini dan tarikhnya sejarah.
+  // Had pembiayaan harian/terkumpul dalaman tidak sepatutnya menyekat
+  // kemas kini arkib tersebut.
+  const isArchivedImport = String(candidate.source || '') === 'external';
+
+  if (!isArchivedImport && cumulativeAfter > singleCustomerLimit + 0.005) {
     violations.push(
       `Had pendedahan pelanggan dilampaui: RM${cumulativeAfter.toFixed(2)} berbanding had RM${singleCustomerLimit.toFixed(2)} (aktif RM${activeFinancing.toFixed(2)}).`
     );
   }
-  if (todayAfter > dailyLimit + 0.005) {
+  if (!isArchivedImport && todayAfter > dailyLimit + 0.005) {
     violations.push(
       `Had pembiayaan harian dilampaui: RM${todayAfter.toFixed(2)} berbanding had RM${dailyLimit.toFixed(2)} pada ${sameDay || 'tarikh yang sama'}.`
     );

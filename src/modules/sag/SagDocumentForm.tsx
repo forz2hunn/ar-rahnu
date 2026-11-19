@@ -7,6 +7,7 @@ import {
   Printer,
   RefreshCw,
   Save,
+  ScanText,
   Trash2,
   X
 } from 'lucide-react';
@@ -46,6 +47,8 @@ import {
   type SagMemberSnapshot
 } from './sagDocuments';
 import { SagLetter } from './SagLetter';
+import { extractSagImportText } from '../../lib/sag-import-ocr';
+import { parseSagImportText } from '../../lib/sag-import-parser';
 
 export type SagMemberOption = SagMemberSnapshot & { email?: string };
 
@@ -112,6 +115,7 @@ export function SagDocumentForm({
   resolveTransactionAssets,
   loadMemberProfile,
   acceptanceActor = null,
+  onLoadAttachmentFiles,
   onClose,
   onSave
 }: {
@@ -129,11 +133,15 @@ export function SagDocumentForm({
   loadMemberProfile?: (userId: string) => Promise<Partial<SagMemberSnapshot> | null>;
   /** Pelaku yang menerima pengesahan Ijab & Qabul (direkod bersama timestamp). */
   acceptanceActor?: SagAuditActor | null;
+  /** Muat turun fail surat yang dilampirkan untuk diimbas semula. */
+  onLoadAttachmentFiles?: () => Promise<File[]>;
   onClose: () => void;
   onSave: (document: SagDocument) => void;
 }) {
   const [form, setForm] = useState<SagDocument>(initialDocument);
   const [errors, setErrors] = useState<string[]>([]);
+  const [isScanningAttachment, setIsScanningAttachment] = useState(false);
+  const [scanFeedback, setScanFeedback] = useState<{ tone: 'info' | 'success' | 'error'; message: string } | null>(null);
   const [assetPickerId, setAssetPickerId] = useState('');
   const [isLoadingMemberProfile, setIsLoadingMemberProfile] = useState(false);
   const selectedMemberUserIdRef = useRef('');
@@ -253,6 +261,83 @@ export function SagDocumentForm({
   const updateSignature = (patch: Partial<SagDocument['signatures']>) =>
     setForm(previous => ({ ...previous, signatures: { ...previous.signatures, ...patch } }));
 
+  /** Petakan hasil imbasan surat ke dalam borang kemaskini. */
+  const applyScannedDocument = (parsed: ReturnType<typeof parseSagImportText>) => {
+    const fields = parsed.fields;
+    setForm(previous => {
+      const next: SagDocument = { ...previous };
+      if (fields.institutionName) next.institutionName = fields.institutionName;
+      if (fields.documentNo) next.documentNo = fields.documentNo.toUpperCase();
+      if (fields.accountNo) next.accountNo = fields.accountNo;
+      if (fields.commodityCertificateNo) next.commodityCertificateNo = fields.commodityCertificateNo;
+      if (fields.pledgeType && SAG_PLEDGE_TYPES.includes(fields.pledgeType)) next.pledgeType = fields.pledgeType;
+      if (fields.financingDate) next.financingDate = fields.financingDate;
+      if (fields.maturityDate) next.maturityDate = fields.maturityDate;
+      const memberPatch: Partial<SagMemberSnapshot> = {};
+      if (fields.memberName) memberPatch.name = fields.memberName;
+      if (fields.memberIcNumber) memberPatch.icNumber = fields.memberIcNumber;
+      if (fields.poBox) memberPatch.poBox = fields.poBox;
+      if (Object.keys(memberPatch).length) next.member = { ...next.member, ...memberPatch };
+      if (fields.marhunValue && fields.marhunValue > 0) {
+        next.marhunValue = fields.marhunValue;
+        next.marhunValueOverride = fields.marhunValue;
+      }
+      if (fields.financingAmount && fields.financingAmount > 0) next.purchasePrice = fields.financingAmount;
+      if (fields.profitAmount !== undefined) next.totalProfit = fields.profitAmount;
+      if (fields.feeBasis) next.feeBasis = fields.feeBasis;
+      if (fields.feeRate !== undefined) next.feeRate = fields.feeRate;
+      if (fields.previousRedemption !== undefined) next.previousRedemption = fields.previousRedemption;
+      if (fields.profitPaymentAmount !== undefined) next.profitPaymentAmount = fields.profitPaymentAmount;
+      if (fields.profitPaymentMonths !== undefined) next.profitPaymentMonths = fields.profitPaymentMonths;
+      if (fields.marhunItems?.length) {
+        next.marhunItems = fields.marhunItems.map((item, index) => ({
+          id: `scan-${Date.now()}-${index}`,
+          assetId: null,
+          description: item.description,
+          quantity: item.quantity,
+          karat: item.karat,
+          ratePerGram: item.ratePerGram,
+          weight: item.weight,
+          marhunValue: item.marhunValue,
+          fineness: item.fineness ?? undefined
+        }));
+        next.marhunValueOverride = fields.marhunValue ?? next.marhunValueOverride;
+      }
+      return next;
+    });
+  };
+
+  /** Imbas semula fail surat asal yang dilampirkan pada rekod ini. */
+  const handleScanAttachment = async () => {
+    if (!onLoadAttachmentFiles || isScanningAttachment) return;
+    setIsScanningAttachment(true);
+    setScanFeedback({ tone: 'info', message: 'Membaca fail surat...' });
+    try {
+      const files = await onLoadAttachmentFiles();
+      if (!files.length) throw new Error('Tiada fail lampiran surat untuk dibaca.');
+      const extraction = await extractSagImportText(files, (message, progress) => {
+        setScanFeedback({
+          tone: 'info',
+          message: progress !== undefined ? `${message} (${Math.round(progress * 100)}%)` : message
+        });
+      });
+      const parsed = parseSagImportText(extraction.text);
+      applyScannedDocument(parsed);
+      setScanFeedback({
+        tone: 'success',
+        message: `Data surat dibaca (${parsed.matchedLabels.length} medan` +
+          `${parsed.fields.marhunItems?.length ? `, ${parsed.fields.marhunItems.length} item marhun` : ''}). Sila semak sebelum simpan.`
+      });
+    } catch (error) {
+      setScanFeedback({
+        tone: 'error',
+        message: error instanceof Error ? error.message : 'Pembacaan fail gagal.'
+      });
+    } finally {
+      setIsScanningAttachment(false);
+    }
+  };
+
   /**
    * Memilih ahli mesti menggantikan butiran di bawah sepenuhnya. Jika rekod ahli tiada
    * alamat/telefon/waris, medan tersebut dikosongkan dan tidak dikekalkan daripada
@@ -360,9 +445,15 @@ export function SagDocumentForm({
       feeBasis: transaction.feeBasis !== undefined
         ? normalizeSagFeeBasis(transaction.feeBasis)
         : previous.feeBasis,
-      previousRedemption: String(transaction.transactionStatus || transaction.type || '').toLowerCase().includes('pajakan')
-        ? 0
-        : roundMoney(transaction.redemption ?? previous.previousRedemption),
+      // Tebus surat asal diambil daripada surat terdahulu (harga jualan + ujrah),
+      // bukan tebus surat ini.
+      previousRedemption: parentDocument
+        ? roundMoney(
+          parentDocument.redemptionTotal ||
+          parentDocument.sellingPrice ||
+          roundMoney((parentDocument.purchasePrice || 0) + (parentDocument.totalProfit || 0))
+        )
+        : 0,
       purchasePrice: roundMoney(transaction.loan ?? previous.purchasePrice),
       // `transaction.fee` ialah caj simpanan (ujrah), bukan keuntungan jualan.
       // Ribh murabahah dikekalkan daripada surat dan tidak diambil daripada lejar.
@@ -385,6 +476,7 @@ export function SagDocumentForm({
     );
     setForm(previous => ({
       ...previous,
+      marhunValueOverride: null,
       marhunItems: linkedAssets
         .filter(asset => (parseFloat(asset.weight) || 0) > 0)
         .map(asset => createSagMarhunItem(asset, rate)),
@@ -395,6 +487,7 @@ export function SagDocumentForm({
   const updateItem = (id: string, patch: Partial<SagMarhunItem>) => {
     setForm(previous => ({
       ...previous,
+      marhunValueOverride: null,
       marhunItems: previous.marhunItems.map(item => {
         if (item.id !== id) return item;
         // Menukar karat mesti menukar kadar efektif mengikut faktor ketulenan
@@ -424,6 +517,7 @@ export function SagDocumentForm({
   const removeItem = (id: string) => {
     setForm(previous => ({
       ...previous,
+      marhunValueOverride: null,
       marhunItems: previous.marhunItems.filter(item => item.id !== id)
     }));
   };
@@ -433,6 +527,7 @@ export function SagDocumentForm({
     if (!asset) return;
     setForm(previous => ({
       ...previous,
+      marhunValueOverride: null,
       marhunItems: [...previous.marhunItems, createSagMarhunItem(asset, defaultMarhunRate)]
     }));
     setAssetPickerId('');
@@ -445,6 +540,7 @@ export function SagDocumentForm({
     const effectiveRate = roundMoney(defaultMarhunRate * fineness);
     setForm(previous => ({
       ...previous,
+      marhunValueOverride: null,
       marhunItems: [
         ...previous.marhunItems,
         {
@@ -539,17 +635,43 @@ export function SagDocumentForm({
               Lengkapkan butiran ahli, marhun dan nilai pembiayaan. Rekod disambung terus kepada modul transaksi SAG, aset emas dan keahlian ahli.
             </p>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Tutup borang"
-            className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700"
-          >
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            {onLoadAttachmentFiles && (
+              <button
+                type="button"
+                onClick={() => void handleScanAttachment()}
+                disabled={isScanningAttachment}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3 py-2 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-50 disabled:opacity-50"
+                title="Baca semula fail surat yang dilampirkan dan isi semula borang"
+              >
+                <ScanText size={14} className={isScanningAttachment ? 'animate-pulse' : ''} />
+                <span>{isScanningAttachment ? 'Membaca...' : 'Baca & Isi Automatik'}</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="Tutup borang"
+              className="rounded-full p-2 text-slate-400 transition-colors hover:bg-slate-200 hover:text-slate-700"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </div>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 custom-scrollbar sm:px-6">
+          {scanFeedback && (
+            <div
+              role="status"
+              className={`rounded-xl border p-3 text-xs font-semibold ${scanFeedback.tone === 'error'
+                ? 'border-rose-200 bg-rose-50 text-rose-700'
+                : scanFeedback.tone === 'success'
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                  : 'border-cyan-200 bg-cyan-50 text-cyan-900'}`}
+            >
+              {scanFeedback.message}
+            </div>
+          )}
           {errors.length > 0 && (
             <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-3">
               <p className="text-sm font-bold text-rose-800">Sila lengkapkan maklumat berikut:</p>
@@ -572,6 +694,26 @@ export function SagDocumentForm({
                   onChange={event => update({ documentNo: event.target.value.toUpperCase() })}
                   className={`${fieldClass} font-mono font-bold`}
                   required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-account-no">No. Akaun Institusi</label>
+                <input
+                  id="sag-account-no"
+                  value={form.accountNo || ''}
+                  onChange={event => update({ accountNo: event.target.value.toUpperCase() })}
+                  className={`${fieldClass} font-mono`}
+                  placeholder="cth. 0030008733"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-commodity-no">No. Sijil Komoditi</label>
+                <input
+                  id="sag-commodity-no"
+                  value={form.commodityCertificateNo || ''}
+                  onChange={event => update({ commodityCertificateNo: event.target.value.toUpperCase() })}
+                  className={`${fieldClass} font-mono`}
+                  placeholder="cth. CPO04MAR26-0001536-000"
                 />
               </div>
               <div className="space-y-1.5">
@@ -637,7 +779,11 @@ export function SagDocumentForm({
                       previousTransactionRefNo: previousDocument?.transactionRefNo || '',
                       // Jumlah tebus surat asal menjadi asas unjuran lebihan tunai surat susulan.
                       previousRedemption: previousDocument
-                        ? previousDocument.sellingPrice || previousDocument.purchasePrice + previousDocument.totalProfit
+                        ? roundMoney(
+                          previousDocument.redemptionTotal ||
+                          previousDocument.sellingPrice ||
+                          roundMoney((previousDocument.purchasePrice || 0) + (previousDocument.totalProfit || 0))
+                        )
                         : 0
                     });
                   }}
@@ -752,7 +898,7 @@ export function SagDocumentForm({
                   value={form.member.name}
                   onChange={event => updateMember({ name: event.target.value })}
                   className={fieldClass}
-                  required
+                  required={form.status !== 'Draf'}
                 />
               </div>
               <div className="space-y-1.5">
@@ -764,7 +910,7 @@ export function SagDocumentForm({
                   className={`${fieldClass} font-mono`}
                   inputMode="numeric"
                   placeholder="831020-05-6060"
-                  required
+                  required={form.status !== 'Draf'}
                 />
               </div>
               <div className="space-y-1.5">
@@ -775,7 +921,7 @@ export function SagDocumentForm({
                   onChange={event => updateMember({ phone: event.target.value })}
                   className={fieldClass}
                   placeholder="cth. 0192510942"
-                  required
+                  required={form.status !== 'Draf'}
                 />
               </div>
               <div className="space-y-1.5">
@@ -810,7 +956,7 @@ export function SagDocumentForm({
                   onChange={event => updateMember({ address: event.target.value })}
                   className={fieldClass}
                   rows={2}
-                  required
+                  required={form.status !== 'Draf'}
                 />
               </div>
             </div>
@@ -878,7 +1024,7 @@ export function SagDocumentForm({
                   step="0.01"
                   min={0}
                   value={formatInputNumber(derived.marhunValue)}
-                  onChange={event => update({ marhunValue: Number(event.target.value) || 0 })}
+                  onChange={event => update({ marhunValue: Number(event.target.value) || 0, marhunValueOverride: null })}
                   className={`${fieldClass} bg-slate-50 font-mono font-bold`}
                   readOnly={derived.marhunItems.length > 0}
                 />
@@ -908,6 +1054,32 @@ export function SagDocumentForm({
                   className={`${fieldClass} font-mono font-bold`}
                 />
                 <p className="text-[11px] font-medium text-slate-500">Tidak termasuk upah simpan (akad ijarah).</p>
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-profit-payment-months">Bayaran Keuntungan Setiap (bulan)</label>
+                <input
+                  id="sag-profit-payment-months"
+                  type="number"
+                  min={1}
+                  max={24}
+                  step={1}
+                  value={formatInputNumber(form.profitPaymentMonths ?? 6)}
+                  onChange={event => update({ profitPaymentMonths: Math.max(1, Math.min(24, Number(event.target.value) || 6)) })}
+                  className={`${fieldClass} font-mono`}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className={labelClass} htmlFor="sag-profit-payment-amount">Jumlah Bayaran Keuntungan (RM)</label>
+                <input
+                  id="sag-profit-payment-amount"
+                  type="number"
+                  step="0.01"
+                  min={0}
+                  value={formatInputNumber(form.profitPaymentAmount ?? 0)}
+                  onChange={event => update({ profitPaymentAmount: Number(event.target.value) || 0 })}
+                  className={`${fieldClass} font-mono`}
+                />
+                <p className="text-[11px] font-medium text-slate-500">Seperti tercetak: “Jumlah Bayaran Keuntungan setiap X bulan”.</p>
               </div>
               <div className="space-y-1.5">
                 <label className={labelClass} htmlFor="sag-margin">Margin Pembiayaan (%)</label>
