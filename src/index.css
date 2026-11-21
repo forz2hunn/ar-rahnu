@@ -311,3 +311,20 @@ html.dark form button[aria-expanded] {
 html.dark form input[readonly] {
   background-color: #36383a;
 }
+
+/* Peranti sentuh: Safari iOS zoom secara automatik apabila medan borang
+   mempunyai teks lebih kecil daripada 16px. Kekalkan 1rem pada telefon
+   dan tablet; desktop tidak berubah. */
+@media (max-width: 1024px) {
+  form input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="hidden"]):not([type="range"]):not([type="color"]),
+  form select,
+  form textarea {
+    font-size: 1rem !important;
+  }
+
+  /* Sasaran sentuhan untuk butang ikon yang hanya ada aria-label. */
+  form button[aria-label] {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
+}

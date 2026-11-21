@@ -1367,7 +1367,7 @@ function ThemeToggle({ theme, onToggle }: { theme: 'light' | 'dark'; onToggle: (
       onClick={onToggle}
       aria-label={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
       title={isDark ? 'Aktifkan mod terang' : 'Aktifkan mod gelap'}
-      className="group relative inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500"
+      className="group relative inline-flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-slate-200 bg-white p-2 text-slate-700 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-corporate-teal-500 lg:min-h-0 lg:min-w-0"
     >
       {isDark ? <Sun size={17} /> : <Moon size={17} />}
       <span role="tooltip" className="pointer-events-none absolute right-0 top-full z-[90] mt-2 whitespace-nowrap rounded-md bg-slate-900 px-2.5 py-1.5 text-xs font-medium text-white opacity-0 shadow-lg transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">

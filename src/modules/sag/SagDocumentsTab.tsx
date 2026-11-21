@@ -1293,7 +1293,7 @@ export function SagExternalImportModal({
                 type="button"
                 onClick={addMarhunRow}
                 disabled={isSaving}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3 py-1.5 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50"
+                className="inline-flex min-h-11 items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3 py-2.5 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50 lg:min-h-0 lg:py-1.5"
               >
                 <Plus size={13} /> Tambah Item
               </button>
