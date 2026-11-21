@@ -296,6 +296,11 @@ export function SagDocumentForm({
       if (fields.previousRedemption !== undefined) next.previousRedemption = fields.previousRedemption;
       if (fields.profitPaymentAmount !== undefined) next.profitPaymentAmount = fields.profitPaymentAmount;
       if (fields.profitPaymentMonths !== undefined) next.profitPaymentMonths = fields.profitPaymentMonths;
+      // Tempoh upah simpan yang dinyatakan pada surat menggantikan tempoh rekod
+      // supaya Jumlah Upah dikira semula dengan tempoh yang betul.
+      if (fields.paymentTermMonths) {
+        next.paymentTermMonths = Math.max(1, Math.min(24, Math.round(fields.paymentTermMonths)));
+      }
       if (fields.marhunItems?.length) {
         next.marhunItems = fields.marhunItems.map((item, index) => ({
           id: `scan-${Date.now()}-${index}`,

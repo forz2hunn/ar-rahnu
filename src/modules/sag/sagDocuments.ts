@@ -1286,7 +1286,11 @@ export type SagExternalImportInput = {
   feeRate?: number;
   /** Jumlah tebus surat asal (RM) yang dikira daripada jadual tempoh. */
   previousRedemption?: number;
-  /** Tempoh surat dalam bulan (dijumlahkan daripada jadual tempoh). */
+  /**
+   * Tempoh upah simpan dalam bulan, iaitu satu period yang dicaj pada surat
+   * asal (bukan jumlah tempoh penuh gadaian). Nilai ini menentukan Jumlah
+   * Upah dan Jumlah Tebus rekod; jika tiada, 6 bulan digunakan.
+   */
   paymentTermMonths?: number;
   /** Item Keterangan Marhun yang dibaca daripada surat asal. */
   marhunItems?: SagExternalMarhunItem[];
@@ -1617,6 +1621,11 @@ export const evaluateSagCustomerExposure = ({
     if (!document || document.deletedAt) return;
     if (String(document.id) === String(candidate.id)) return;
     if (document.status === 'Batal') return;
+    // Salinan surat institusi lain yang belum dipautkan ke lejar ialah arkib
+    // rujukan: pembiayaannya milik institusi asal, bukan pendedahan koperasi
+    // ini. Rekod yang sudah dipromosikan ke lejar (mempunyai transactionId)
+    // tetap dikira kerana wang itu kini dibawa oleh koperasi.
+    if (String(document.source || '') === 'external' && !document.transactionId) return;
     if (resolveSagCustomerKey(document) !== customerKey) return;
     const documentNo = String(document.documentNo || '').trim().toUpperCase();
     if (documentNo && (supersededNumbers.has(documentNo) || (candidatePreviousNo && documentNo === candidatePreviousNo))) {
@@ -1639,8 +1648,9 @@ export const evaluateSagCustomerExposure = ({
   // Salinan surat daripada institusi lain (`source: 'external'`) ialah ARKIB
   // rujukan: wang tidak dikeluarkan oleh sistem ini dan tarikhnya sejarah.
   // Had pembiayaan harian/terkumpul dalaman tidak sepatutnya menyekat
-  // kemas kini arkib tersebut.
-  const isArchivedImport = String(candidate.source || '') === 'external';
+  // kemas kini arkib tersebut. Rekod yang sudah dipautkan ke lejar dikira
+  // seperti surat biasa.
+  const isArchivedImport = String(candidate.source || '') === 'external' && !candidate.transactionId;
 
   if (!isArchivedImport && cumulativeAfter > singleCustomerLimit + 0.005) {
     violations.push(

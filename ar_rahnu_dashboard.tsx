@@ -610,6 +610,16 @@ const getTransactionStatus = (transaction) => {
   return 'Lain-lain';
 };
 const isRecordVisible = (record) => !record?.deletedAt;
+
+/**
+ * Pemilikan rekod (surat akuan gadaian dan aset). Admin/Manager melihat semua
+ * rekod dalam portfolio organisasi; Staff hanya rekod yang dicipta sendiri.
+ * Rekod lama tanpa `createdBy` tidak dapat dibuktikan milik staff dan
+ * disembunyikan daripada mereka.
+ */
+const canViewOwnedRecordForUser = (record, canViewAll, userId) =>
+  Boolean(record) && (Boolean(canViewAll) || String(record?.createdBy?.id || '') === String(userId));
+
 const resetRecordsPreservingDeleted = (defaults, currentRecords) => {
   const deletedRecords = currentRecords.filter(record => !isRecordVisible(record));
   const deletedIds = new Set(deletedRecords.map(record => String(record.id)));
@@ -2997,6 +3007,42 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   }, [organizationMembership, rolePermissions]);
 
   /**
+   * Admin dan Manager melihat keseluruhan arkib organisasi. Akaun peribadi
+   * (tiada keahlian organisasi) melihat semua rekodnya sendiri. Staff hanya
+   * melihat rekod yang mereka cipta.
+   */
+  const canViewAllOrganizationRecords = useMemo(
+    () => !organizationMembership || ['Admin', 'Manager'].includes(organizationMembership?.role),
+    [organizationMembership]
+  );
+
+  /** Senarai surat yang dibenarkan dilihat oleh pengguna semasa. */
+  const visibleSagDocuments = useMemo(
+    () => sagDocuments.filter(document => canViewOwnedRecordForUser(document, canViewAllOrganizationRecords, user.id)),
+    [sagDocuments, canViewAllOrganizationRecords, user.id]
+  );
+
+  /**
+   * Aset yang dibenarkan dilihat dalam modul Asset Record. `visibleAssets`
+   * kekal tidak ditapis kerana modul lejar/transaksi perlu memilih aset yang
+   * didaftarkan oleh mana-mana ahli organisasi.
+   */
+  const viewableAssets = useMemo(
+    () => visibleAssets.filter(asset => canViewOwnedRecordForUser(asset, canViewAllOrganizationRecords, user.id)),
+    [visibleAssets, canViewAllOrganizationRecords, user.id]
+  );
+
+  /**
+   * Staff dibenarkan mendaftar dan mengurus emas milik sendiri walaupun
+   * matriks peranan tidak memberi kebenaran organisasi `assets_manage`.
+   * Matriks itu kini bermaksud akses ke atas aset SEMUA ahli.
+   */
+  const isOwnAssetRecord = (asset) => String(asset?.createdBy?.id || '') === String(user.id);
+  const canRegisterAssetRecord = () => hasPermission('assets_view') || hasPermission('assets_manage');
+  const canEditAssetRecord = (asset) => hasPermission('assets_manage') || isOwnAssetRecord(asset);
+  const canDeleteAssetRecord = (asset) => hasPermission('assets_delete') || isOwnAssetRecord(asset);
+
+  /**
    * Rekod lejar SAG (modul Pengurusan Surat Gadaian) yang belum mempunyai
    * Surat Akuan Gadaian. Kiraan ini dipaparkan pada modul surat supaya rekod
    * lejar lama tidak terus "hilang" daripada senarai surat.
@@ -3915,11 +3961,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleDeleteAsset = (id) => {
-    if (!hasPermission('assets_delete')) {
+    const targetAsset = assets.find(asset => String(asset.id) === String(id) && !asset.deletedAt);
+    if (!canDeleteAssetRecord(targetAsset)) {
       denyPermission('assets_delete', 'untuk memadam aset');
       return;
     }
-    const targetAsset = visibleAssets.find(asset => String(asset.id) === String(id));
     if (targetAsset && targetAsset.status !== 'EDT') {
       setToastMessage('Aset EDR/Dilelong tidak boleh dipadam terus. Gunakan tindakan kebal dengan kelulusan dwi-kawalan.');
       setTimeout(() => setToastMessage(null), 5500);
@@ -3959,6 +4005,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleOpenSagDocumentForm = (document: SagDocument | null) => {
+    if (document && !canViewOwnedRecordForUser(document, canViewAllOrganizationRecords, user.id)) {
+      setToastMessage('Surat akuan gadaian ini dicipta oleh pengguna lain.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
     setSagFormDocument(document);
   };
 
@@ -3974,12 +4025,17 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
       !document.deletedAt && String(document.transactionId) === String(transaction.id)
     );
     if (existing) {
+      if (!canViewOwnedRecordForUser(existing, canViewAllOrganizationRecords, user.id)) {
+        setToastMessage('Surat bagi transaksi ini dicipta oleh pengguna lain.');
+        setTimeout(() => setToastMessage(null), 4500);
+        return;
+      }
       setSagPreviewDocument(existing);
       return;
     }
     const institution = visibleInstitutions.find(item => item.name === transaction.institution);
     const parentDocument = transaction.parentTransactionId != null
-      ? sagDocuments.find(document =>
+      ? visibleSagDocuments.find(document =>
         !document.deletedAt && String(document.transactionId) === String(transaction.parentTransactionId))
       : null;
     setSagFormDocument(buildSagDocumentDraft({
@@ -4272,8 +4328,12 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         previousRedemption: input.previousRedemption ?? 0,
         // Nilai marhun yang tercetak pada surat asal diutamakan daripada jumlah item.
         marhunValueOverride: marhunValue > 0 ? marhunValue : null,
-        // Selang tempoh bayaran default 6 bulan (bukan jumlah tempoh surat).
-        paymentTermMonths: base.paymentTermMonths,
+        // Tempoh upah simpan yang dibaca/ditetapkan pada borang import. Nilai
+        // lalai 6 bulan hanya digunakan apabila surat tidak menyatakannya, kerana
+        // tempoh ini menentukan Jumlah Upah dan Jumlah Tebus pada rekod.
+        paymentTermMonths: Number(input.paymentTermMonths) > 0
+          ? Math.max(1, Math.min(24, Math.round(Number(input.paymentTermMonths))))
+          : base.paymentTermMonths,
         remarks: input.remarks ||
           `Salinan Surat Akuan Gadaian diimport daripada ${input.institutionName.trim()}.`,
         attachments: uploadedAttachments,
@@ -4342,6 +4402,11 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
    *    supaya senarai surat tidak lagi kosong apabila lejar sudah berisi.
    */
   const handleSyncSagLedger = () => {
+    if (!canViewAllOrganizationRecords) {
+      setToastMessage('Akses ditolak: hanya Admin/Manager boleh menyelaraskan lejar SAG.');
+      setTimeout(() => setToastMessage(null), 5000);
+      return;
+    }
     if (!hasPermission('sag_create')) {
       denyPermission('sag_create', 'untuk menyelaraskan lejar SAG');
       return;
@@ -4447,16 +4512,21 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
         ? syncedDocuments.find(entry => !entry.deletedAt &&
             String(entry.transactionRefNo || '') === String(transaction.parentRefNo))
         : null);
-      const document = buildSagDocumentFromLedger({
-        transaction,
-        institution,
-        assets: resolveTransactionAssets(transaction),
-        member: null,
-        previousDocument: parentDocument || null,
-        letterhead: sagLetterhead,
-        existingNumbers: knownNumbers,
-        now: savedAt
-      });
+      const document = normalizeSagDocument({
+        ...buildSagDocumentFromLedger({
+          transaction,
+          institution,
+          assets: resolveTransactionAssets(transaction),
+          member: null,
+          previousDocument: parentDocument || null,
+          letterhead: sagLetterhead,
+          existingNumbers: knownNumbers,
+          now: savedAt
+        }),
+        // Rekod yang diimport daripada lejar perlu jejak pencipta supaya
+        // penapisan pemilikan surat dapat dikuat kuasakan kemudian.
+        ...auditCreate('sagDocument', savedAt)
+      } as SagDocument);
       knownNumbers.push(document.documentNo);
       if (transactionId) knownTransactionIds.add(transactionId);
       if (document.transactionRefNo) knownRefs.add(document.transactionRefNo);
@@ -5425,13 +5495,28 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
     setTimeout(() => setToastMessage(null), 3000);
   };
 
+  /** Buka butiran aset; staff hanya boleh melihat aset yang dicipta sendiri. */
+  const openAssetDetail = (asset) => {
+    if (!canViewOwnedRecordForUser(asset, canViewAllOrganizationRecords, user.id)) {
+      setToastMessage('Rekod aset ini didaftarkan oleh pengguna lain.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
+    setViewingAssetRecord(asset);
+  };
+
   const handleEditAsset = (asset) => {
+    if (!canViewOwnedRecordForUser(asset, canViewAllOrganizationRecords, user.id)) {
+      setToastMessage('Rekod aset ini didaftarkan oleh pengguna lain.');
+      setTimeout(() => setToastMessage(null), 4500);
+      return;
+    }
     setEditingAsset(asset);
     setIsAssetModalOpen(true);
   };
 
   const handleDuplicateAsset = (asset) => {
-    if (!hasPermission('assets_manage')) {
+    if (!canEditAssetRecord(asset)) {
       denyPermission('assets_manage', 'untuk menduplikasi aset');
       return;
     }
@@ -5458,7 +5543,10 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   };
 
   const handleSaveAsset = (assetData) => {
-    if (!hasPermission('assets_manage')) {
+    const allowed = editingAsset
+      ? canEditAssetRecord(editingAsset)
+      : canRegisterAssetRecord();
+    if (!allowed) {
       denyPermission('assets_manage', 'untuk mendaftar atau mengemas kini aset');
       return;
     }
@@ -5707,8 +5795,8 @@ function Dashboard({ user, supabaseClient, onSignOut, authError, canInstall, isA
   );
   const checkedInAssetIds = useMemo(() => getCheckedInAssetIds(transactions), [transactions]);
   const availableAssetsForTransaction = useMemo(
-    () => visibleAssets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
-    [visibleAssets, checkedInAssetIds]
+    () => viewableAssets.filter(asset => asset.status === 'EDT' && !checkedInAssetIds.has(String(asset.id))),
+    [viewableAssets, checkedInAssetIds]
   );
   const editingTransactionAssetIds = new Set(
     (editingTransaction ? getTransactionAssetIds(editingTransaction) : []).map(String)
@@ -5837,7 +5925,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           <NavItem compact={isSidebarCompact} theme={theme} icon={<LayoutDashboard size={20} />} label="Dashboard" isActive={activeTab === 'dashboard'} onClick={() => { setActiveTab('dashboard'); setIsSidebarOpen(false); }} />
           <NavItem compact={isSidebarCompact} theme={theme} icon={<Database size={20} />} label="Asset Record" isActive={activeTab === 'assets'} onClick={() => { setActiveTab('assets'); setIsSidebarOpen(false); }} />
           <NavItem compact={isSidebarCompact} theme={theme} icon={<ArrowRightLeft size={20} />} label="Pengurusan Surat Gadaian (SAG)" isActive={activeTab === 'transactions'} badge={redemptionNotifications.length} onClick={() => { setActiveTab('transactions'); setIsSidebarOpen(false); }} />
-          <NavItem compact={isSidebarCompact} theme={theme} icon={<FileText size={20} />} label="Surat Akuan Gadaian" isActive={activeTab === 'sagDocuments'} badge={sagDocuments.filter(document => !document.deletedAt && document.status === 'Draf').length} onClick={() => { setActiveTab('sagDocuments'); setIsSidebarOpen(false); }} />
+          <NavItem compact={isSidebarCompact} theme={theme} icon={<FileText size={20} />} label="Surat Akuan Gadaian" isActive={activeTab === 'sagDocuments'} badge={visibleSagDocuments.filter(document => !document.deletedAt && document.status === 'Draf').length} onClick={() => { setActiveTab('sagDocuments'); setIsSidebarOpen(false); }} />
           <div>
             <button
               type="button"
@@ -7340,8 +7428,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
                             { category: 'Aset & Inventori Emas Fizikal' },
                             { id: 'assets_view', label: 'Lihat inventori emas EDT & EDR', roles: ['Staff', 'Manager', 'Admin'] },
-                            { id: 'assets_manage', label: 'Daftar, pautkan dan kemas kini aset emas', roles: ['Manager', 'Admin'] },
-                            { id: 'assets_delete', label: 'Padam rekod aset emas daripada inventori', roles: ['Admin'] },
+                            { id: 'assets_manage', label: 'Urus semua aset emas organisasi (selain aset sendiri)', roles: ['Manager', 'Admin'] },
+                            { id: 'assets_delete', label: 'Padam sebarang aset emas organisasi (selain aset sendiri)', roles: ['Admin'] },
 
                             { category: 'Rujukan Institusi & Pembekal' },
                             { id: 'institutions_manage', label: 'Ubah kadar marhun, LTV dan institusi', roles: ['Manager', 'Admin'] },
@@ -9112,7 +9200,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           {/* TAB: SURAT AKUAN GADAIAN (SAG) */}
           {activeTab === 'sagDocuments' && (
             <SagDocumentsTab
-              documents={sagDocuments}
+              documents={visibleSagDocuments}
               canManage={canManageSagDocuments}
               canDelete={canDeleteSagDocuments}
               onPreview={document => setSagPreviewDocument(document)}
@@ -9121,8 +9209,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
               onDelete={handleDeleteSagDocument}
               onCorrection={handleSagCorrection}
               indicators={sagLetterIndicators}
-              onSyncLedger={handleSyncSagLedger}
-              pendingLedgerCount={pendingSagLedgerCount}
+              onSyncLedger={canViewAllOrganizationRecords ? handleSyncSagLedger : undefined}
+              pendingLedgerCount={canViewAllOrganizationRecords ? pendingSagLedgerCount : 0}
               onImportExternal={handleImportExternalSagDocuments}
               onOpenAttachment={handleOpenSagAttachment}
               onOpenSettings={() => setIsSagLetterheadOpen(true)}
@@ -9131,18 +9219,18 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
 
           {/* TAB: ASSET RECORD / PENGURUSAN EMAS & INVENTORI */}
           {activeTab === 'assets' && (() => {
-            const totalGoldGrams = visibleAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
-            const edtAssets = visibleAssets.filter(a => a.status === 'EDT');
-            const edrAssets = visibleAssets.filter(a => a.status === 'Dalam Ar-Rahnu');
+            const totalGoldGrams = viewableAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
+            const edtAssets = viewableAssets.filter(a => a.status === 'EDT');
+            const edrAssets = viewableAssets.filter(a => a.status === 'Dalam Ar-Rahnu');
             const edtWeight = edtAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
             const edrWeight = edrAssets.reduce((sum, a) => sum + (parseFloat(a.weight) || 0), 0);
             const edtPercentage = totalGoldGrams > 0 ? Math.round((edtWeight / totalGoldGrams) * 100) : 50;
             const edrPercentage = 100 - edtPercentage;
-            const totalPurchaseCost = visibleAssets.reduce((sum, a) => sum + (parseFloat(a.price) || 0), 0);
+            const totalPurchaseCost = viewableAssets.reduce((sum, a) => sum + (parseFloat(a.price) || 0), 0);
             const totalEstimatedMarketValue = totalGoldGrams * currentGoldPrice;
             const paperGainLoss = totalEstimatedMarketValue - totalPurchaseCost;
 
-            const filteredAssetList = visibleAssets.filter(asset => {
+            const filteredAssetList = viewableAssets.filter(asset => {
               if (assetSearchQuery.trim()) {
                 const q = assetSearchQuery.toLowerCase().trim();
                 const codeMatch = (asset.code || '').toLowerCase().includes(q);
@@ -9238,7 +9326,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                       </div>
                     </div>
                     <p className="mt-3 text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">
-                      {totalGoldGrams}g <span className="text-sm font-semibold text-slate-500">({visibleAssets.length} unit)</span>
+                      {totalGoldGrams}g <span className="text-sm font-semibold text-slate-500">({viewableAssets.length} unit)</span>
                     </p>
                     <div className="mt-2 flex items-center justify-between text-xs text-slate-500 font-medium">
                       <span>EDT: <strong className="text-emerald-700">{edtWeight}g</strong> ({edtPercentage}%)</span>
@@ -9494,11 +9582,11 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                             return (
                               <tr
                                 key={asset.id}
-                                onClick={() => setViewingAssetRecord(asset)}
+                                onClick={() => openAssetDetail(asset)}
                                 onKeyDown={event => {
                                   if (event.key === 'Enter' || event.key === ' ') {
                                     event.preventDefault();
-                                    setViewingAssetRecord(asset);
+                                    openAssetDetail(asset);
                                   }
                                 }}
                                 tabIndex={0}
@@ -9609,7 +9697,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                           {paginatedAssetList.length === 0 && (
                             <tr>
                               <td colSpan={10} className="p-8 text-center text-slate-400">
-                                {visibleAssets.length === 0
+                                {viewableAssets.length === 0
                                   ? 'Tiada rekod aset didaftarkan. Tekan "Daftar Aset Emas" untuk bermula.'
                                   : 'Tiada aset emas sepadan dengan tapisan yang dipilih.'}
                               </td>
@@ -9660,7 +9748,7 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
                         return (
                           <div
                             key={asset.id}
-                            onClick={() => setViewingAssetRecord(asset)}
+                            onClick={() => openAssetDetail(asset)}
                             className="cursor-pointer rounded-3xl border border-slate-200/90 bg-white p-5 shadow-sm hover:shadow-md transition-all flex flex-col justify-between"
                           >
                             <div>
@@ -11251,8 +11339,8 @@ NOTIFY pgrst, 'reload schema';`}</code></pre>
           members={sagMemberOptions}
           letterhead={sagLetterhead}
           existingNumbers={sagDocuments.filter(document => !document.deletedAt).map(document => document.documentNo)}
-          sagDocuments={sagDocuments}
-          assets={visibleAssets}
+          sagDocuments={visibleSagDocuments}
+          assets={viewableAssets}
           resolveTransactionAssets={resolveTransactionAssets}
           loadMemberProfile={loadSagMemberProfile}
           acceptanceActor={recordActor}

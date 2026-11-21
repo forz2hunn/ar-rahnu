@@ -24,6 +24,7 @@ import {
   X
 } from 'lucide-react';
 import {
+  SAG_DEFAULT_PAYMENT_TERM_MONTHS,
   SAG_PLEDGE_TYPES,
   SAG_STATUS_OPTIONS,
   formatSagDate,
@@ -47,6 +48,10 @@ const PAGE_SIZE = 10;
 const MAX_EXTERNAL_IMPORT_FILES = 10;
 const MAX_EXTERNAL_IMPORT_FILE_SIZE = 50 * 1024 * 1024;
 
+/** Cap jari set fail, digunakan untuk mengesan pertukaran sumber imbasan. */
+const filesFingerprint = (files: File[]) =>
+  files.map(file => `${file.name}:${file.size}:${file.lastModified}`).join('|');
+
 /** Baris draf Keterangan Marhun dalam modal import (nilai sebagai teks input). */
 type MarhunRowDraft = {
   id: string;
@@ -55,6 +60,40 @@ type MarhunRowDraft = {
   karat: string;
   weight: string;
   marhunValue: string;
+};
+
+/** Nilai terbitan imbasan (bukan input pengguna) untuk semakan dalam modal. */
+type SagImportDerived = {
+  feeBasis: '' | 'nilaiMarhun';
+  feeRate: number | null;
+  previousRedemption: number | null;
+  /** Bulan jadual surat yang digunakan untuk menerbitkan kadar upah. */
+  rateBasisMonths: number | null;
+  accountNo: string;
+  poBox: string;
+  profitAmount: number | null;
+  commodityCertificateNo: string;
+  profitPaymentAmount: number | null;
+  profitPaymentMonths: number | null;
+  memberPhone: string;
+  memberAddress: string;
+  heirName: string;
+};
+
+const EMPTY_DERIVED: SagImportDerived = {
+  feeBasis: '',
+  feeRate: null,
+  previousRedemption: null,
+  rateBasisMonths: null,
+  accountNo: '',
+  poBox: '',
+  profitAmount: null,
+  commodityCertificateNo: '',
+  profitPaymentAmount: null,
+  profitPaymentMonths: null,
+  memberPhone: '',
+  memberAddress: '',
+  heirName: ''
 };
 
 /** Tindakan susulan lejar yang boleh dimulakan terus daripada surat. */
@@ -779,12 +818,16 @@ export function SagExternalImportModal({
     maturityDate: '',
     marhunValue: '',
     financingAmount: '',
+    /** Tempoh upah simpan (bulan) yang dicaj, bukan jumlah tempoh penuh surat. */
+    paymentTermMonths: String(SAG_DEFAULT_PAYMENT_TERM_MONTHS),
     remarks: ''
   });
   const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState('');
   const [isSaving, setIsSaving] = useState(false);
   const analyseRunRef = useRef(0);
+  /** Set fail yang menghasilkan data borang semasa; berubah = data perlu dibuang. */
+  const scannedSourcesRef = useRef('');
   const [scan, setScan] = useState({
     status: 'idle' as 'idle' | 'running' | 'done' | 'error',
     message: '',
@@ -796,21 +839,7 @@ export function SagExternalImportModal({
     notes: [] as string[],
     rawText: ''
   });
-  const [derived, setDerived] = useState({
-    feeBasis: '' as '' | 'nilaiMarhun',
-    feeRate: null as number | null,
-    previousRedemption: null as number | null,
-    paymentTermMonths: null as number | null,
-    accountNo: '',
-    poBox: '',
-    profitAmount: null as number | null,
-    commodityCertificateNo: '',
-    profitPaymentAmount: null as number | null,
-    profitPaymentMonths: null as number | null,
-    memberPhone: '',
-    memberAddress: '',
-    heirName: ''
-  });
+  const [derived, setDerived] = useState<SagImportDerived>(EMPTY_DERIVED);
   const [marhunRows, setMarhunRows] = useState<MarhunRowDraft[]>([]);
 
   useEffect(() => {
@@ -854,6 +883,12 @@ export function SagExternalImportModal({
     if (fields.pledgeType && (SAG_PLEDGE_TYPES as string[]).includes(fields.pledgeType)) {
       patch.pledgeType = fields.pledgeType;
     }
+    // "Tempoh" pada surat ialah tempoh upah simpan yang dicaj (lazimnya 6 bulan
+    // satu period), bukan jumlah tempoh penuh gadaian. Nilai ini menentukan
+    // Jumlah Upah pada surat, jadi ia mesti dibawa masuk ke rekod.
+    if (typeof fields.paymentTermMonths === 'number' && fields.paymentTermMonths > 0) {
+      patch.paymentTermMonths = String(Math.max(1, Math.min(24, Math.round(fields.paymentTermMonths))));
+    }
     if (typeof fields.marhunValue === 'number' && fields.marhunValue > 0) {
       patch.marhunValue = fields.marhunValue.toFixed(2);
     }
@@ -864,6 +899,24 @@ export function SagExternalImportModal({
   };
 
   /**
+   * Kosongkan medan yang diisi oleh imbasan. Dipanggil apabila set fail bertukar
+   * supaya nilai surat lama tidak kekal bersama data surat baharu (contoh nilai
+   * marhun surat A terbawa ke surat B yang tidak menyatakan nilai itu).
+   */
+  const resetScannedFields = (): Partial<typeof form> => ({
+    institutionName: '',
+    documentNo: '',
+    memberName: '',
+    memberIcNumber: '',
+    financingDate: '',
+    maturityDate: '',
+    pledgeType: 'Pajakan Asal',
+    marhunValue: '',
+    financingAmount: '',
+    paymentTermMonths: String(SAG_DEFAULT_PAYMENT_TERM_MONTHS)
+  });
+
+  /**
    * Baca fail surat (lapisan teks PDF atau OCR) dan isi medan borang secara
    * automatik. Semua nilai tetap boleh disemak/diubah sebelum diimport.
    */
@@ -871,6 +924,10 @@ export function SagExternalImportModal({
     if (!targetFiles.length) return;
     const runId = analyseRunRef.current + 1;
     analyseRunRef.current = runId;
+    const fingerprint = filesFingerprint(targetFiles);
+    // Fail berbeza bermaksud data borang sedia ada datang daripada surat lain
+    // dan mesti dibuang sebelum bacaan baharu dipetakan.
+    const isNewSources = scannedSourcesRef.current !== fingerprint;
     setScan({ status: 'running', message: 'Menyediakan pembacaan surat...', progress: 0, method: '', matchedLabels: [], missingLabels: [], confidence: 0, notes: [], rawText: '' });
     try {
       const extraction = await extractSagImportText(targetFiles, (message, progress) => {
@@ -884,13 +941,17 @@ export function SagExternalImportModal({
       });
       if (analyseRunRef.current !== runId) return;
       const parsed = parseSagImportText(extraction.text);
-      const patch = buildFormPatch(parsed);
+      const patch: Partial<typeof form> = {
+        ...(isNewSources ? resetScannedFields() : {}),
+        ...buildFormPatch(parsed)
+      };
       if (Object.keys(patch).length) update(patch);
+      scannedSourcesRef.current = fingerprint;
       setDerived({
         feeBasis: parsed.fields.feeBasis || '',
         feeRate: parsed.fields.feeRate ?? null,
         previousRedemption: parsed.fields.previousRedemption ?? null,
-        paymentTermMonths: parsed.fields.scheduleMonths ?? parsed.fields.paymentTermMonths ?? null,
+        rateBasisMonths: parsed.fields.scheduleMonths ?? parsed.fields.paymentTermMonths ?? null,
         accountNo: parsed.fields.accountNo || '',
         poBox: parsed.fields.poBox || '',
         profitAmount: parsed.fields.profitAmount ?? null,
@@ -915,7 +976,8 @@ export function SagExternalImportModal({
         !parsed.fields.financingDate && 'Tarikh pembiayaan',
         !parsed.fields.maturityDate && 'Tarikh matang',
         !parsed.fields.marhunValue && 'Nilai marhun',
-        !parsed.fields.financingAmount && 'Jumlah pembiayaan'
+        !parsed.fields.financingAmount && 'Jumlah pembiayaan',
+        !parsed.fields.paymentTermMonths && 'Tempoh upah simpan'
       ].filter(Boolean) as string[];
       setScan({
         status: 'done',
@@ -932,7 +994,12 @@ export function SagExternalImportModal({
       });
     } catch (scanError) {
       if (analyseRunRef.current !== runId) return;
-      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null, memberPhone: '', memberAddress: '', heirName: '' });
+      if (isNewSources) {
+        // Fail baharu gagal dibaca: buang sisa surat lama supaya tidak diimport.
+        update(resetScannedFields());
+        scannedSourcesRef.current = fingerprint;
+      }
+      setDerived(EMPTY_DERIVED);
       setMarhunRows([]);
       setScan({
         status: 'error',
@@ -953,10 +1020,18 @@ export function SagExternalImportModal({
     setFiles(nextFiles);
     if (!nextFiles.length) {
       analyseRunRef.current += 1;
-      setDerived({ feeBasis: '', feeRate: null, previousRedemption: null, paymentTermMonths: null, accountNo: '', poBox: '', profitAmount: null, commodityCertificateNo: '', profitPaymentAmount: null, profitPaymentMonths: null, memberPhone: '', memberAddress: '', heirName: '' });
+      scannedSourcesRef.current = '';
+      // Tiada lagi fail: buang semua nilai yang datang daripada imbasan.
+      update(resetScannedFields());
+      setDerived(EMPTY_DERIVED);
       setMarhunRows([]);
       setScan({ status: 'idle', message: '', progress: null, method: '', matchedLabels: [], missingLabels: [], confidence: 0, notes: [], rawText: '' });
+      return;
     }
+    // Set fail berubah: baca semula fail yang tinggal supaya data borang
+    // sepadan dengan fail yang benar-benar dilampirkan (imbasan lama dibatalkan
+    // melalui runId, dan medan imbasan direset kerana cap jari fail berubah).
+    void runScan(nextFiles);
   };
 
   const handleFileSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1003,6 +1078,11 @@ export function SagExternalImportModal({
     }
     if (!files.length) {
       setError('Sekurang-kurangnya satu fail salinan surat (PDF/imej) diperlukan.');
+      return;
+    }
+    const paymentTermMonths = Math.round(Number(form.paymentTermMonths));
+    if (!(paymentTermMonths >= 1 && paymentTermMonths <= 24)) {
+      setError('Tempoh upah simpan mestilah antara 1 dan 24 bulan.');
       return;
     }
     const documentNo = form.documentNo.trim().toUpperCase();
@@ -1074,6 +1154,7 @@ export function SagExternalImportModal({
         pledgeType: form.pledgeType,
         marhunValue,
         financingAmount,
+        paymentTermMonths,
         remarks: form.remarks.trim(),
         files,
         feeBasis: derived.feeBasis || undefined,
@@ -1135,6 +1216,200 @@ export function SagExternalImportModal({
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4 custom-scrollbar sm:px-6">
           {error && <p role="alert" className="rounded-lg bg-rose-50 p-3 text-sm font-semibold text-rose-700">{error}</p>}
+
+          <div className="space-y-2 rounded-xl border border-dashed border-sky-300 bg-sky-50/60 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-wide text-sky-900">Fail Salinan Surat</p>
+                <p className="text-[11px] font-medium text-sky-800/80">
+                  PDF atau imej imbasan. Maksimum {MAX_EXTERNAL_IMPORT_FILES} fail, sehingga 50 MB setiap fail.
+                  Data surat dibaca automatik (teks PDF/OCR) untuk mengisi borang.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                {files.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => void runScan(files)}
+                    disabled={scan.status === 'running' || isSaving}
+                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-300 bg-cyan-50 px-3 py-2 text-xs font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50"
+                  >
+                    <ScanText size={15} />
+                    <span>{scan.status === 'running' ? 'Membaca...' : 'Baca & Isi Automatik'}</span>
+                  </button>
+                )}
+                <label className={`inline-flex cursor-pointer items-center gap-2 rounded-xl border border-sky-300 bg-white px-3 py-2 text-xs font-bold text-sky-700 transition-colors hover:bg-sky-100 ${files.length >= MAX_EXTERNAL_IMPORT_FILES ? 'pointer-events-none opacity-50' : ''}`}>
+                  <UploadCloud size={15} />
+                  <span>Pilih Fail</span>
+                  <input
+                    type="file"
+                    accept="application/pdf,image/*"
+                    multiple
+                    disabled={files.length >= MAX_EXTERNAL_IMPORT_FILES || isSaving}
+                    onChange={handleFileSelection}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            </div>
+            {files.length === 0 ? (
+              <p className="text-[11px] font-semibold text-sky-800/70">Belum ada fail dipilih.</p>
+            ) : (
+              <ul className="space-y-1.5">
+                {files.map((file, index) => (
+                  <li
+                    key={`${file.name}-${file.size}-${index}`}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-sky-200 bg-white px-3 py-2"
+                  >
+                    <span className="min-w-0 break-all text-xs font-semibold text-slate-700">
+                      <Paperclip size={12} className="mr-1 inline text-sky-600" />
+                      {file.name}
+                      <span className="ml-1 font-mono text-[10px] text-slate-400">({Math.max(1, Math.round(file.size / 1024))} KB)</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveFile(index)}
+                      disabled={isSaving}
+                      className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
+                      aria-label={`Buang fail ${file.name}`}
+                    >
+                      <X size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="space-y-2 rounded-xl border border-cyan-200 bg-cyan-50/50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-bold uppercase tracking-wide text-cyan-900">Keterangan Marhun</p>
+                <p className="text-[11px] font-medium text-cyan-800/80">
+                  Semak setiap item supaya sama dengan surat asal. Boleh tambah atau betulkan jika bacaan OCR tidak tepat.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={addMarhunRow}
+                disabled={isSaving}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3 py-1.5 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50"
+              >
+                <Plus size={13} /> Tambah Item
+              </button>
+            </div>
+            {marhunRows.length === 0 ? (
+              <p className="text-[11px] font-semibold text-cyan-900/70">
+                Tiada item dikesan. Tekan “Tambah Item” untuk masukkan secara manual.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[680px] border-collapse text-xs">
+                  <thead className="text-[10px] uppercase tracking-wide text-cyan-900/70">
+                    <tr>
+                      <th className="px-1 py-1 text-left font-bold">Bil</th>
+                      <th className="px-1 py-1 text-left font-bold">Keterangan Marhun</th>
+                      <th className="px-1 py-1 text-right font-bold">Kuantiti</th>
+                      <th className="px-1 py-1 text-left font-bold">Karat</th>
+                      <th className="px-1 py-1 text-right font-bold">Berat (g)</th>
+                      <th className="px-1 py-1 text-right font-bold">Nilai Marhun (RM)</th>
+                      <th className="px-1 py-1" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {marhunRows.map((row, index) => (
+                      <tr key={row.id} className="border-t border-cyan-200/60">
+                        <td className="px-1 py-1 font-bold text-slate-600">{index + 1}</td>
+                        <td className="px-1 py-1">
+                          <input
+                            value={row.description}
+                            onChange={event => updateMarhunRow(row.id, { description: event.target.value })}
+                            className={`${inputClass} py-1 text-xs`}
+                            placeholder="cth. BK Cincin (UA) (D15)"
+                          />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={row.quantity}
+                            onChange={event => updateMarhunRow(row.id, { quantity: event.target.value })}
+                            className={`${inputClass} w-20 py-1 text-right font-mono text-xs`}
+                          />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input
+                            value={row.karat}
+                            onChange={event => updateMarhunRow(row.id, { karat: event.target.value.toUpperCase() })}
+                            className={`${inputClass} w-20 py-1 font-mono text-xs`}
+                            placeholder="18.0K"
+                          />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.weight}
+                            onChange={event => updateMarhunRow(row.id, { weight: event.target.value })}
+                            className={`${inputClass} w-24 py-1 text-right font-mono text-xs`}
+                          />
+                        </td>
+                        <td className="px-1 py-1">
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={row.marhunValue}
+                            onChange={event => updateMarhunRow(row.id, { marhunValue: event.target.value })}
+                            className={`${inputClass} w-28 py-1 text-right font-mono text-xs`}
+                          />
+                        </td>
+                        <td className="px-1 py-1 text-right">
+                          <button
+                            type="button"
+                            onClick={() => removeMarhunRow(row.id)}
+                            disabled={isSaving}
+                            className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
+                            aria-label={`Buang item ${index + 1}`}
+                          >
+                            <X size={14} />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="border-t border-cyan-300 font-bold text-cyan-950">
+                      <td colSpan={4} className="px-1 py-1.5 text-right">Jumlah</td>
+                      <td className="px-1 py-1.5 text-right">
+                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Berat (g)</span>
+                        <span className="font-mono">{marhunRowTotals.weight.toFixed(2)}</span>
+                      </td>
+                      <td className="px-1 py-1.5 text-right">
+                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Nilai (RM)</span>
+                        <span className="font-mono">{marhunRowTotals.value.toFixed(2)}</span>
+                      </td>
+                      <td />
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {marhunRowTotals.value > 0 && Math.abs(marhunRowTotals.value - (Number(form.marhunValue) || 0)) > 0.05 && (
+              <p className="rounded-lg border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-900">
+                Jumlah item RM {marhunRowTotals.value.toFixed(2)} berbeza dengan Nilai Marhun borang RM {(Number(form.marhunValue) || 0).toFixed(2)}.{' '}
+                <button
+                  type="button"
+                  onClick={() => update({ marhunValue: marhunRowTotals.value.toFixed(2) })}
+                  disabled={isSaving}
+                  className="font-bold underline disabled:opacity-50"
+                >
+                  Guna jumlah item
+                </button>{' '}
+                atau betulkan item supaya sama dengan surat asal.
+              </p>
+            )}
+          </div>
 
           {scan.status !== 'idle' && (
             <div className={`rounded-xl border p-3 text-xs ${scan.status === 'error'
@@ -1209,7 +1484,8 @@ export function SagExternalImportModal({
                       {derived.feeRate !== null && (
                         <span>
                           Asas Upah Simpan (Akad Ijarah): <b>Nilai Marhun</b> · Kadar <b>{derived.feeRate}% sebulan</b>
-                          {derived.paymentTermMonths ? ` (${derived.paymentTermMonths} bulan)` : ''}.
+                          {derived.rateBasisMonths ? ` (dikira daripada ${derived.rateBasisMonths} bulan jadual surat)` : ''}.
+                          {' '}Tempoh yang dicaj pada rekod: <b>{form.paymentTermMonths || '?'} bulan</b>.
                         </span>
                       )}
                       {derived.previousRedemption !== null && (
@@ -1347,6 +1623,25 @@ export function SagExternalImportModal({
                 className={`${inputClass} font-mono`}
               />
             </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <label className={labelClass} htmlFor="sag-ext-term">Tempoh Upah Simpan (bulan)</label>
+              <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                <input
+                  id="sag-ext-term"
+                  type="number"
+                  min="1"
+                  max="24"
+                  step="1"
+                  value={form.paymentTermMonths}
+                  onChange={event => update({ paymentTermMonths: event.target.value })}
+                  className={`${inputClass} font-mono sm:max-w-[9rem]`}
+                />
+                <p className="text-[11px] font-medium text-slate-500">
+                  Satu period upah yang dicaj pada surat (lalai {SAG_DEFAULT_PAYMENT_TERM_MONTHS} bulan).
+                  Jumlah upah = kadar % × nilai marhun × tempoh ini.
+                </p>
+              </div>
+            </div>
             <div className="space-y-1.5">
               <label className={labelClass} htmlFor="sag-ext-marhun">Nilai Marhun (RM)</label>
               <input
@@ -1384,200 +1679,6 @@ export function SagExternalImportModal({
                 className={`${inputClass} resize-y`}
               />
             </div>
-          </div>
-
-          <div className="space-y-2 rounded-xl border border-cyan-200 bg-cyan-50/50 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wide text-cyan-900">Keterangan Marhun</p>
-                <p className="text-[11px] font-medium text-cyan-800/80">
-                  Semak setiap item supaya sama dengan surat asal. Boleh tambah atau betulkan jika bacaan OCR tidak tepat.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={addMarhunRow}
-                disabled={isSaving}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-cyan-300 bg-white px-3 py-1.5 text-[11px] font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50"
-              >
-                <Plus size={13} /> Tambah Item
-              </button>
-            </div>
-            {marhunRows.length === 0 ? (
-              <p className="text-[11px] font-semibold text-cyan-900/70">
-                Tiada item dikesan. Tekan “Tambah Item” untuk masukkan secara manual.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[680px] border-collapse text-xs">
-                  <thead className="text-[10px] uppercase tracking-wide text-cyan-900/70">
-                    <tr>
-                      <th className="px-1 py-1 text-left font-bold">Bil</th>
-                      <th className="px-1 py-1 text-left font-bold">Keterangan Marhun</th>
-                      <th className="px-1 py-1 text-right font-bold">Kuantiti</th>
-                      <th className="px-1 py-1 text-left font-bold">Karat</th>
-                      <th className="px-1 py-1 text-right font-bold">Berat (g)</th>
-                      <th className="px-1 py-1 text-right font-bold">Nilai Marhun (RM)</th>
-                      <th className="px-1 py-1" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {marhunRows.map((row, index) => (
-                      <tr key={row.id} className="border-t border-cyan-200/60">
-                        <td className="px-1 py-1 font-bold text-slate-600">{index + 1}</td>
-                        <td className="px-1 py-1">
-                          <input
-                            value={row.description}
-                            onChange={event => updateMarhunRow(row.id, { description: event.target.value })}
-                            className={`${inputClass} py-1 text-xs`}
-                            placeholder="cth. BK Cincin (UA) (D15)"
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          <input
-                            type="number"
-                            min="1"
-                            step="1"
-                            value={row.quantity}
-                            onChange={event => updateMarhunRow(row.id, { quantity: event.target.value })}
-                            className={`${inputClass} w-20 py-1 text-right font-mono text-xs`}
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          <input
-                            value={row.karat}
-                            onChange={event => updateMarhunRow(row.id, { karat: event.target.value.toUpperCase() })}
-                            className={`${inputClass} w-20 py-1 font-mono text-xs`}
-                            placeholder="18.0K"
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={row.weight}
-                            onChange={event => updateMarhunRow(row.id, { weight: event.target.value })}
-                            className={`${inputClass} w-24 py-1 text-right font-mono text-xs`}
-                          />
-                        </td>
-                        <td className="px-1 py-1">
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            value={row.marhunValue}
-                            onChange={event => updateMarhunRow(row.id, { marhunValue: event.target.value })}
-                            className={`${inputClass} w-28 py-1 text-right font-mono text-xs`}
-                          />
-                        </td>
-                        <td className="px-1 py-1 text-right">
-                          <button
-                            type="button"
-                            onClick={() => removeMarhunRow(row.id)}
-                            disabled={isSaving}
-                            className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
-                            aria-label={`Buang item ${index + 1}`}
-                          >
-                            <X size={14} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    <tr className="border-t border-cyan-300 font-bold text-cyan-950">
-                      <td colSpan={4} className="px-1 py-1.5 text-right">Jumlah</td>
-                      <td className="px-1 py-1.5 text-right">
-                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Berat (g)</span>
-                        <span className="font-mono">{marhunRowTotals.weight.toFixed(2)}</span>
-                      </td>
-                      <td className="px-1 py-1.5 text-right">
-                        <span className="block text-[9px] font-bold uppercase tracking-wide text-cyan-700">Nilai (RM)</span>
-                        <span className="font-mono">{marhunRowTotals.value.toFixed(2)}</span>
-                      </td>
-                      <td />
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            )}
-            {marhunRowTotals.value > 0 && Math.abs(marhunRowTotals.value - (Number(form.marhunValue) || 0)) > 0.05 && (
-              <p className="rounded-lg border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] font-semibold text-amber-900">
-                Jumlah item RM {marhunRowTotals.value.toFixed(2)} berbeza dengan Nilai Marhun borang RM {(Number(form.marhunValue) || 0).toFixed(2)}.{' '}
-                <button
-                  type="button"
-                  onClick={() => update({ marhunValue: marhunRowTotals.value.toFixed(2) })}
-                  disabled={isSaving}
-                  className="font-bold underline disabled:opacity-50"
-                >
-                  Guna jumlah item
-                </button>{' '}
-                atau betulkan item supaya sama dengan surat asal.
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2 rounded-xl border border-dashed border-sky-300 bg-sky-50/60 p-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p className="text-xs font-bold uppercase tracking-wide text-sky-900">Fail Salinan Surat</p>
-                <p className="text-[11px] font-medium text-sky-800/80">
-                  PDF atau imej imbasan. Maksimum {MAX_EXTERNAL_IMPORT_FILES} fail, sehingga 50 MB setiap fail.
-                  Data surat dibaca automatik (teks PDF/OCR) untuk mengisi borang.
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                {files.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => void runScan(files)}
-                    disabled={scan.status === 'running' || isSaving}
-                    className="inline-flex items-center gap-2 rounded-xl border border-cyan-300 bg-cyan-50 px-3 py-2 text-xs font-bold text-cyan-800 transition-colors hover:bg-cyan-100 disabled:opacity-50"
-                  >
-                    <ScanText size={15} />
-                    <span>{scan.status === 'running' ? 'Membaca...' : 'Baca & Isi Automatik'}</span>
-                  </button>
-                )}
-                <label className={`inline-flex cursor-pointer items-center gap-2 rounded-xl border border-sky-300 bg-white px-3 py-2 text-xs font-bold text-sky-700 transition-colors hover:bg-sky-100 ${files.length >= MAX_EXTERNAL_IMPORT_FILES ? 'pointer-events-none opacity-50' : ''}`}>
-                  <UploadCloud size={15} />
-                  <span>Pilih Fail</span>
-                  <input
-                    type="file"
-                    accept="application/pdf,image/*"
-                    multiple
-                    disabled={files.length >= MAX_EXTERNAL_IMPORT_FILES || isSaving}
-                    onChange={handleFileSelection}
-                    className="hidden"
-                  />
-                </label>
-              </div>
-            </div>
-            {files.length === 0 ? (
-              <p className="text-[11px] font-semibold text-sky-800/70">Belum ada fail dipilih.</p>
-            ) : (
-              <ul className="space-y-1.5">
-                {files.map((file, index) => (
-                  <li
-                    key={`${file.name}-${file.size}-${index}`}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-sky-200 bg-white px-3 py-2"
-                  >
-                    <span className="min-w-0 break-all text-xs font-semibold text-slate-700">
-                      <Paperclip size={12} className="mr-1 inline text-sky-600" />
-                      {file.name}
-                      <span className="ml-1 font-mono text-[10px] text-slate-400">({Math.max(1, Math.round(file.size / 1024))} KB)</span>
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveFile(index)}
-                      disabled={isSaving}
-                      className="rounded-lg p-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
-                      aria-label={`Buang fail ${file.name}`}
-                    >
-                      <X size={14} />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
           </div>
         </div>
 
